@@ -1,6 +1,6 @@
 {
   "schema": "flowio.firmware-manifest.v1",
-  "generated_at": "2026-10-30T23:33:23+01:00",
+  "generated_at": "2026-10-30T23:35:25+01:00",
   "release": "2026.10.30",
   "artifacts": {
     "nextion": [
@@ -128,7 +128,7 @@
         "title": "spiffs-supervisor",
         "label": "spiffs-supervisor",
         "version": "1.0.3",
-        "build_date": "2026-10-30T23:29:09+01:00",
+        "build_date": "2026-10-30T23:35:25+01:00",
         "target": "spiffs",
         "path": "spiffs-supervisor-1.0.3.bin",
         "kind": "esp32-spiffs",
