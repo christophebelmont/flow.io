@@ -16,6 +16,7 @@
 #include "Core/Services/Services.h"
 #include "Domain/Pool/PoolBindings.h"
 #include "Domain/Pool/PoolDefaults.h"
+#include "WinterFiltration.h"
 
 /** @brief Event ids owned by PoolLogicModule. */
 constexpr uint16_t POOLLOGIC_EVENT_DAILY_RECALC = 0x2101;
@@ -128,6 +129,9 @@ private:
     // Modes
     bool autoMode_ = true;
     bool winterMode_ = false;
+    uint16_t winterDurationMin_ = 15;
+    uint8_t winterIntervalHours_ = 1;
+    WinterFiltrationCycle winterCycle_;
     bool phAutoMode_ = false;
     bool orpAutoMode_ = false;
     bool heaterAutoMode_ = false;
@@ -248,6 +252,11 @@ private:
                                             &filtrationCalcStart_, ConfigPersistence::Persistent, 0};
     ConfigVariable<uint8_t,0> calcStopVar_{NVS_KEY(NvsKeys::PoolLogic::FiltrationCalcStop), "filtr_stop_clc", "poollogic/filtration", ConfigType::UInt8,
                                            &filtrationCalcStop_, ConfigPersistence::Persistent, 0};
+
+    ConfigVariable<uint16_t,0> winterDurationVar_{NVS_KEY(NvsKeys::PoolLogic::WinterDuration), "winter_duration_min", "poollogic/filtration", ConfigType::UInt16,
+                                                &winterDurationMin_, ConfigPersistence::Persistent, 0};
+    ConfigVariable<uint8_t,0> winterIntervalVar_{NVS_KEY(NvsKeys::PoolLogic::WinterInterval), "winter_interval_h", "poollogic/filtration", ConfigType::UInt8,
+                                              &winterIntervalHours_, ConfigPersistence::Persistent, 0};
 
     ConfigVariable<IoId,0> phIdVar_{NVS_KEY(NvsKeys::PoolLogic::PhIoId), "ph_io_id", "poollogic/sensors", ConfigType::UInt16,
                                        &phIoId_, ConfigPersistence::Persistent, 0};

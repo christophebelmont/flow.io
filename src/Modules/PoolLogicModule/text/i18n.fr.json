@@ -54,8 +54,8 @@
     "cfgdocs.poollogic.mode.ph_auto_mode.label": "Mode auto pH",
     "cfgdocs.poollogic.mode.ph_dose_plus.help": "Si activé, la pompe pH injecte du pH+ (sinon pH-).",
     "cfgdocs.poollogic.mode.ph_dose_plus.label": "Injection pH+",
-    "cfgdocs.poollogic.mode.winter_mode.help": "Force le fonctionnement en mode hiver (anti-gel).",
-    "cfgdocs.poollogic.mode.winter_mode.label": "Mode hiver force",
+    "cfgdocs.poollogic.mode.winter_mode.help": "En mode automatique, remplace la plage quotidienne par des cycles périodiques. La protection hors gel reste prioritaire.",
+    "cfgdocs.poollogic.mode.winter_mode.label": "Hivernage actif",
     "cfgdocs.poollogic.pid.freeze_hold_t.help": "Temperature de maintien pour la protection hors gel.",
     "cfgdocs.poollogic.pid.freeze_hold_t.label": "Seuil maintien hors gel (C)",
     "cfgdocs.poollogic.pid.heater_setpoint.help": "Température cible eau pour la régulation du chauffage.",
@@ -162,6 +162,10 @@
     "runtimeui.poollogic.alarms.flag03.label": "Bidon chlore bas",
     "runtimeui.poollogic.alarms.flag04.label": "Pompe pH durée max atteinte",
     "runtimeui.poollogic.alarms.flag05.label": "Pompe Orp durée max atteinte",
-    "runtimeui.poollogic.alarms.flag06.label": "Niveau d'eau bas dans le bassin"
+    "runtimeui.poollogic.alarms.flag06.label": "Niveau d'eau bas dans le bassin",
+    "cfgdocs.poollogic.filtration.winter_duration_min.label": "Durée filtration hivernage (min)",
+    "cfgdocs.poollogic.filtration.winter_duration_min.help": "Durée de marche par cycle : 15 min par défaut, minimum 1 min, limitée à la période. Le hors gel peut prolonger la filtration.",
+    "cfgdocs.poollogic.filtration.winter_interval_h.label": "Intervalle hivernage (h)",
+    "cfgdocs.poollogic.filtration.winter_interval_h.help": "Intervalle entre deux démarrages : de 1 à 24 h, 1 h par défaut. Un cycle démarre dès l’activation du mode hiver en automatique."
   }
 }

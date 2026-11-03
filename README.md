@@ -45,8 +45,10 @@ L'interface locale tactile offre une vue synthétique des mesures, états et com
 - calcul automatique de la fenêtre de filtration selon la température d'eau
 - priorisation et interlock des actionneurs pour une sécurité totale
 - gestion des plannings (jour/semaine/mois) persistante
-- modes d'exploitation (auto, manuel, protection gel)
+- modes d'exploitation (auto, manuel, hivernage actif avec protection gel)
 - supervision alarmes (pression, états critiques)
+
+Le mode **hivernage actif** fait fonctionner la filtration **15 minutes toutes les heures** par défaut (15 minutes de marche, puis 45 minutes d'arrêt). Pour l'utiliser, activer le mode automatique et **Hivernage actif** dans la configuration des modes. Dans la configuration filtration, **Durée filtration hivernage (min)** et **Intervalle hivernage (h)** permettent de régler la durée de marche et l'intervalle entre deux démarrages. Ces réglages sont sauvegardés ; le premier cycle démarre dès l'activation et la protection hors gel peut prolonger la marche. [Détails du mode hivernage](docs/modules/PoolLogicModule.md#hivernage-actif).
 
 ## Principe de régulation PID (pH / ORP)
 

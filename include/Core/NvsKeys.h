@@ -336,6 +336,8 @@ constexpr char ServerAddr[] = "ic_srv_adr"; // I2C cfg server own slave address.
 namespace PoolLogic {
 constexpr char Enabled[] = "pl_en"; // Pool logic module persisted key for field `pl_en`.
 constexpr char AutoMode[] = "pl_auto"; // Pool logic module persisted key for field `pl_auto`.
+constexpr char WinterDuration[] = "pl_wdur";
+constexpr char WinterInterval[] = "pl_wint_h";
 constexpr char WinterMode[] = "pl_wint"; // Pool logic module persisted key for field `pl_wint`.
 constexpr char PhAutoMode[] = "pl_pha"; // Pool logic module persisted key for field `pl_pha`.
 constexpr char OrpAutoMode[] = "pl_orpa"; // Pool logic module persisted key for field `pl_orpa`.

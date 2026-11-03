@@ -119,6 +119,8 @@ void PoolLogicModule::init(ConfigStore& cfg, ServiceRegistry& services)
     stopMaxVar_.moduleName = kCfgModuleFiltration;
     calcStartVar_.moduleName = kCfgModuleFiltration;
     calcStopVar_.moduleName = kCfgModuleFiltration;
+    winterDurationVar_.moduleName = kCfgModuleFiltration;
+    winterIntervalVar_.moduleName = kCfgModuleFiltration;
 
     phIdVar_.moduleName = kCfgModuleSensors;
     orpIdVar_.moduleName = kCfgModuleSensors;
@@ -182,6 +184,8 @@ void PoolLogicModule::init(ConfigStore& cfg, ServiceRegistry& services)
     cfg.registerVar(stopMaxVar_, kCfgModuleId, kCfgBranchFiltration);
     cfg.registerVar(calcStartVar_, kCfgModuleId, kCfgBranchFiltration);
     cfg.registerVar(calcStopVar_, kCfgModuleId, kCfgBranchFiltration);
+    cfg.registerVar(winterDurationVar_, kCfgModuleId, kCfgBranchFiltration);
+    cfg.registerVar(winterIntervalVar_, kCfgModuleId, kCfgBranchFiltration);
 
     cfg.registerVar(phIdVar_, kCfgModuleId, kCfgBranchSensors);
     cfg.registerVar(orpIdVar_, kCfgModuleId, kCfgBranchSensors);
@@ -876,6 +880,12 @@ void PoolLogicModule::onEvent_(const Event& e)
         const ConfigChangedPayload* p = (const ConfigChangedPayload*)e.payload;
         if (p->moduleId == (uint8_t)ConfigModuleId::PoolLogic &&
             p->localBranchId == kCfgBranchFiltration) {
+            if (strcmp(p->nvsKey, NvsKeys::PoolLogic::WinterDuration) == 0 ||
+                strcmp(p->nvsKey, NvsKeys::PoolLogic::WinterInterval) == 0) {
+                // Periodic settings take effect in the loop without recalculating
+                // the unrelated daily temperature-based window.
+                return;
+            }
             if (strcmp(p->nvsKey, NvsKeys::PoolLogic::FiltrationCalcStart) == 0 ||
                 strcmp(p->nvsKey, NvsKeys::PoolLogic::FiltrationCalcStop) == 0) {
                 (void)applyFiltrationWindowSlot_(filtrationCalcStart_, filtrationCalcStop_);

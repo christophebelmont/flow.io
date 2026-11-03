@@ -1,14 +1,14 @@
 {
   "schema": "flowio.firmware-manifest.v1",
-  "generated_at": "2026-05-29T15:00:31+02:00",
-  "release": "2026.05.29",
+  "generated_at": "2026-10-30T23:35:25+01:00",
+  "release": "2026.10.30",
   "artifacts": {
     "nextion": [
       {
         "title": "Flowio_Enhanced_480x320",
         "label": "Flowio_Enhanced_480x320",
         "version": "6.0.0",
-        "build_date": "2026-05-22T15:49:49+02:00",
+        "build_date": "2026-10-30T22:44:11+01:00",
         "target": "nextion",
         "path": "Flowio_Enhanced_480x320-6.0.0.tft",
         "kind": "nextion-tft",
@@ -19,7 +19,7 @@
         "title": "Flowio_Intelligent_800x480",
         "label": "Flowio_Intelligent_800x480",
         "version": "6.0.0",
-        "build_date": "2026-05-22T15:49:49+02:00",
+        "build_date": "2026-10-30T22:44:11+01:00",
         "target": "nextion",
         "path": "Flowio_Intelligent_800x480-6.0.0.tft",
         "kind": "nextion-tft",
@@ -32,7 +32,7 @@
         "title": "esp32s3",
         "label": "esp32s3",
         "version": "1.0.2",
-        "build_date": "2026-05-29T13:00:39+02:00",
+        "build_date": "2026-10-30T22:44:11+01:00",
         "target": "esp32s3",
         "path": "esp32s3-1.0.2.bin",
         "kind": "esp32-firmware",
@@ -43,7 +43,7 @@
         "title": "esp32s3",
         "label": "esp32s3",
         "version": "1.0.3",
-        "build_date": "2026-05-29T15:00:31+02:00",
+        "build_date": "2026-10-30T22:44:11+01:00",
         "target": "esp32s3",
         "path": "esp32s3-1.0.3.bin",
         "kind": "esp32-firmware",
@@ -56,7 +56,7 @@
         "title": "esp32s3-spiffs",
         "label": "esp32s3-spiffs",
         "version": "1.0.2",
-        "build_date": "2026-05-29T12:59:53+02:00",
+        "build_date": "2026-10-30T22:44:11+01:00",
         "target": "spiffs",
         "path": "esp32s3-spiffs-1.0.2.bin",
         "kind": "esp32-spiffs",
@@ -67,7 +67,7 @@
         "title": "esp32s3-spiffs",
         "label": "esp32s3-spiffs",
         "version": "1.0.3",
-        "build_date": "2026-05-29T14:38:41+02:00",
+        "build_date": "2026-10-30T22:44:11+01:00",
         "target": "spiffs",
         "path": "esp32s3-spiffs-1.0.3.bin",
         "kind": "esp32-spiffs",
@@ -80,7 +80,7 @@
         "title": "flow-connect-display",
         "label": "flow-connect-display",
         "version": "0.7.1",
-        "build_date": "2026-05-29T12:37:05+02:00",
+        "build_date": "2026-10-30T22:44:11+01:00",
         "target": "flow-connect-display",
         "path": "flow-connect-display-0.7.1.bin",
         "kind": "esp32-firmware",
@@ -93,7 +93,7 @@
         "title": "flowio",
         "label": "flowio",
         "version": "1.0.2",
-        "build_date": "2026-05-29T11:35:29+02:00",
+        "build_date": "2026-10-30T22:44:11+01:00",
         "target": "flowio",
         "path": "flowio-1.0.2.bin",
         "kind": "esp32-firmware",
@@ -104,12 +104,12 @@
         "title": "flowio",
         "label": "flowio",
         "version": "1.0.3",
-        "build_date": "2026-05-29T14:51:05+02:00",
+        "build_date": "2026-10-30T22:44:20+01:00",
         "target": "flowio",
         "path": "flowio-1.0.3.bin",
         "kind": "esp32-firmware",
         "route": "/fwupdate/flowio",
-        "size": 1319280
+        "size": 1319680
       }
     ],
     "spiffs": [
@@ -117,9 +117,20 @@
         "title": "spiffs-supervisor",
         "label": "spiffs-supervisor",
         "version": "1.0.2",
-        "build_date": "2026-05-27T23:22:21+02:00",
+        "build_date": "2026-10-30T22:44:11+01:00",
         "target": "spiffs",
         "path": "spiffs-supervisor-1.0.2.bin",
+        "kind": "esp32-spiffs",
+        "route": "/fwupdate/spiffs",
+        "size": 974848
+      },
+      {
+        "title": "spiffs-supervisor",
+        "label": "spiffs-supervisor",
+        "version": "1.0.3",
+        "build_date": "2026-10-30T23:35:25+01:00",
+        "target": "spiffs",
+        "path": "spiffs-supervisor-1.0.3.bin",
         "kind": "esp32-spiffs",
         "route": "/fwupdate/spiffs",
         "size": 974848
@@ -130,12 +141,23 @@
         "title": "supervisor",
         "label": "supervisor",
         "version": "1.0.2",
-        "build_date": "2026-05-27T23:22:40+02:00",
+        "build_date": "2026-10-30T22:44:11+01:00",
         "target": "supervisor",
         "path": "supervisor-1.0.2.bin",
         "kind": "esp32-firmware",
         "route": "/fwupdate/supervisor",
         "size": 1441456
+      },
+      {
+        "title": "supervisor",
+        "label": "supervisor",
+        "version": "1.0.3",
+        "build_date": "2026-10-30T23:33:23+01:00",
+        "target": "supervisor",
+        "path": "supervisor-1.0.3.bin",
+        "kind": "esp32-firmware",
+        "route": "/fwupdate/supervisor",
+        "size": 1444688
       }
     ]
   }

@@ -39,6 +39,8 @@ static void poolLogicCfgDocsAnchor_(PoolLogicModule& self)
     self.stopMaxVar_.moduleName = kCfgModuleFiltration;
     self.calcStartVar_.moduleName = kCfgModuleFiltration;
     self.calcStopVar_.moduleName = kCfgModuleFiltration;
+    self.winterDurationVar_.moduleName = kCfgModuleFiltration;
+    self.winterIntervalVar_.moduleName = kCfgModuleFiltration;
 
     self.phIdVar_.moduleName = kCfgModuleSensors;
     self.orpIdVar_.moduleName = kCfgModuleSensors;

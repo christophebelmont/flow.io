@@ -55,8 +55,8 @@
     "cfgdocs.poollogic.mode.ph_auto_mode.label": "Auto mode pH",
     "cfgdocs.poollogic.mode.ph_dose_plus.help": "Si enabled, the pump pH injecte of pH+ (sinon pH-).",
     "cfgdocs.poollogic.mode.ph_dose_plus.label": "Injection pH+",
-    "cfgdocs.poollogic.mode.winter_mode.help": "Force the fonctionnement en mode hiver (anti-gel).",
-    "cfgdocs.poollogic.mode.winter_mode.label": "Mode hiver force",
+    "cfgdocs.poollogic.mode.winter_mode.help": "In automatic mode, replaces the daily window with periodic cycles. Freeze protection retains priority.",
+    "cfgdocs.poollogic.mode.winter_mode.label": "Active winter mode",
     "cfgdocs.poollogic.pid.freeze_hold_t.help": "Temperature de maintien for protection hors gel.",
     "cfgdocs.poollogic.pid.freeze_hold_t.label": "Seuil maintien hors gel (C)",
     "cfgdocs.poollogic.pid.heater_setpoint.help": "Temperature cible eau for régulation of heating.",
@@ -163,6 +163,10 @@
     "runtimeui.poollogic.alarms.flag03.label": "Chlorine Tank Low",
     "runtimeui.poollogic.alarms.flag04.label": "pH Pump Maximum Uptime Reached",
     "runtimeui.poollogic.alarms.flag05.label": "Orp Pump Maximum Uptime Reached",
-    "runtimeui.poollogic.alarms.flag06.label": "Pool water level low"
+    "runtimeui.poollogic.alarms.flag06.label": "Pool water level low",
+    "cfgdocs.poollogic.filtration.winter_duration_min.label": "Winter filtration duration (min)",
+    "cfgdocs.poollogic.filtration.winter_duration_min.help": "Run time per cycle: default 15 min, minimum 1 min, capped at the interval. Freeze protection can extend filtration.",
+    "cfgdocs.poollogic.filtration.winter_interval_h.label": "Winter filtration interval (h)",
+    "cfgdocs.poollogic.filtration.winter_interval_h.help": "Start-to-start interval: 1 to 24 h, default 1 h. A cycle starts immediately when winter mode is enabled in automatic mode."
   }
 }

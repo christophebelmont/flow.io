@@ -124,6 +124,28 @@ Persistance: `ConfigStore` + `NvsKeys::PoolLogic::*`
 - `filtr_start_clc` (calculé)
 - `filtr_stop_clc` (calculé)
 
+### Hivernage actif
+
+Activer `poollogic/mode/auto_mode` et `poollogic/mode/winter_mode`.
+En hiver, les cycles périodiques remplacent la fenêtre quotidienne calculée :
+
+- `poollogic/filtration/winter_duration_min` : durée de marche, **15 minutes** par défaut ; minimum effectif 1 minute, plafonnée à la période.
+- `poollogic/filtration/winter_interval_h` : intervalle **entre deux débuts de cycle**, **1 heure** par défaut, borné de 1 à 24 heures.
+
+Les réglages sont persistants et disponibles dans la configuration filtration.
+Avec les valeurs par défaut : 15 minutes ON, puis 45 minutes OFF.
+Le premier cycle commence immédiatement à l'activation en automatique ou après redémarrage.
+L'intervalle utilise une horloge monotone et fonctionne sans synchronisation NTP.
+Changer l'intervalle redémarre le cycle ; changer la durée s'applique au cycle en cours.
+Le mode manuel conserve le contrôle manuel de la pompe.
+
+Le hors gel reste prioritaire : sous `winter_start_t` (comparaison stricte, défaut −2 °C),
+la pompe démarre même entre deux cycles ; si elle tourne, elle reste active tant que
+la température d'air est inférieure ou égale à `freeze_hold_t` (défaut 2 °C).
+La fin des 15 minutes ou d'une chauffe ne peut pas interrompre cette demande.
+Sans mesure d'air valide, les cycles fonctionnent mais le hors gel ne peut pas être évalué.
+La sécurité pression reste prioritaire et peut arrêter la pompe.
+
 ### Bindings capteurs IO
 
 - `ph_io_id`

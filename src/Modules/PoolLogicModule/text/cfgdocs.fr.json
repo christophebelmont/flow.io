@@ -307,6 +307,18 @@
       "label_t": "cfgdocs.poollogic.sensors.wat_temp_io_id.label",
       "help_t": "cfgdocs.poollogic.sensors.wat_temp_io_id.help",
       "enum_set": "flowio_logical_input_analog"
+    },
+    "poollogic/filtration/winter_duration_min": {
+      "type": "UInt16",
+      "label_t": "cfgdocs.poollogic.filtration.winter_duration_min.label",
+      "help_t": "cfgdocs.poollogic.filtration.winter_duration_min.help",
+      "unit": "min"
+    },
+    "poollogic/filtration/winter_interval_h": {
+      "type": "UInt8",
+      "label_t": "cfgdocs.poollogic.filtration.winter_interval_h.label",
+      "help_t": "cfgdocs.poollogic.filtration.winter_interval_h.help",
+      "unit": "h"
     }
   }
 }

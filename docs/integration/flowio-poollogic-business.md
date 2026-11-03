@@ -102,7 +102,8 @@ Responsabilités:
 ## 4.1 Auto global (`auto_mode=true`)
 
 - filtration demandée par:
-  - fenêtre scheduler calculée
+  - fenêtre scheduler calculée hors mode hiver
+  - cycles périodiques en mode hiver
   - ou mode hiver + condition de température air
   - avec logique de maintien hors-gel (`freeze_hold_t`) si la filtration tourne déjà
 - robot, électrolyse, PID pH/ORP sont pilotés automatiquement
@@ -115,8 +116,17 @@ Responsabilités:
 
 ## 4.3 Hiver (`winter_mode=true`)
 
-- ajout d’une demande de filtration quand `air_temp < winter_start_t`
+- en mode automatique, les cycles périodiques remplacent la fenêtre quotidienne calculée
+- durée de marche réglable via `poollogic/filtration/winter_duration_min` : **15 minutes** par défaut, minimum effectif 1 minute, plafonnée à l'intervalle
+- intervalle entre deux démarrages réglable via `poollogic/filtration/winter_interval_h` : **1 heure** par défaut, borné de 1 à 24 heures
+- les réglages sont persistants ; avec les valeurs par défaut, la filtration fonctionne 15 minutes puis s'arrête 45 minutes
+- le premier cycle démarre dès l'activation en automatique ou après redémarrage, sans dépendre de NTP
+- changer l'intervalle redémarre le cycle ; changer la durée s'applique au cycle en cours
+- le mode manuel conserve le contrôle manuel de la pompe
+- ajout d’une demande hors gel quand `air_temp < winter_start_t`, même entre deux cycles
 - logique hors-gel: si filtration déjà active et `air_temp <= freeze_hold_t`, elle reste maintenue
+- les cycles restent disponibles sans mesure d'air valide ; la protection hors gel nécessite cette mesure
+- la sécurité pression reste prioritaire
 
 ## 5) Détail des équipements
 
@@ -126,7 +136,7 @@ Décision finale (priorité):
 
 1. sécurité PSI (stop)
 2. manuel (conserver état manuel)
-3. auto (fenêtre de filtration / hiver / freeze-hold)
+3. auto (fenêtre quotidienne hors hiver / cycles d'hivernage / protection hors gel)
 
 La fenêtre est recalculée quotidiennement et peut être relancée via commande.
 

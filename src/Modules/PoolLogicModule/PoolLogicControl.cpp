@@ -521,25 +521,11 @@ void PoolLogicModule::runControlLoop_(uint32_t nowMs)
         return (uint16_t)(nowSec - pastSec);
     };
 
-    // Filtration arbitration intentionally applies safety, then manual mode,
-    // then automatic scheduling/winter logic in that order.
-    bool filtrationDesiredBase = filtrationFsm_.on;
-    if (psiError_) {
-        // Safety first: PSI alarms must stop filtration even in manual mode.
-        filtrationDesiredBase = false;
-    } else if (!autoMode_) {
-        // Legacy-like manual mode: when auto_mode is off, keep filtration fully manual.
-        filtrationDesiredBase = filtrationFsm_.on;
-    } else {
-        if (filtrationFsm_.on && haveAirTemp && airTemp <= freezeHoldTempC_) {
-            // Freeze hold: once running, never stop under freeze-hold threshold.
-            filtrationDesiredBase = true;
-        } else {
-            const bool scheduleDemand = windowActive;
-            const bool winterDemand = winterMode_ && haveAirTemp && (airTemp < winterStartTempC_);
-            filtrationDesiredBase = (scheduleDemand || winterDemand);
-        }
-    }
+    const bool winterCycleDemand = winterCycle_.update(
+        nowMs, autoMode_ && winterMode_, winterDurationMin_, winterIntervalHours_);
+    const bool filtrationDesiredBase = poolFiltrationDemand(
+        psiError_, autoMode_, filtrationFsm_.on, windowActive, winterMode_,
+        winterCycleDemand, haveAirTemp, airTemp, winterStartTempC_, freezeHoldTempC_);
     bool filtrationDesired = filtrationDesiredBase;
 
     // Robot and SWG remain pure derived outputs in auto mode; manual mode keeps
@@ -630,7 +616,8 @@ void PoolLogicModule::runControlLoop_(uint32_t nowMs)
                 setLastProbeEndSec(nowSec);
                 setHeatAssistFlag(kHeatAssistFlagFastCycle, true);
                 heaterDesired = false;
-                filtrationDesired = false;
+                // Ending heating must not cancel winter filtration or freeze protection.
+                filtrationDesired = filtrationDesiredBase;
                 setHeatAssistReason(HeatAssistReason::SetpointReached);
             } else {
                 heaterDesired = true;
