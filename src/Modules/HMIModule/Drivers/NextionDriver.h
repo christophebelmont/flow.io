@@ -76,6 +76,7 @@ private:
     void* debugCtx_ = nullptr;
     bool started_ = false;
     bool pageReady_ = false;
+    bool configRebuildRequired_ = true;
     bool versionDetected_ = false;
     uint32_t displayVersion_ = 0U;
     uint32_t lastRenderMs_ = 0;
@@ -102,6 +103,7 @@ private:
     bool isMenuPageId_(uint8_t pageId) const;
     void emitDebug_(const char* kind, const uint8_t* data, uint8_t len) const;
 
+    void updateConfigPagination_(const ConfigMenuView& view);
     bool sendCmd_(const char* cmd);
     bool sendCmdFmt_(const char* fmt, ...);
     bool sendNum_(const char* objectName, uint32_t value);
