@@ -502,6 +502,19 @@ bool NextionDriver::writeRtc(const HmiRtcDateTime& value)
     return ok;
 }
 
+void NextionDriver::updateConfigPagination_(const ConfigMenuView& view)
+{
+    (void)sendCmdFmt_("nPage.val=%u", (unsigned)(view.pageIndex + 1U));
+    (void)sendCmdFmt_("nPages.val=%u", (unsigned)view.pageCount);
+    // Page variables are written before explicitly applying button visibility.
+    const bool canPrev = view.pageIndex > 0U;
+    const bool canNext = view.pageIndex + 1U < view.pageCount;
+    (void)sendCmdFmt_("vis bPrev,%u", canPrev ? 1U : 0U);
+    (void)sendCmdFmt_("tsw bPrev,%u", canPrev ? 1U : 0U);
+    (void)sendCmdFmt_("vis bNext,%u", canNext ? 1U : 0U);
+    (void)sendCmdFmt_("tsw bNext,%u", canNext ? 1U : 0U);
+}
+
 bool NextionDriver::renderConfigMenu(const ConfigMenuView& view)
 {
     if (!started_) return false;
@@ -519,14 +532,7 @@ bool NextionDriver::renderConfigMenu(const ConfigMenuView& view)
     (void)sendCmdFmt_("tsw bBack,%u", view.canBack ? 1U : 0U);
     (void)sendCmdFmt_("vis bValid,%u", view.canValidate ? 1U : 0U);
     (void)sendCmdFmt_("tsw bValid,%u", view.canValidate ? 1U : 0U);
-    const bool canPrev = view.pageIndex > 0U;
-    const bool canNext = view.pageIndex + 1U < view.pageCount;
-    (void)sendCmdFmt_("vis bPrev,%u", canPrev ? 1U : 0U);
-    (void)sendCmdFmt_("tsw bPrev,%u", canPrev ? 1U : 0U);
-    (void)sendCmdFmt_("vis bNext,%u", canNext ? 1U : 0U);
-    (void)sendCmdFmt_("tsw bNext,%u", canNext ? 1U : 0U);
-    (void)sendCmdFmt_("nPage.val=%u", (unsigned)(view.pageIndex + 1U));
-    (void)sendCmdFmt_("nPages.val=%u", (unsigned)view.pageCount);
+    updateConfigPagination_(view);
     (void)sendCmdFmt_("vaCtxRef.val=%lu", (unsigned long)view.contextRef);
 
     for (uint8_t i = 0; i < ConfigMenuModel::RowsPerPage; ++i) {
@@ -605,6 +611,7 @@ bool NextionDriver::renderConfigMenu(const ConfigMenuView& view)
         (void)sendText_(rightObj, displayVal);
     }
 
+    configRebuildRequired_ = false;
     lastRenderMs_ = now;
     return true;
 }
@@ -613,6 +620,8 @@ bool NextionDriver::refreshConfigMenuValues(const ConfigMenuView& view)
 {
     if (!started_ || !pageReady_) return false;
     if (sleeping_) return false;
+    if (configRebuildRequired_) return renderConfigMenu(view);
+    updateConfigPagination_(view);
     (void)sendCmdFmt_("vaCtxRef.val=%lu", (unsigned long)view.contextRef);
 
     for (uint8_t i = 0; i < ConfigMenuModel::RowsPerPage; ++i) {
@@ -701,7 +710,14 @@ bool NextionDriver::parseCustomFrame_(const uint8_t* frame, uint8_t len, HmiEven
                              ((uint32_t)payload[3] << 16) |
                              ((uint32_t)payload[4] << 24);
             }
-            const bool emitted = handlePageId_(payload[0], true, out);
+            bool emitted = handlePageId_(payload[0], true, out);
+            // A keyboard can return without reporting its own page. The
+            // contextual menu announcement still requests a full restoration.
+            if (contextRef != 0U && isConfigPageId_(payload[0])) {
+                configRebuildRequired_ = true;
+                out.type = HmiEventType::ConfigEnter;
+                emitted = true;
+            }
             if (emitted) {
                 out.contextRef = contextRef;
                 out.pageId = payload[0];
@@ -716,15 +732,19 @@ bool NextionDriver::parseCustomFrame_(const uint8_t* frame, uint8_t len, HmiEven
                     out.type = HmiEventType::Home;
                     return true;
                 case NAV_BACK:
+                    configRebuildRequired_ = true;
                     out.type = HmiEventType::Back;
                     return true;
                 case NAV_VALIDATE:
+                    configRebuildRequired_ = true;
                     out.type = HmiEventType::Validate;
                     return true;
                 case NAV_NEXT:
+                    configRebuildRequired_ = true;
                     out.type = HmiEventType::NextPage;
                     return true;
                 case NAV_PREV:
+                    configRebuildRequired_ = true;
                     out.type = HmiEventType::PrevPage;
                     return true;
                 case NAV_CONFIG_EXIT:
@@ -762,6 +782,7 @@ bool NextionDriver::parseCustomFrame_(const uint8_t* frame, uint8_t len, HmiEven
 
         case NEXTION_CMD_ROW_SET_TEXT: {
             if (payloadLen < 2U || payload[0] >= ConfigMenuModel::RowsPerPage) return false;
+            configRebuildRequired_ = true;
             out.type = HmiEventType::RowSetText;
             out.row = payload[0];
             const uint8_t textLen = (uint8_t)(payloadLen - 1U);
@@ -858,6 +879,7 @@ bool NextionDriver::handlePageId_(uint8_t pageId, bool emitEvents, HmiEvent& out
 
     if (!emitEvents) return false;
     const bool pageChanged = (!wasKnown || prevPage != pageId);
+    if (pageChanged || !wasConfigPage) configRebuildRequired_ = true;
     if (pageReady_ && !wasConfigPage) {
         out.type = HmiEventType::ConfigEnter;
         out.pageId = pageId;
