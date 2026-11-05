@@ -13,7 +13,8 @@
 #include "Core/Log.h"
 #include "Core/LogModuleIds.h"
 #include "Core/Services/Services.h"
-#include "Domain/Pool/PoolBindings.h"
+#include "Domain/Pool/PoolBehaviors.h"
+#include "Domain/Pool/PoolIds.h"
 #include "Modules/IOModule/IORuntime.h"
 #include "Modules/Network/HAModule/HARuntime.h"
 #include "Profiles/FlowIO/FlowIOProfile.h"
@@ -82,9 +83,9 @@ struct FlowIoDiscoveryHeap {
     char analogValueTpl[kFlowIoAnalogHaSlots][128]{};
     char analogStateSuffix[kFlowIoAnalogHaSlots][24]{};
     char digitalStateSuffix[sizeof(kDigitalHaSpecs) / sizeof(kDigitalHaSpecs[0])][24]{};
-    char switchStateSuffix[PoolBinding::kDeviceBindingCount][24]{};
-    char switchPayloadOn[PoolBinding::kDeviceBindingCount][Limits::IoHaSwitchPayloadBuf]{};
-    char switchPayloadOff[PoolBinding::kDeviceBindingCount][Limits::IoHaSwitchPayloadBuf]{};
+    char switchStateSuffix[Limits::Io::MaxPoolDevices][24]{};
+    char switchPayloadOn[Limits::Io::MaxPoolDevices][Limits::IoHaSwitchPayloadBuf]{};
+    char switchPayloadOff[Limits::Io::MaxPoolDevices][Limits::IoHaSwitchPayloadBuf]{};
 };
 
 FlowIoDiscoveryHeap* gDiscoveryHeap = nullptr;
@@ -130,29 +131,29 @@ void releaseDiscoveryHeapIfReady(ModuleInstances& modules)
 #endif
 }
 
-const DomainIoBinding* findBindingByRole(const DomainSpec& domain, DomainRole role)
+const DomainSlotPreset* findDomainSlotById(const DomainSpec& domain, DomainSlotId id)
 {
-    for (uint8_t i = 0; i < domain.ioBindingCount; ++i) {
-        const DomainIoBinding& binding = domain.ioBindings[i];
-        if (binding.role == role) return &binding;
+    for (uint8_t i = 0; i < domain.domainSlotCount; ++i) {
+        const DomainSlotPreset& slot = domain.domainSlots[i];
+        if (slot.id == id) return &slot;
     }
     return nullptr;
 }
 
-const DomainIoBinding* findBindingBySignal(const DomainSpec& domain, BoardSignal signal)
+IoSlotId findIoSlotForDomainSlot(const DomainSpec& domain, DomainSlotId id)
 {
-    for (uint8_t i = 0; i < domain.ioBindingCount; ++i) {
-        const DomainIoBinding& binding = domain.ioBindings[i];
-        if (binding.signal == signal) return &binding;
+    for (uint8_t i = 0; i < domain.domainIoSlotBindingCount; ++i) {
+        const DomainIoSlotBinding& binding = domain.domainIoSlotBindings[i];
+        if (binding.domainSlot == id) return binding.ioSlot;
     }
-    return nullptr;
+    return IO_SLOT_INVALID;
 }
 
-const PoolDevicePreset* findPoolPresetByRole(const DomainSpec& domain, DomainRole role)
+const PoolDevicePreset* findPoolPresetById(const DomainSpec& domain, PoolDeviceId id)
 {
     for (uint8_t i = 0; i < domain.poolDeviceCount; ++i) {
         const PoolDevicePreset& preset = domain.poolDevices[i];
-        if (preset.role == role) return &preset;
+        if (preset.id == id) return &preset;
     }
     return nullptr;
 }
@@ -167,20 +168,20 @@ void requireSetup(bool ok, const char* step)
     while (true) delay(1000);
 }
 
-void applyAnalogDefaultsForRole(DomainRole role, IOAnalogDefinition& def)
+void applyAnalogDefaultsForDomainSlot(DomainSlotId domainSlot, IOAnalogDefinition& def)
 {
-    const FlowIoLayout::AnalogRoleDefault* spec = FlowIoLayout::analogDefaultForRole(role);
-    requireSetup(spec != nullptr, "unsupported analog domain role");
+    const FlowIoLayout::AnalogRoleDefault* spec = FlowIoLayout::analogDefaultForDomainSlot(domainSlot);
+    requireSetup(spec != nullptr, "unsupported analog domain slot");
     def.bindingPort = spec->bindingPort;
     def.c0 = spec->c0;
     def.c1 = spec->c1;
     def.precision = spec->precision;
 }
 
-void applyDigitalDefaultsForRole(DomainRole role, IODigitalInputDefinition& def)
+void applyDigitalDefaultsForDomainSlot(DomainSlotId domainSlot, IODigitalInputDefinition& def)
 {
-    const FlowIoLayout::DigitalInputRoleDefault* spec = FlowIoLayout::digitalInputDefaultForRole(role);
-    requireSetup(spec != nullptr, "unsupported digital input domain role");
+    const FlowIoLayout::DigitalInputRoleDefault* spec = FlowIoLayout::digitalInputDefaultForDomainSlot(domainSlot);
+    requireSetup(spec != nullptr, "unsupported digital input domain slot");
     def.bindingPort = spec->bindingPort;
     def.mode = spec->mode;
     def.edgeMode = spec->edgeMode;
@@ -278,7 +279,7 @@ void syncDigitalInputBinarySensors(ModuleInstances& modules)
 
     for (uint8_t i = 0; i < (uint8_t)(sizeof(kDigitalHaSpecs) / sizeof(kDigitalHaSpecs[0])); ++i) {
         const FlowIoDigitalHaSpec& spec = kDigitalHaSpecs[i];
-        if (!modules.ioModule.digitalInputSlotUsed(spec.logicalIdx)) continue;
+        if (!modules.ioModule.digitalInputSlotPublished(spec.logicalIdx)) continue;
 
         snprintf(
             gDiscoveryHeap->digitalStateSuffix[i],
@@ -317,27 +318,30 @@ void syncDigitalInputBinarySensors(ModuleInstances& modules)
     }
 }
 
-void syncSwitches(ModuleInstances& modules)
+void syncSwitches(const DomainSpec& domain, ModuleInstances& modules)
 {
     if (!modules.haService || !modules.haService->addSwitch) return;
     requireSetup(ensureDiscoveryHeap(), "ha discovery heap");
 
-    for (uint8_t i = 0; i < PoolBinding::kDeviceBindingCount; ++i) {
-        const PoolIoBinding& binding = PoolBinding::kIoBindings[i];
-        if (binding.ioId < IO_ID_DO_BASE) continue;
+    for (uint8_t i = 0; i < domain.poolDeviceCount; ++i) {
+        const PoolDevicePreset& device = domain.poolDevices[i];
+        const DomainSlotPreset* commandSlot = findDomainSlotById(domain, device.commandSlot);
+        if (!commandSlot) continue;
+        const IoSlotId ioSlot = findIoSlotForDomainSlot(domain, device.commandSlot);
+        if (ioSlot == IO_SLOT_INVALID || ioSlotKind(ioSlot) != IO_SLOT_DIGITAL_OUTPUT) continue;
 
-        const uint8_t logical = (uint8_t)(binding.ioId - IO_ID_DO_BASE);
+        const uint8_t logical = ioSlotIndex(ioSlot);
         if (!modules.ioModule.digitalOutputSlotUsed(logical)) continue;
 
         snprintf(
             gDiscoveryHeap->switchStateSuffix[i],
             sizeof(gDiscoveryHeap->switchStateSuffix[i]),
-            "rt/io/output/d%02u",
-            (unsigned)logical
+            "rt/pdm/state/pd%u",
+            (unsigned)device.id
         );
         bool payloadOk = true;
 
-        if (binding.slot == PoolBinding::kDeviceSlotFiltrationPump) {
+        if (device.id == PoolIds::DeviceFiltrationPump) {
             int wrote = snprintf(
                 gDiscoveryHeap->switchPayloadOn[i],
                 sizeof(gDiscoveryHeap->switchPayloadOn[i]),
@@ -355,14 +359,14 @@ void syncSwitches(ModuleInstances& modules)
                 gDiscoveryHeap->switchPayloadOn[i],
                 sizeof(gDiscoveryHeap->switchPayloadOn[i]),
                 "{\\\"cmd\\\":\\\"pooldevice.write\\\",\\\"args\\\":{\\\"slot\\\":%u,\\\"value\\\":true}}",
-                (unsigned)binding.slot
+                (unsigned)device.id
             );
             if (!(wrote > 0 && wrote < (int)sizeof(gDiscoveryHeap->switchPayloadOn[i]))) payloadOk = false;
             wrote = snprintf(
                 gDiscoveryHeap->switchPayloadOff[i],
                 sizeof(gDiscoveryHeap->switchPayloadOff[i]),
                 "{\\\"cmd\\\":\\\"pooldevice.write\\\",\\\"args\\\":{\\\"slot\\\":%u,\\\"value\\\":false}}",
-                (unsigned)binding.slot
+                (unsigned)device.id
             );
             if (!(wrote > 0 && wrote < (int)sizeof(gDiscoveryHeap->switchPayloadOff[i]))) payloadOk = false;
         }
@@ -374,14 +378,14 @@ void syncSwitches(ModuleInstances& modules)
 
         const HASwitchEntry entry{
             "io",
-            binding.objectSuffix,
-            binding.name,
+            device.objectSuffix,
+            commandSlot->displayName,
             gDiscoveryHeap->switchStateSuffix[i],
-            "{% if value_json.value %}ON{% else %}OFF{% endif %}",
+            "{% if value_json.on %}ON{% else %}OFF{% endif %}",
             MqttTopics::SuffixCmd,
             gDiscoveryHeap->switchPayloadOn[i],
             gDiscoveryHeap->switchPayloadOff[i],
-            binding.haIcon,
+            device.haIcon,
             nullptr
         };
         (void)modules.haService->addSwitch(modules.haService->ctx, &entry);
@@ -402,27 +406,35 @@ void configureIoModule(const AppContext& ctx, ModuleInstances& modules)
         FlowIoLayout::kBindingPorts,
         (uint8_t)(sizeof(FlowIoLayout::kBindingPorts) / sizeof(FlowIoLayout::kBindingPorts[0]))
     );
+    modules.ioModule.setExpanders(
+        FlowIoLayout::kExpanders,
+        (uint8_t)(sizeof(FlowIoLayout::kExpanders) / sizeof(FlowIoLayout::kExpanders[0]))
+    );
 
-    for (uint8_t i = 0; i < ctx.domain->sensorCount; ++i) {
-        const DomainSensorPreset& preset = ctx.domain->sensors[i];
-        const PoolSensorBinding* compat = PoolBinding::sensorBindingBySlot(preset.legacySlot);
-        requireSetup(compat != nullptr, "missing compatibility sensor binding");
+    for (uint8_t i = 0; i < ctx.domain->domainSlotCount; ++i) {
+        const DomainSlotPreset& preset = ctx.domain->domainSlots[i];
+        const IoSlotId ioSlot = findIoSlotForDomainSlot(*ctx.domain, preset.id);
+        if (ioSlot == IO_SLOT_INVALID) continue;
+        const IoId ioId = ioIdFromSlot(ioSlot);
+        requireSetup(ioId != IO_ID_INVALID, "invalid domain slot IO mapping");
 
-        if (preset.digitalInput) {
+        if (preset.slotKind == IO_SLOT_DIGITAL_INPUT) {
             IODigitalInputDefinition def{};
-            snprintf(def.id, sizeof(def.id), "%s", compat->endpointId);
-            def.ioId = compat->ioId;
-            def.activeHigh = preset.activeHigh;
-            def.pullMode = preset.pullMode;
-            applyDigitalDefaultsForRole(preset.role, def);
+            snprintf(def.id, sizeof(def.id), "%s", preset.endpointId ? preset.endpointId : "input");
+            def.ioId = ioId;
+            def.activeHigh = false;
+            def.pullMode = IO_PULL_UP;
+            applyDigitalDefaultsForDomainSlot(preset.id, def);
             requireSetup(modules.ioModule.defineDigitalInput(def), "define digital input");
             continue;
         }
 
+        if (preset.slotKind != IO_SLOT_ANALOG_INPUT) continue;
+
         IOAnalogDefinition def{};
-        snprintf(def.id, sizeof(def.id), "%s", compat->endpointId);
-        def.ioId = compat->ioId;
-        applyAnalogDefaultsForRole(preset.role, def);
+        snprintf(def.id, sizeof(def.id), "%s", preset.endpointId ? preset.endpointId : "analog");
+        def.ioId = ioId;
+        applyAnalogDefaultsForDomainSlot(preset.id, def);
         requireSetup(modules.ioModule.defineAnalogInput(def), "define analog input");
     }
 
@@ -433,19 +445,25 @@ void configureIoModule(const AppContext& ctx, ModuleInstances& modules)
         requireSetup(modules.ioModule.defineAnalogInput(def), "define extra analog input");
     }
 
-    for (uint8_t i = 0; i < ctx.domain->poolDeviceCount; ++i) {
-        const PoolDevicePreset& preset = ctx.domain->poolDevices[i];
-        const PoolIoBinding* compat = PoolBinding::ioBindingBySlot(preset.legacySlot);
-        requireSetup(compat != nullptr, "missing compatibility output binding");
-        const FlowIoLayout::DigitalOutputRoleDefault* spec = FlowIoLayout::digitalOutputDefaultForRole(preset.role);
+    for (uint8_t i = 0; i < ctx.domain->domainSlotCount; ++i) {
+        const DomainSlotPreset& preset = ctx.domain->domainSlots[i];
+        if (preset.slotKind != IO_SLOT_DIGITAL_OUTPUT) continue;
+        const IoSlotId ioSlot = findIoSlotForDomainSlot(*ctx.domain, preset.id);
+        if (ioSlot == IO_SLOT_INVALID) continue;
+        requireSetup(ioSlotKind(ioSlot) == IO_SLOT_DIGITAL_OUTPUT, "domain output mapped to non-output slot");
+
+        const FlowIoLayout::DigitalOutputRoleDefault* spec = FlowIoLayout::digitalOutputDefaultForDomainSlot(preset.id);
         requireSetup(spec != nullptr, "missing output layout binding");
 
         IODigitalOutputDefinition def{};
-        snprintf(def.id, sizeof(def.id), "%s", compat->objectSuffix ? compat->objectSuffix : "output");
-        def.ioId = compat->ioId;
+        snprintf(def.id, sizeof(def.id), "%s", preset.endpointId ? preset.endpointId : "output");
+        def.ioId = ioIdFromSlot(ioSlot);
         def.bindingPort = spec->bindingPort;
         def.activeHigh = spec->activeHigh;
         def.initialOn = false;
+        def.startupPolicy = spec->retainOnWarmReboot
+            ? IOOutputStartupPolicy::PreserveHardwareState
+            : IOOutputStartupPolicy::ApplyInitial;
         def.retainOnWarmReboot = spec->retainOnWarmReboot;
         def.momentary = spec->momentary;
         def.pulseMs = spec->momentary ? spec->pulseMs : 0;
@@ -460,7 +478,7 @@ void registerIoHomeAssistant(AppContext& ctx, ModuleInstances& modules)
 
     syncAnalogSensors(modules);
     syncDigitalInputBinarySensors(modules);
-    syncSwitches(modules);
+    syncSwitches(*ctx.domain, modules);
 
     if (modules.haService->requestRefresh) {
         (void)modules.haService->requestRefresh(modules.haService->ctx);

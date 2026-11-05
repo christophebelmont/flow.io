@@ -88,6 +88,11 @@
       "help_t": "cfgmods.log.levels.m25_lvl.help",
       "enum_set": "log_levels"
     },
+    "log/levels/m26_lvl": {
+      "label_t": "cfgmods.log.levels.m26_lvl.label",
+      "help_t": "cfgmods.log.levels.m26_lvl.help",
+      "enum_set": "log_levels"
+    },
     "log/levels/m2_lvl": {
       "label_t": "cfgmods.log.levels.m2_lvl.label",
       "help_t": "cfgmods.log.levels.m2_lvl.help",

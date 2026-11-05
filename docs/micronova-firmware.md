@@ -20,7 +20,7 @@ Le profil assemble les modules suivants :
 
 Les modules piscine (`PoolLogicModule`, `PoolDeviceModule`, HMI piscine) et la configuration distante Supervisor/I2C ne sont pas embarques dans ce profil.
 
-Le nom mDNS par defaut est fourni par le `BoardSpec` : `MicronovaBoardRev1` publie `micronova.local`, les boards FlowIO publient `flowio-core.local`, et la board Supervisor publie `flowio.local`. Une valeur mDNS deja personnalisee dans le `ConfigStore` reste prioritaire.
+Le nom mDNS est fourni par le champ `system/devicename`. Sa valeur par defaut est `flowio`.
 
 ## Bus Micronova
 

@@ -7,12 +7,34 @@
   <link rel="icon" type="image/png" href="/webinterface/favicon.png" />
   <link rel="shortcut icon" type="image/png" href="/webinterface/favicon.png" />
   <title>flow.io</title>
+  <script>
+    (function () {
+      var theme = 'light';
+      try {
+        theme = localStorage.getItem('flow_web_theme') === 'dark' ? 'dark' : 'light';
+      } catch (err) {}
+      document.documentElement.setAttribute('data-theme', theme);
+      document.documentElement.style.colorScheme = theme;
+    })();
+  </script>
   <style>
+    :root {
+      --boot-bg: #0B1F3A;
+      --boot-fg: #FFFFFF;
+      --boot-muted: rgba(255,255,255,0.82);
+      --boot-error: #FFD5DB;
+    }
+    html[data-theme="light"] {
+      --boot-bg: #F8FAFC;
+      --boot-fg: #071A35;
+      --boot-muted: rgba(7,26,53,0.72);
+      --boot-error: #B4233A;
+    }
     html, body {
       margin: 0;
       min-height: 100%;
-      background: #0B1F3A;
-      color: #FFFFFF;
+      background: var(--boot-bg);
+      color: var(--boot-fg);
       font-family: "Inter", "Segoe UI", Roboto, Arial, sans-serif;
     }
     #app-root {
@@ -28,10 +50,10 @@
     }
     .boot-status {
       font-size: 14px;
-      color: rgba(255,255,255,0.82);
+      color: var(--boot-muted);
     }
     .boot-status.error {
-      color: #FFD5DB;
+      color: var(--boot-error);
     }
   </style>
 </head>

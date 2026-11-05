@@ -10,6 +10,11 @@
       "label_t": "cfgdocs.time.enabled.label",
       "help_t": "cfgdocs.time.enabled.help"
     },
+    "time/manual_time": {
+      "type": "CharArray",
+      "label_t": "cfgdocs.time.manual_time.label",
+      "help_t": "cfgdocs.time.manual_time.help"
+    },
     "time/scheduler/slots_blob": {
       "type": "CharArray",
       "label_t": "cfgdocs.time.scheduler.slots_blob.label",

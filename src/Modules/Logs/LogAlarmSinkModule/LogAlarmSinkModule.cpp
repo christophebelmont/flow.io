@@ -80,7 +80,8 @@ void LogAlarmSinkModule::init(ConfigStore&, ServiceRegistry& services)
         10000,
         "log_warning",
         "Warning log detected",
-        "log.sink"
+        "log.sink",
+        false
     };
     (void)alarmSvc->registerAlarm(alarmSvc->ctx, &warnAlarm, &LogAlarmSinkModule::condWarn_, &state_);
 
@@ -93,7 +94,8 @@ void LogAlarmSinkModule::init(ConfigStore&, ServiceRegistry& services)
         10000,
         "log_error",
         "Error log detected",
-        "log.sink"
+        "log.sink",
+        false
     };
     (void)alarmSvc->registerAlarm(alarmSvc->ctx, &errAlarm, &LogAlarmSinkModule::condError_, &state_);
 

@@ -10,10 +10,21 @@
       "label_t": "cfgdocs.hmi.leds.enabled.label",
       "help_t": "cfgdocs.hmi.leds.enabled.help"
     },
+    "hmi/leds/waveshare_enabled": {
+      "type": "Bool",
+      "label_t": "cfgdocs.hmi.leds.waveshare_enabled.label",
+      "help_t": "cfgdocs.hmi.leds.waveshare_enabled.help"
+    },
     "hmi/nextion/enabled": {
       "type": "Bool",
       "label_t": "cfgdocs.hmi.nextion.enabled.label",
       "help_t": "cfgdocs.hmi.nextion.enabled.help"
+    },
+    "hmi/nextion/motion_io_id": {
+      "type": "UInt16",
+      "label_t": "cfgdocs.hmi.nextion.motion_io_id.label",
+      "help_t": "cfgdocs.hmi.nextion.motion_io_id.help",
+      "enum_set": "flowio_logical_input_digital"
     },
     "hmi/venice/enabled": {
       "type": "Bool",

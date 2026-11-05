@@ -17,10 +17,19 @@
     "io/drivers/bmp280/address": {
       "display_format": "hex"
     },
-    "io/drivers/ina226/address": {
+    "io/drivers/expander00/address": {
       "display_format": "hex"
     },
-    "io/drivers/pcf857x/address": {
+    "io/drivers/expander01/address": {
+      "display_format": "hex"
+    },
+    "io/drivers/expander02/address": {
+      "display_format": "hex"
+    },
+    "io/drivers/expander03/address": {
+      "display_format": "hex"
+    },
+    "io/drivers/ina226/address": {
       "display_format": "hex"
     },
     "io/drivers/sht40/address": {
@@ -206,6 +215,66 @@
         "store": "io/input/a16"
       },
       {
+        "display": "io/input/analog/a17",
+        "store": "io/input/a17"
+      },
+      {
+        "display": "io/input/analog/a18",
+        "store": "io/input/a18"
+      },
+      {
+        "display": "io/input/analog/a19",
+        "store": "io/input/a19"
+      },
+      {
+        "display": "io/input/analog/a20",
+        "store": "io/input/a20"
+      },
+      {
+        "display": "io/input/analog/a21",
+        "store": "io/input/a21"
+      },
+      {
+        "display": "io/input/analog/a22",
+        "store": "io/input/a22"
+      },
+      {
+        "display": "io/input/analog/a23",
+        "store": "io/input/a23"
+      },
+      {
+        "display": "io/input/analog/a24",
+        "store": "io/input/a24"
+      },
+      {
+        "display": "io/input/analog/a25",
+        "store": "io/input/a25"
+      },
+      {
+        "display": "io/input/analog/a26",
+        "store": "io/input/a26"
+      },
+      {
+        "display": "io/input/analog/a27",
+        "store": "io/input/a27"
+      },
+      {
+        "display": "io/input/analog/a28",
+        "store": "io/input/a28"
+      },
+      {
+        "display": "io/input/analog/a29",
+        "store": "io/input/a29"
+      },
+      {
+        "display": "io/input/analog/a30",
+        "store": "io/input/a30"
+      },
+      {
+        "display": "io/input/analog/a31",
+        "store": "io/input/a31"
+      },
+      {
         "display": "io/input/digital/i00",
         "store": "io/input/i00"
       },
@@ -236,6 +305,26 @@
       {
         "display": "io/input/digital/i07",
         "store": "io/input/i07"
+      },
+      {
+        "display": "io/input/digital/i08",
+        "store": "io/input/i08"
+      },
+      {
+        "display": "io/input/digital/i09",
+        "store": "io/input/i09"
+      },
+      {
+        "display": "io/input/digital/i10",
+        "store": "io/input/i10"
+      },
+      {
+        "display": "io/input/digital/i11",
+        "store": "io/input/i11"
+      },
+      {
+        "display": "io/input/digital/i12",
+        "store": "io/input/i12"
       }
     ],
     "cfg_tree_virtual_branches": [
@@ -265,7 +354,22 @@
           "a13",
           "a14",
           "a15",
-          "a16"
+          "a16",
+          "a17",
+          "a18",
+          "a19",
+          "a20",
+          "a21",
+          "a22",
+          "a23",
+          "a24",
+          "a25",
+          "a26",
+          "a27",
+          "a28",
+          "a29",
+          "a30",
+          "a31"
         ]
       },
       {
@@ -278,7 +382,12 @@
           "i04",
           "i05",
           "i06",
-          "i07"
+          "i07",
+          "i08",
+          "i09",
+          "i10",
+          "i11",
+          "i12"
         ]
       }
     ],
@@ -326,6 +435,10 @@
         }
       ],
       "flowio_binding_port_analog": [
+        {
+          "value": 0,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_binding_port.none.label"
+        },
         {
           "value": 2,
           "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_binding_port_analog.0.label"
@@ -417,6 +530,10 @@
       ],
       "flowio_binding_port_digital_input": [
         {
+          "value": 0,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_binding_port.none.label"
+        },
+        {
           "value": 200,
           "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_binding_port_digital_input.0.label"
         },
@@ -450,6 +567,10 @@
         }
       ],
       "flowio_binding_port_digital_output": [
+        {
+          "value": 0,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_binding_port.none.label"
+        },
         {
           "value": 1,
           "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_binding_port_digital_output.0.label"
@@ -513,6 +634,42 @@
         {
           "value": 406,
           "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_binding_port_digital_output.15.label"
+        },
+        {
+          "value": 407,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_binding_port_digital_output.16.label"
+        },
+        {
+          "value": 408,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_binding_port_digital_output.17.label"
+        },
+        {
+          "value": 409,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_binding_port_digital_output.18.label"
+        },
+        {
+          "value": 410,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_binding_port_digital_output.19.label"
+        },
+        {
+          "value": 411,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_binding_port_digital_output.20.label"
+        },
+        {
+          "value": 412,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_binding_port_digital_output.21.label"
+        },
+        {
+          "value": 413,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_binding_port_digital_output.22.label"
+        },
+        {
+          "value": 414,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_binding_port_digital_output.23.label"
+        },
+        {
+          "value": 415,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_binding_port_digital_output.24.label"
         }
       ],
       "flowio_edge_mode": [
@@ -597,6 +754,66 @@
         {
           "value": 208,
           "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_analog.16.label"
+        },
+        {
+          "value": 209,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_analog.17.label"
+        },
+        {
+          "value": 210,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_analog.18.label"
+        },
+        {
+          "value": 211,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_analog.19.label"
+        },
+        {
+          "value": 212,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_analog.20.label"
+        },
+        {
+          "value": 213,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_analog.21.label"
+        },
+        {
+          "value": 214,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_analog.22.label"
+        },
+        {
+          "value": 215,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_analog.23.label"
+        },
+        {
+          "value": 216,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_analog.24.label"
+        },
+        {
+          "value": 217,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_analog.25.label"
+        },
+        {
+          "value": 218,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_analog.26.label"
+        },
+        {
+          "value": 219,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_analog.27.label"
+        },
+        {
+          "value": 220,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_analog.28.label"
+        },
+        {
+          "value": 221,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_analog.29.label"
+        },
+        {
+          "value": 222,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_analog.30.label"
+        },
+        {
+          "value": 223,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_analog.31.label"
         }
       ],
       "flowio_logical_input_digital": [
@@ -631,6 +848,26 @@
         {
           "value": 71,
           "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_digital.7.label"
+        },
+        {
+          "value": 72,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_digital.8.label"
+        },
+        {
+          "value": 73,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_digital.9.label"
+        },
+        {
+          "value": 74,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_digital.10.label"
+        },
+        {
+          "value": 75,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_digital.11.label"
+        },
+        {
+          "value": 76,
+          "label_t": "cfgmods_meta.iomodule.enum_sets.flowio_logical_input_digital.12.label"
         }
       ],
       "io_output_boot_behavior": [

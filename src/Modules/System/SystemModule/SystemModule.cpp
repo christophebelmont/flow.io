@@ -8,6 +8,7 @@
 #include "Core/FirmwareVersion.h"
 #include "Core/SystemStats.h"
 #include <WiFi.h>
+#include <ctype.h>
 #include <esp_system.h>
 #include <esp_wifi.h>
 #include <string.h>
@@ -47,17 +48,30 @@ static bool writeOkReply_(char* reply, size_t replyLen, const char* json, const 
     return false;
 }
 
+static bool isBlankText_(const char* text, size_t maxLen)
+{
+    if (!text) return true;
+    const size_t len = strnlen(text, maxLen);
+    if (len == 0U || len >= maxLen) return true;
+    for (size_t i = 0; i < len; ++i) {
+        if (!isspace((unsigned char)text[i])) return false;
+    }
+    return true;
+}
+
 bool SystemModule::cmdPing(void*, const CommandRequest&, char* reply, size_t replyLen) {
     return writeOkReply_(reply, replyLen, "{\"ok\":true,\"pong\":true}", "system.ping");
 }
 
-bool SystemModule::cmdReboot(void*, const CommandRequest&, char* reply, size_t replyLen) {
-    if (!writeOkReply_(reply, replyLen, "{\"ok\":true,\"msg\":\"rebooting\"}", "system.reboot")) {
+bool SystemModule::cmdReboot(void* userCtx, const CommandRequest&, char* reply, size_t replyLen) {
+    SystemModule* self = static_cast<SystemModule*>(userCtx);
+    if (!self || !self->scheduleRestart_(500U, "system.reboot")) {
+        if (!writeErrorJson(reply, replyLen, ErrorCode::Failed, "system.reboot")) {
+            snprintf(reply, replyLen, "{\"ok\":false}");
+        }
         return false;
     }
-    delay(200); ///< laisser le temps à MQTT de publier l'ACK
-    esp_restart();
-    return true;
+    return writeOkReply_(reply, replyLen, "{\"ok\":true,\"msg\":\"rebooting\",\"reboot_scheduled\":true}", "system.reboot");
 }
 
 bool SystemModule::cmdFactoryReset(void* userCtx, const CommandRequest&, char* reply, size_t replyLen) {
@@ -89,7 +103,10 @@ bool SystemModule::cmdFactoryReset(void* userCtx, const CommandRequest&, char* r
         return false;
     }
 
-    if (!writeOkReply_(reply, replyLen, "{\"ok\":true,\"msg\":\"factory_reset\"}", "system.factory_reset")) {
+    if (!self->scheduleRestart_(700U, "system.factory_reset")) {
+        if (!writeErrorJson(reply, replyLen, ErrorCode::Failed, "system.factory_reset.reboot")) {
+            snprintf(reply, replyLen, "{\"ok\":false}");
+        }
         return false;
     }
 
@@ -98,9 +115,70 @@ bool SystemModule::cmdFactoryReset(void* userCtx, const CommandRequest&, char* r
          (int)wifiCfgCleared,
          (int)wifiRestoreErr);
 
-    delay(300); ///< laisser le temps à MQTT/Web de publier l'ACK
+    return writeOkReply_(reply, replyLen, "{\"ok\":true,\"msg\":\"factory_reset\",\"reboot_scheduled\":true}", "system.factory_reset");
+}
+
+void SystemModule::restartTaskStatic_(void* userCtx)
+{
+    SystemModule* self = static_cast<SystemModule*>(userCtx);
+    const uint32_t delayMs = self ? self->restartDelayMs_ : 500U;
+    const char* reason = (self && self->restartReason_[0] != '\0') ? self->restartReason_ : "system";
+
+    vTaskDelay(pdMS_TO_TICKS(delayMs));
+    LOGW("System rebooting now reason=%s", reason);
     esp_restart();
+    vTaskDelete(nullptr);
+}
+
+bool SystemModule::scheduleRestart_(uint32_t delayMs, const char* reason)
+{
+    bool alreadyScheduled = false;
+    portENTER_CRITICAL(&restartMux_);
+    alreadyScheduled = restartScheduled_;
+    if (!restartScheduled_) {
+        restartScheduled_ = true;
+    }
+    portEXIT_CRITICAL(&restartMux_);
+
+    if (alreadyScheduled) {
+        LOGW("System reboot already scheduled reason=%s", restartReason_[0] ? restartReason_ : "system");
+        return true;
+    }
+
+    restartDelayMs_ = delayMs;
+    snprintf(restartReason_, sizeof(restartReason_), "%s", (reason && reason[0] != '\0') ? reason : "system");
+
+    const BaseType_t ok = xTaskCreatePinnedToCore(&SystemModule::restartTaskStatic_,
+                                                  "system-reboot",
+                                                  3072,
+                                                  this,
+                                                  2,
+                                                  nullptr,
+                                                  1);
+    if (ok != pdPASS) {
+        portENTER_CRITICAL(&restartMux_);
+        restartScheduled_ = false;
+        portEXIT_CRITICAL(&restartMux_);
+        LOGE("Failed to create system reboot task reason=%s", restartReason_);
+        return false;
+    }
+
+    notifyShutdownPending_();
+    LOGW("System reboot scheduled in %lu ms reason=%s", (unsigned long)delayMs, restartReason_);
     return true;
+}
+
+void SystemModule::notifyShutdownPending_()
+{
+    if (services_) {
+        const NetworkAccessService* netAccessSvc = services_->get<NetworkAccessService>(ServiceId::NetworkAccess);
+        if (netAccessSvc && netAccessSvc->notifyShutdownPending) {
+            (void)netAccessSvc->notifyShutdownPending(netAccessSvc->ctx);
+        }
+    }
+    if (eventBus_) {
+        (void)eventBus_->post(EventId::NetworkShutdownPending, nullptr, 0, moduleId());
+    }
 }
 
 bool SystemModule::writeRuntimeUiValue(uint8_t valueId, IRuntimeUiWriter& writer) const
@@ -167,8 +245,9 @@ void SystemModule::onEvent_(const Event& e)
 
     const ConfigChangedPayload* p = static_cast<const ConfigChangedPayload*>(e.payload);
     if (p->moduleId != (uint8_t)ConfigModuleId::System) return;
-    if (strcmp(p->nvsKey, NvsKeys::System::Language) != 0) return;
-    (void)normalizeLanguage_(true);
+    if (strcmp(p->nvsKey, NvsKeys::System::Language) == 0) {
+        (void)normalizeLanguage_(true);
+    }
 }
 
 const char* SystemModule::localeLanguage_() const
@@ -186,10 +265,12 @@ void SystemModule::init(ConfigStore& cfg, ServiceRegistry& services) {
     constexpr uint8_t kCfgBranchId = 1;
 
     cfg.registerVar(languageVar_, kCfgModuleId, kCfgBranchId);
+    cfg.registerVar(deviceNameVar_, kCfgModuleId, kCfgBranchId);
 
     logHub = services.get<LogHubService>(ServiceId::LogHub);
     cmdSvc = services.get<CommandService>(ServiceId::Command);
     cfgSvc = services.get<ConfigStoreService>(ServiceId::ConfigStore);
+    services_ = &services;
     eventBusSvc_ = services.get<EventBusService>(ServiceId::EventBus);
     eventBus_ = eventBusSvc_ ? eventBusSvc_->bus : nullptr;
 
@@ -211,4 +292,8 @@ void SystemModule::init(ConfigStore& cfg, ServiceRegistry& services) {
 void SystemModule::onConfigLoaded(ConfigStore&, ServiceRegistry&)
 {
     (void)normalizeLanguage_(false);
+    cfgData_.devicename[sizeof(cfgData_.devicename) - 1U] = '\0';
+    if (isBlankText_(cfgData_.devicename, sizeof(cfgData_.devicename))) {
+        snprintf(cfgData_.devicename, sizeof(cfgData_.devicename), "flowio");
+    }
 }

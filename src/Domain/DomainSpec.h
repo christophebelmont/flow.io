@@ -4,13 +4,12 @@
 
 struct DomainSpec {
     const char* name;
-    const DomainIoBinding* ioBindings;
-    uint8_t ioBindingCount;
+    const DomainSlotPreset* domainSlots;
+    uint8_t domainSlotCount;
+    const DomainIoSlotBinding* domainIoSlotBindings;
+    uint8_t domainIoSlotBindingCount;
     const PoolDevicePreset* poolDevices;
     uint8_t poolDeviceCount;
-    const DomainSensorPreset* sensors;
-    uint8_t sensorCount;
     const PoolLogicDefaultsSpec* poolLogicDefaults;
     void (*configurationHook)(AppContext&);
 };
-

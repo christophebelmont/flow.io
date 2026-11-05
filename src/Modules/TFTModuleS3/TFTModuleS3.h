@@ -34,7 +34,7 @@ public:
     BaseType_t taskCore() const override { return 1; }
     uint16_t taskStackSize() const override { return 5120; }
     UBaseType_t taskStackCaps() const override {
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         return MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
 #else
         return Module::taskStackCaps();
@@ -43,7 +43,7 @@ public:
     uint8_t taskCount() const override { return 1; }
     const ModuleTaskSpec* taskSpecs() const override { return singleLoopTaskSpec(); }
 
-    uint8_t dependencyCount() const override { return 7; }
+    uint8_t dependencyCount() const override { return 8; }
     ModuleId dependency(uint8_t i) const override {
         if (i == 0) return ModuleId::LogHub;
         if (i == 1) return ModuleId::ConfigStore;
@@ -52,6 +52,7 @@ public:
         if (i == 4) return ModuleId::Wifi;
         if (i == 5) return ModuleId::Mqtt;
         if (i == 6) return ModuleId::Alarm;
+        if (i == 7) return ModuleId::Io;
         return ModuleId::Unknown;
     }
 
@@ -63,7 +64,7 @@ private:
     struct ConfigData {
         bool enabled = true;
         bool autoOff60s = true;
-        int32_t motionGpio = -1;
+        IoId motionIoId = (IoId)(IO_ID_DI_BASE + 8U);
     };
 
     enum class Page : uint8_t {
@@ -134,7 +135,7 @@ private:
     void onEvent_(const Event& e);
     bool beginDisplay_();
     void applyBacklight_(bool on);
-    void updateMotionInput_();
+    void resetMotionInput_();
     void updateBacklight_();
     void render_(bool force);
     void invalidateRenderCache_();
@@ -202,9 +203,9 @@ private:
         NVS_KEY("tfts3auto"), "auto_off_60s", "tft/s3",
         ConfigType::Bool, &cfgData_.autoOff60s, ConfigPersistence::Persistent, 0
     };
-    ConfigVariable<int32_t, 0> motionGpioVar_{
-        NVS_KEY("tfts3pir"), "motion_gpio", "tft/s3",
-        ConfigType::Int32, &cfgData_.motionGpio, ConfigPersistence::Persistent, 0
+    ConfigVariable<IoId, 0> motionIoIdVar_{
+        NVS_KEY("tfts3io"), "motion_io_id", "tft/s3",
+        ConfigType::UInt16, &cfgData_.motionIoId, ConfigPersistence::Persistent, 0
     };
 
     struct DashboardSlotConfig {
@@ -245,13 +246,8 @@ private:
     bool redrawRequested_ = true;
     bool splashHeld_ = false;
     bool backlightOn_ = false;
-    bool motionInputConfigured_ = false;
-    int32_t appliedMotionGpio_ = -1;
-    bool pirRawState_ = false;
-    bool pirStableState_ = false;
-    uint32_t pirDebounceChangedAtMs_ = 0;
-    uint32_t pirDebounceMs_ = 120;
-    bool pirActiveHigh_ = true;
+    bool motionInputReady_ = false;
+    bool motionReadErrorLogged_ = false;
     uint32_t lastMotionMs_ = 0;
     uint32_t lastRenderMs_ = 0;
     uint32_t splashHoldUntilMs_ = 0;

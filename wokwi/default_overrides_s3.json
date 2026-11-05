@@ -4,7 +4,7 @@
   "mq_host": "192.168.86.250",
   "mq_user": "",
   "mq_pass":"",
-  "mq_base": "flowios3",
+  "mq_base": "waveshare",
   "mq_tid": "ESP32-123456",
   "ha_ep": "fios3"
 }

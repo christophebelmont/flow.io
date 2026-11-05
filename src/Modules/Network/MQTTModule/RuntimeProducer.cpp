@@ -1,14 +1,53 @@
 #include "Modules/Network/MQTTModule/RuntimeProducer.h"
 
+#include <Arduino.h>
+#include <esp_heap_caps.h>
+#include <new>
 #include <string.h>
 
-void RuntimeProducer::configure(const MqttService* mqttSvc)
+namespace {
+template <typename T>
+T* allocPsramArray_(size_t count)
+{
+    void* mem = heap_caps_malloc(sizeof(T) * count, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!mem) mem = heap_caps_malloc(sizeof(T) * count, MALLOC_CAP_8BIT);
+    if (!mem) return nullptr;
+
+    T* out = static_cast<T*>(mem);
+    for (size_t i = 0; i < count; ++i) {
+        new (&out[i]) T();
+    }
+    return out;
+}
+
+bool* allocPsramBoolArray_(size_t count)
+{
+    void* mem = heap_caps_calloc(count, sizeof(bool), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!mem) mem = heap_caps_calloc(count, sizeof(bool), MALLOC_CAP_8BIT);
+    return static_cast<bool*>(mem);
+}
+} // namespace
+
+bool RuntimeProducer::ensureStorage_()
+{
+    if (!routes_) routes_ = allocPsramArray_<Route>(Limits::MaxRuntimeRoutes);
+    if (!initialFullSnapshotDone_) initialFullSnapshotDone_ = allocPsramBoolArray_(Limits::MaxRuntimeRoutes);
+    return routes_ && initialFullSnapshotDone_;
+}
+
+void RuntimeProducer::configure(const MqttService* mqttSvc,
+                                InitialFullSnapshotCallback initialFullSnapshotCb,
+                                void* initialFullSnapshotCtx)
 {
     mqttSvc_ = mqttSvc;
+    initialFullSnapshotCb_ = initialFullSnapshotCb;
+    initialFullSnapshotCtx_ = initialFullSnapshotCtx;
+    (void)ensureStorage_();
 }
 
 bool RuntimeProducer::registerProvider(const IRuntimeSnapshotProvider* provider)
 {
+    if (!ensureStorage_()) return false;
     if (!provider) return false;
     if (providerCount_ >= MaxProviders) return false;
 
@@ -23,6 +62,10 @@ bool RuntimeProducer::registerProvider(const IRuntimeSnapshotProvider* provider)
 
 void RuntimeProducer::rebuildRoutes()
 {
+    if (!ensureStorage_()) {
+        routeCount_ = 0;
+        return;
+    }
     routeCount_ = 0;
 
     for (uint8_t p = 0; p < providerCount_; ++p) {
@@ -56,36 +99,81 @@ void RuntimeProducer::markRoutePending_(uint8_t idx, bool force)
     route.force = route.force || force;
 }
 
-void RuntimeProducer::enqueueRoute_(uint8_t idx)
+bool RuntimeProducer::enqueueRoute_(uint8_t idx)
 {
-    if (!mqttSvc_ || !mqttSvc_->enqueue) return;
-    if (idx >= routeCount_) return;
+    if (!mqttSvc_ || !mqttSvc_->enqueue) return false;
+    if (idx >= routeCount_) return false;
 
     const Route& route = routes_[idx];
     const MqttPublishPriority prio = (route.routeClass == RuntimeRouteClass::ActuatorImmediate)
         ? MqttPublishPriority::High
         : MqttPublishPriority::Normal;
 
-    (void)mqttSvc_->enqueue(mqttSvc_->ctx, ProducerId, idx, (uint8_t)prio, 0);
+    return mqttSvc_->enqueue(mqttSvc_->ctx, ProducerId, idx, (uint8_t)prio, 0);
+}
+
+void RuntimeProducer::completeInitialFullSnapshotRoute_(uint8_t idx)
+{
+    if (!initialFullSnapshotActive_) return;
+    if (idx >= routeCount_) return;
+    if (initialFullSnapshotDone_[idx]) return;
+
+    initialFullSnapshotDone_[idx] = true;
+    if (initialFullSnapshotRemaining_ > 0U) {
+        --initialFullSnapshotRemaining_;
+    }
+    if (initialFullSnapshotRemaining_ == 0U) {
+        notifyInitialFullSnapshotComplete_();
+    }
+}
+
+void RuntimeProducer::notifyInitialFullSnapshotComplete_()
+{
+    initialFullSnapshotActive_ = false;
+    if (initialFullSnapshotCb_) {
+        initialFullSnapshotCb_(initialFullSnapshotCtx_);
+    }
 }
 
 void RuntimeProducer::onConnected()
 {
+    if (!ensureStorage_()) return;
+    memset(initialFullSnapshotDone_, 0, sizeof(bool) * Limits::MaxRuntimeRoutes);
+    initialFullSnapshotRemaining_ = routeCount_;
+    initialFullSnapshotActive_ = true;
+    if (routeCount_ == 0U) {
+        notifyInitialFullSnapshotComplete_();
+        return;
+    }
+
     for (uint8_t i = 0; i < routeCount_; ++i) {
         markRoutePending_(i, true);
         enqueueRoute_(i);
     }
 }
 
-void RuntimeProducer::onDataChanged(DataKey key)
+RuntimeProducer::DataChangeStats RuntimeProducer::onDataChanged(DataKey key)
 {
+    DataChangeStats stats{};
+    stats.routeCount = routeCount_;
     for (uint8_t i = 0; i < routeCount_; ++i) {
         Route& route = routes_[i];
         if (!route.provider) continue;
+        ++stats.checked;
         if (!route.provider->runtimeSnapshotAffectsKey(route.snapshotIdx, key)) continue;
+        ++stats.matched;
+        if (route.pending || route.force) ++stats.pendingAlready;
         markRoutePending_(i, false);
-        enqueueRoute_(i);
+        const uint32_t t0 = micros();
+        const bool ok = enqueueRoute_(i);
+        stats.enqueueUs += (uint32_t)(micros() - t0);
+        if (ok) {
+            ++stats.enqueueOk;
+        } else {
+            ++stats.enqueueFail;
+        }
     }
+    return stats;
 }
 
 MqttBuildResult RuntimeProducer::buildMessage(uint16_t messageId, MqttBuildContext& ctx)
@@ -95,6 +183,11 @@ MqttBuildResult RuntimeProducer::buildMessage(uint16_t messageId, MqttBuildConte
     Route& route = routes_[messageId];
     if (!route.provider) return MqttBuildResult::NoLongerNeeded;
     if (!route.pending && !route.force) return MqttBuildResult::NoLongerNeeded;
+    if (!route.provider->runtimeSnapshotSuffix(route.snapshotIdx)) {
+        route.pending = false;
+        route.force = false;
+        return MqttBuildResult::NoLongerNeeded;
+    }
 
     const uint32_t nowMs = millis();
     if (!route.force && route.routeClass == RuntimeRouteClass::NumericThrottled) {
@@ -136,10 +229,12 @@ void RuntimeProducer::onMessagePublished(uint16_t messageId)
     route.lastPublishMs = millis();
     route.pending = false;
     route.force = false;
+    completeInitialFullSnapshotRoute_((uint8_t)messageId);
 }
 
 void RuntimeProducer::onMessageDropped(uint16_t messageId)
 {
     if (messageId >= routeCount_) return;
     routes_[messageId].pending = false;
+    completeInitialFullSnapshotRoute_((uint8_t)messageId);
 }

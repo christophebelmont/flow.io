@@ -21,3 +21,4 @@ struct FiltrationWindowOutput {
 };
 
 bool computeFiltrationWindowDeterministic(const FiltrationWindowInput& in, FiltrationWindowOutput& out);
+bool isFiltrationWindowActiveAtMinute(uint8_t startHour, uint8_t stopHour, uint16_t minuteOfDay);

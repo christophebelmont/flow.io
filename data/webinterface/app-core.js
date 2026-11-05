@@ -1,5 +1,6 @@
 (function () {
   var versionKey = 'flow_web_asset_version';
+  var themeKey = 'flow_web_theme';
   var scriptLoads = new Map();
   var cssLoads = new Map();
 
@@ -41,6 +42,23 @@
     try {
       localStorage.setItem(versionKey, version);
     } catch (err) {}
+  }
+
+  function readStoredTheme() {
+    try {
+      return localStorage.getItem(themeKey) === 'dark' ? 'dark' : 'light';
+    } catch (err) {
+      return 'light';
+    }
+  }
+
+  function applyStoredTheme() {
+    var theme = readStoredTheme();
+    try {
+      document.documentElement.setAttribute('data-theme', theme);
+      document.documentElement.style.colorScheme = theme;
+    } catch (err) {}
+    return theme;
   }
 
   function assetUrl(path, version) {
@@ -195,6 +213,7 @@
   async function bootstrap() {
     var root = document.getElementById('app-root');
     if (!root) return;
+    applyStoredTheme();
 
     try {
       var version = '';
@@ -224,6 +243,7 @@
     loadScriptOnce: loadScriptOnce,
     loadCssOnce: loadCssOnce,
     bootstrap: bootstrap,
+    applyStoredTheme: applyStoredTheme,
     setBootStatus: setBootStatus
   };
 })();

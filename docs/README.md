@@ -1,43 +1,150 @@
-# Documentation Flow.io
+# Documentation flow.io
 
-Cette documentation est organisée pour deux usages distincts:
+<p align="center">
+  <img src="pictures/Logo_flowio.png" alt="Logo flow.io" width="260">
+</p>
 
-- mise en service et adaptation légère par un intégrateur technique
-- référence technique descriptive de l'implémentation actuelle
+Le profil matériel et firmware de référence de flow.io est `Waveshare-ESP32-S3`. Il rassemble la logique piscine, les E/S, le réseau, l'interface web, MQTT, Home Assistant, les mises à jour et l'HMI dans un même ESP32-S3.
 
-Le projet est prévu pour fonctionner avec deux ESP32 distincts, chacun avec son propre firmware:
+## Ensemble matériel de référence
 
-- `FlowIO`: ESP32 principal qui exécute la logique métier et pilote les entrées/sorties
-- `Supervisor`: ESP32 de supervision qui configure le système, assure le provisioning Wi-Fi, gère l'écran TFT, permet la consultation des logs et pilote les mises à jour
+### Contrôleur Waveshare ESP32-S3
 
-Le projet compile aujourd'hui deux firmwares ESP32:
+Le firmware cible le module industriel **Waveshare ESP32-S3-POE-ETH-8DI-8RO**.
 
-| Firmware | Environnement PlatformIO | Rôle |
+<p align="center">
+  <img src="pictures/waveshare-esp32-s3-poe-eth-8di-8ro.png" alt="Module Waveshare ESP32-S3-POE-ETH-8DI-8RO utilisé par flow.io" width="520">
+</p>
+
+La carte fournit 8 entrées digitales isolées, 8 relais, Ethernet W5500, Wi-Fi/BLE, RS485, RTC, buzzer, LED RGB et boîtier rail DIN. Le profil flow.io complète ces ressources avec ses capteurs analogiques, ses sondes 1-Wire et ses extensions I2C. Voir la [fiche officielle Waveshare](https://www.waveshare.com/esp32-s3-eth-8di-8ro.htm).
+
+### Carte flow.io Companion
+
+La carte **flow.io Companion** sert d'interface d'intégration entre le contrôleur Waveshare et les équipements de la piscine.
+
+<p align="center">
+  <img src="pictures/flowio-companion-waveshare.png" alt="Carte flow.io Companion pour Waveshare ESP32-S3" width="820">
+</p>
+
+Une nappe dédiée relie le connecteur d'extension du Waveshare à la Companion. Les signaux sont ainsi reportés sur des connecteurs et borniers clairement identifiés pour présenter directement les ports piscine: pH, ORP, pression et niveau d'eau, températures, niveaux des cuves, compteur d'eau, entrées digitales, I2C et HMI Nextion.
+
+Cette organisation facilite le raccordement des modules piscine dans un ensemble compact et intégré. Elle réduit les liaisons fil à fil, simplifie la mise en service et rend le câblage plus lisible et maintenable. Le Waveshare conserve l'exécution du firmware et le pilotage des E/S; la Companion assure leur présentation et leur distribution physique.
+
+## Démarrage rapide
+
+Compilation et flash du firmware principal:
+
+```sh
+~/.platformio/penv/bin/pio run -e Waveshare-ESP32-S3
+~/.platformio/penv/bin/pio run -e Waveshare-ESP32-S3 -t upload
+~/.platformio/penv/bin/pio device monitor -b 115200
+```
+
+Continuer avec la [mise en service matérielle](integration/mise-en-service.md), puis utiliser la [cartographie IO Waveshare](core/waveshare-io-map.md) pour le câblage et les affectations.
+
+## Comprendre la cartographie IO
+
+Le profil sépare le besoin métier, l'endpoint logiciel et la ressource physique:
+
+```text
+domain_slot (métier)  ->  io_slot (endpoint)  ->  binding_port (matériel)
+Filtration Pump       ->  d00                 ->  300 / EXIO1
+Water Temperature     ->  a04                 ->  120 / OneWire GPIO20
+Pool Level            ->  i11                 ->  225 / MCP23017 GPA5
+```
+
+| Niveau | Définition | Persistance |
 |---|---|---|
-| `FlowIO` | `FlowIO` | ESP32 principal: logique métier, entrées/sorties, MQTT, Home Assistant, écran Nextion |
-| `Supervisor` | `Supervisor` | ESP32 de supervision: configuration, provisioning Wi-Fi, écran TFT, consultation des logs, mises à jour, passerelle I2C vers `FlowIO` |
+| `domain_slot` | rôle stable du domaine Pool, par exemple ORP, pompe de filtration ou niveau bassin | compilé dans le domaine |
+| `io_slot` | endpoint logique de `IOModule`: `aNN`, `iNN` ou `dNN` | structure compilée, configuration du slot en NVS |
+| `binding_port` | port physique sélectionnable: GPIO, expander, ADS1115, OneWire ou capteur I2C | valeur du slot stockée en NVS |
+
+La page [Binding ports, IO slots et domain slots](core/waveshare-io-map.md) contient l'inventaire exhaustif et les affectations par défaut.
+
+### Affectations métier principales
+
+| Domain slot | IO slot | Binding port par défaut |
+|---|---|---|
+| ORP / pH / pression / analogique libre | `a00..a03` | ADS1115 interne `100..103` |
+| température eau / air | `a04..a05` | OneWire `120..121` |
+| courant / tension | `a06..a07` | INA226 `140` / `139` |
+| PIR / niveaux | `i08..i11` | MCP23017 `220`, `223..225` |
+| compteur d'eau | `i12` | entrée optocouplée GPIO4, port `200` |
+| filtration / pH / chlore / robot | `d00..d03` | `EXIO1..EXIO4`, ports `300..303` |
+| remplissage / électrolyse / éclairage / chauffage | `d04..d07` | `EXIO5..EXIO8`, ports `304..307` |
+
+Les entrées isolées de la carte occupent `i00..i07`, mais GPIO4 est réservé par défaut au compteur `i12`; le binding initial de `i00` est donc « non connecté ». `d06` pilote l'éclairage (`Lights`) via `EXIO7`. Les sorties `d08..d15` utilisent le MCP23017 et restent sans rôle métier Pool par défaut.
+
+## Matériel et interfaces du profil
+
+| Ressource | Configuration du firmware |
+|---|---|
+| Ethernet | W5500: MOSI 13, MISO 14, SCLK 15, CS 16, INT 12, RST 39 |
+| I2C IO | SDA 42, SCL 41, 400 kHz |
+| Entrées digitales carte | GPIO 4 à 11, slots `i00..i07` |
+| Relais carte | TCA9554 `0x20`, `EXIO1..EXIO8`, slots `d00..d07` |
+| Extension MCP23017 | `0x21`, GPA en entrée et GPB en sortie |
+| OneWire | eau GPIO20, air GPIO19 |
+| HMI série | UART2, RX 44, TX 43, 115200 bauds |
+| TFT ST7789 local | BL 21, CS 45, DC 1, RST 47, MOSI 2, SCLK 48 |
+| Buzzer | GPIO46, actif haut |
+
+Les GPIO 1, 2, 21, 45, 47 et 48 sont réservés au TFT dans l'environnement de production `Waveshare-ESP32-S3`. Ils ne doivent pas être réaffectés comme E/S génériques tant que `FLOW_ENABLE_TFT_S3=1`.
 
 ## Parcours de lecture
 
-### Mise en service et adaptation
+### Installer et adapter
 
 - [Mise en service matérielle et flash](integration/mise-en-service.md)
+- [Cartographie IO du profil Waveshare](core/waveshare-io-map.md)
 - [Adapter le projet à un autre domaine](integration/adaptation-domaine.md)
 
-### Référence technique
+### Comprendre l'architecture
 
 - [Architecture générale](core/architecture.md)
-- [Structure des profils, cartes, domaines et bootstrap](core/profiles-board-domain-app.md)
+- [Profils, cartes, domaines et bootstrap](core/profiles-board-domain-app.md)
 - [Services Core](core/services.md)
 - [Modèle `ConfigStore` / `DataStore` / `EventBus` / MQTT](core/data-event-model.md)
 - [Topologie MQTT](core/mqtt-topics.md)
-- [Protocole I2C `FlowIO` <-> `Supervisor`](core/flow-supervisor-i2c-protocol.md)
 - [Exposition Runtime UI](core/runtime-ui-exposure.md)
-- [Empreinte mémoire `FlowIO`](core/memory-footprint-flowio.md)
-- [Matrice des modules](core/module-quality-gates.md)
+- [Matrice qualité du profil Waveshare](core/module-quality-gates.md)
 - [Schéma d'ensemble du programme](program_structure.md)
 
-### Référence par module
+### Références historiques
+
+Ces pages restent utiles aux installations à deux contrôleurs `FlowIO` / `Supervisor`, mais elles ne décrivent pas la cible matérielle principale:
+
+- [Protocole I2C `FlowIO` ↔ `Supervisor`](core/flow-supervisor-i2c-protocol.md)
+- [Empreinte mémoire du profil historique `FlowIO`](core/memory-footprint-flowio.md)
+
+## Composition du firmware principal
+
+L'environnement `[env:Waveshare-ESP32-S3]` active `FLOW_PROFILE_WAVESHARE=1` et `FLOW_BOARD_WAVESHARE_ESP32_S3=1`. Le bootstrap `src/Profiles/Waveshare/WaveshareBootstrap.cpp` enregistre notamment:
+
+- les services Core de logs, configuration, état runtime, commandes et événements;
+- Ethernet, Wi-Fi, provisioning et interface web;
+- mise à jour du firmware, temps/RTC, MQTT et Home Assistant;
+- HMI UDP/série, buzzer et TFT local;
+- `IOModule`, `PoolLogicModule`, `PoolDeviceModule` et supervision système.
+
+Les environnements `FlowIO`, `Supervisor`, `FlowConnectDisplay` et `Micronova` sont conservés comme profils secondaires ou historiques. `WaveshareWokwi` permet la simulation du profil principal.
+
+## Capacités statiques Waveshare
+
+| Domaine | Capacité compile-time |
+|---|---:|
+| Entrées analogiques / slots config | 16 / 16 |
+| Entrées digitales / slots config | 13 / 13 |
+| Sorties digitales / slots config | 16 / 16 |
+| Domain slots / bindings domaine-IO | 20 / 20 |
+| Indices `PoolDevice` | 8, dont 7 presets métier |
+| Entités Home Assistant: sensors / binary sensors / switches | 48 / 16 / 16 |
+| Entités Home Assistant: numbers / buttons / selects | 30 / 24 / 6 |
+| Routes runtime MQTT | 112 |
+| File EventBus | 40 |
+| Variables de configuration | 768 |
+
+## Référence par module
 
 - [LogHubModule](modules/LogHubModule.md)
 - [LogDispatcherModule](modules/LogDispatcherModule.md)
@@ -59,138 +166,3 @@ Le projet compile aujourd'hui deux firmwares ESP32:
 - [IOModule](modules/IOModule.md)
 - [PoolLogicModule](modules/PoolLogicModule.md)
 - [PoolDeviceModule](modules/PoolDeviceModule.md)
-
-## Brochage actuel
-
-Les tableaux ci-dessous décrivent le câblage actuellement reflété par les sources du dépôt.
-
-### Flow.io
-
-Références principales:
-
-- `src/Board/FlowIODINBoards.h`
-- `src/Board/BoardSerialMap.h`
-
-| GPIO | Usage | Remarque |
-|---|---|---|
-| 32 | relais `relay1` | sortie digitale, rôle par défaut `FiltrationPump` |
-| 25 | relais `relay2` | sortie digitale, rôle par défaut `PhPump` |
-| 26 | relais `relay3` | sortie digitale, rôle par défaut `ChlorinePump` |
-| 13 | relais `relay4` | sortie digitale impulsionnelle, rôle par défaut `ChlorineGenerator` |
-| 33 | relais `relay5` | sortie digitale, rôle par défaut `Robot` |
-| 27 | relais `relay6` | sortie digitale, rôle par défaut `Lights` |
-| 23 | relais `relay7` | sortie digitale, rôle par défaut `FillPump` |
-| 4 | relais `relay8` | sortie digitale, rôle par défaut `WaterHeater` |
-| 34 | `digital_in1` | entrée digitale, rôle par défaut `PoolLevelSensor` |
-| 36 | `digital_in2` | entrée digitale, rôle par défaut `PhLevelSensor` |
-| 39 | `digital_in3` | entrée digitale, rôle par défaut `ChlorineLevelSensor` |
-| 35 | `digital_in4` | entrée digitale, rôle par défaut `WaterCounterSensor` |
-| 19 | `temp_probe_1` | bus 1-Wire, rôle par défaut `WaterTemp` |
-| 18 | `temp_probe_2` | bus 1-Wire, rôle par défaut `AirTemp` |
-| 21 | I2C `io` SDA | bus principal des ADS1115 et du PCF8574 |
-| 22 | I2C `io` SCL | bus principal des ADS1115 et du PCF8574 |
-| 5 | I2C interlink SDA | bus `interlink` board (source de vérité) |
-| 15 | I2C interlink SCL | bus `interlink` board (source de vérité) |
-| 16 | UART2 RX | interface Nextion par défaut |
-| 17 | UART2 TX | interface Nextion par défaut |
-| 1 / 3 | UART0 | console série par défaut |
-
-### Supervisor
-
-Références principales:
-
-- `src/Board/SupervisorBoardRev1.h`
-- `src/Profiles/Supervisor/SupervisorProfile.cpp`
-
-| GPIO | Usage | Remarque |
-|---|---|---|
-| 27 | I2C interlink SDA | bus `interlink` board vers `FlowIO` |
-| 13 | I2C interlink SCL | bus `interlink` board vers `FlowIO` |
-| 16 | UART `bridge` RX | pont série vers `FlowIO` |
-| 17 | UART `bridge` TX | pont série vers `FlowIO` |
-| 33 | UART `panel` RX | liaison série Nextion côté Supervisor |
-| 32 | UART `panel` TX | liaison série Nextion côté Supervisor |
-| 25 | `flowIoEnablePin` | activation/reset matériel du `FlowIO` cible |
-| 26 | `flowIoBootPin` | entrée mode bootloader du `FlowIO` cible |
-| 12 | `nextionRebootPin` | redémarrage matériel Nextion |
-| 14 | TFT ST7789 backlight | écran local Supervisor |
-| 15 | TFT ST7789 CS | écran local Supervisor |
-| 4 | TFT ST7789 DC | écran local Supervisor |
-| 5 | TFT ST7789 RST | écran local Supervisor |
-| 35 | TFT ST7789 MISO | écran local Supervisor |
-| 18 | TFT ST7789 MOSI/SDA | écran local Supervisor |
-| 19 | TFT ST7789 SCLK/SCL | écran local Supervisor |
-| 36 | entrée PIR | extinction automatique du backlight et rallumage sur détection de présence |
-| 1 / 3 | UART0 | console série par défaut |
-
-Sur le profil `Supervisor`, le reset Wi-Fi par appui long est câblé sur `factoryResetPin=23` dans `src/Board/SupervisorBoardRev1.h`.
-
-## Composition actuelle des firmwares
-
-### Profil `FlowIO`
-
-Ordre d'enregistrement dans `src/Profiles/FlowIO/FlowIOBootstrap.cpp`:
-
-1. `loghub`
-2. `log.dispatcher`
-3. `log.sink.serial`
-4. `eventbus`
-5. `config`
-6. `datastore`
-7. `cmd`
-8. `i2ccfg.server`
-9. `hmi`
-10. `alarms`
-11. `wifi`
-12. `time`
-13. `mqtt`
-14. `ha`
-15. `system`
-16. `io`
-17. `poollogic`
-18. `pooldev`
-19. `sysmon`
-
-### Profil `Supervisor`
-
-Ordre d'enregistrement dans `src/Profiles/Supervisor/SupervisorBootstrap.cpp`:
-
-1. `loghub`
-2. `log.dispatcher`
-3. `log.sink.serial`
-4. `eventbus`
-5. `config`
-6. `datastore`
-7. `cmd`
-8. `alarms`
-9. `log.sink.alarm`
-10. `wifi`
-11. `wifiprov`
-12. `time`
-13. `i2ccfg.client`
-14. `webinterface`
-15. `fwupdate`
-16. `hmi.supervisor`
-17. `system`
-18. `sysmon`
-
-## Capacités statiques utiles à l'intégration
-
-Les valeurs ci-dessous correspondent à l'implémentation actuelle du profil `FlowIO`.
-
-| Domaine | Capacité compile-time | Implémentation |
-|---|---:|---|
-| Entrées analogiques IO | 17 | `IOModule::MAX_ANALOG_ENDPOINTS` |
-| Entrées digitales IO | 5 | `IOModule::MAX_DIGITAL_INPUTS` |
-| Sorties digitales IO | 10 | `IOModule::MAX_DIGITAL_OUTPUTS` |
-| Équipements `PoolDevice` | 8 | `POOL_DEVICE_MAX` |
-| Capteurs Home Assistant | 40 | `HAModule::MAX_HA_SENSORS` |
-| Binary sensors Home Assistant | 6 | `HAModule::MAX_HA_BINARY_SENSORS` |
-| Switches Home Assistant | 14 | `HAModule::MAX_HA_SWITCHES` |
-| Numbers Home Assistant | 14 | `HAModule::MAX_HA_NUMBERS` |
-| Buttons Home Assistant | 24 | `HAModule::MAX_HA_BUTTONS` |
-| Routes runtime MQTT* | 56 | `Limits::MaxRuntimeRoutes` |
-| EventBus queue | 40 | `Limits::EventQueueLen` |
-| Variables de configuration | 380 | `Limits::MaxConfigVars` |
-
-\* Une route runtime MQTT correspond à un canal de publication runtime déclaré dans le firmware. Chaque route relie une source d'état interne à un suffixe de topic MQTT, par exemple `rt/io/input/a0`, `rt/pdm/state/pd0` ou `rt/system/state`.

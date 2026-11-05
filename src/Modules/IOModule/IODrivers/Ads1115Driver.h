@@ -6,7 +6,7 @@
 
 #include <ADS1X15.h>
 #include <stdint.h>
-#include "Modules/IOModule/IOBus/I2CBus.h"
+#include "Core/I2cBus.h"
 #include "Modules/IOModule/IODrivers/IODriver.h"
 
 struct Ads1115DriverConfig {

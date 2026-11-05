@@ -80,7 +80,7 @@ Les broches réelles se changent dans les fichiers `Board`.
 
 Fichier de référence:
 
-- `src/Board/FlowIODINBoards.h`
+- `src/Board/FlowIODINBoard.h`
 
 On y trouve:
 
@@ -215,6 +215,6 @@ Exemples dans le code actuel:
 - `src/Profiles/Supervisor/SupervisorProfile.cpp`
 - `src/Profiles/Supervisor/SupervisorProfile.h`
 - `src/Profiles/Supervisor/SupervisorBootstrap.cpp`
-- `src/Board/FlowIODINBoards.h`
+- `src/Board/FlowIODINBoard.h`
 - `src/Board/SupervisorBoardRev1.h`
 - `src/Domain/Pool/PoolDomain.h`

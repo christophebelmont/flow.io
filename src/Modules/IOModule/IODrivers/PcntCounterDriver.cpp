@@ -7,10 +7,34 @@
 
 #include <esp_err.h>
 #include <soc/soc_caps.h>
+#if FLOW_PCNT_USE_PULSE_CNT
+#include <esp_private/esp_clk.h>
+#endif
 
 namespace {
 portMUX_TYPE gPcntCounterMux = portMUX_INITIALIZER_UNLOCKED;
 uint32_t gPcntUnitsMask = 0;
+
+#if FLOW_PCNT_USE_PULSE_CNT
+constexpr uint32_t kPcntMaxGlitchWidthCycles = 1023U;
+constexpr uint32_t kFallbackApbMhz = 80U;
+
+uint32_t pcntMaxGlitchFilterNs_()
+{
+    uint32_t apbMhz = static_cast<uint32_t>(esp_clk_apb_freq() / 1000000);
+    if (apbMhz == 0U) apbMhz = kFallbackApbMhz;
+    return (kPcntMaxGlitchWidthCycles * 1000U) / apbMhz;
+}
+
+uint32_t pcntHardwareFilterNs_(uint32_t debounceUs)
+{
+    if (debounceUs == 0U) return 0U;
+    const uint64_t requestedNs = static_cast<uint64_t>(debounceUs) * 1000ULL;
+    const uint32_t maxNs = pcntMaxGlitchFilterNs_();
+    if (requestedNs > static_cast<uint64_t>(maxNs)) return maxNs;
+    return static_cast<uint32_t>(requestedNs);
+}
+#endif
 }
 
 PcntCounterDriver::PcntCounterDriver(const char* driverId,
@@ -140,8 +164,7 @@ bool PcntCounterDriver::begin()
 
     if (counterDebounceUs_ > 0U) {
         pcnt_glitch_filter_config_t filterCfg{};
-        const uint64_t ns64 = static_cast<uint64_t>(counterDebounceUs_) * 1000ULL;
-        filterCfg.max_glitch_ns = (ns64 > UINT32_MAX) ? UINT32_MAX : static_cast<uint32_t>(ns64);
+        filterCfg.max_glitch_ns = pcntHardwareFilterNs_(counterDebounceUs_);
         if (pcnt_unit_set_glitch_filter(unit_, &filterCfg) != ESP_OK) {
             releaseCounter_();
             return false;

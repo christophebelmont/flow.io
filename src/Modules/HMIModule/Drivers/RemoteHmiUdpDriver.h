@@ -20,7 +20,7 @@ public:
     bool publishHomeStateBits(uint32_t stateBits) override;
     bool publishHomeAlarmBits(uint32_t alarmBits) override;
     bool hasDisplayVersion() const override;
-    uint32_t displayVersion() const override;
+    const char* displayVersion() const override;
     bool isLegacyV2() const override;
     bool publishV2Needles(const NextionV2NeedlePublish& publish) override;
     bool readRtc(HmiRtcDateTime& out, uint16_t timeoutMs) override;

@@ -141,7 +141,7 @@ void LogHub::init(int queueLen) {
     qStorage_ = nullptr;
     qStorageInPsram_ = false;
 
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
     const size_t storageBytes = (size_t)queueLen_ * sizeof(LogEntry);
     qStorage_ = static_cast<uint8_t*>(
         heap_caps_malloc(storageBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)

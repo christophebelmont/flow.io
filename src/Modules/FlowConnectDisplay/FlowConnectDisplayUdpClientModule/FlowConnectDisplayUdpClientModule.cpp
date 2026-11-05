@@ -144,7 +144,8 @@ void FlowConnectDisplayUdpClientModule::sendHello_(uint32_t nowMs, bool force)
     payload.displayFw = 1U;
     payload.protoVersion = HMI_UDP_VERSION;
     if (nextion_.hasDisplayVersion()) {
-        payload.nextionVersion = nextion_.displayVersion();
+        strncpy(payload.nextionVersion, nextion_.displayVersion(), sizeof(payload.nextionVersion) - 1U);
+        payload.nextionVersion[sizeof(payload.nextionVersion) - 1U] = '\0';
         payload.flags |= HMI_UDP_HELLO_FLAG_NEXTION_VERSION_VALID;
     }
     if (nextion_.isSleeping()) {
@@ -174,15 +175,19 @@ void FlowConnectDisplayUdpClientModule::probeNextionVersion_(uint32_t nowMs, boo
 {
     if (nextion_.isSleeping()) return;
     const bool hadVersion = nextion_.hasDisplayVersion();
-    const uint32_t previousVersion = nextion_.displayVersion();
+    char previousVersion[HMI_DISPLAY_VERSION_TEXT_MAX]{};
+    if (hadVersion) {
+        strncpy(previousVersion, nextion_.displayVersion(), sizeof(previousVersion) - 1U);
+        previousVersion[sizeof(previousVersion) - 1U] = '\0';
+    }
     const uint32_t period = hadVersion ? VersionRecheckPeriodMs : VersionProbeRetryMs;
     if (!force && (uint32_t)(nowMs - lastVersionProbeMs_) < period) return;
     lastVersionProbeMs_ = nowMs;
 
     if (nextion_.detectDisplayVersion(0U, force || hadVersion)) {
-        const uint32_t currentVersion = nextion_.displayVersion();
-        if (!hadVersion || currentVersion != previousVersion) {
-            LOGI("FCD Nextion version=%lu", (unsigned long)currentVersion);
+        const char* currentVersion = nextion_.displayVersion();
+        if (!hadVersion || strcmp(currentVersion, previousVersion) != 0) {
+            LOGI("FCD Nextion version=%s", currentVersion);
         }
     } else if (force) {
         LOGD("FCD Nextion version not available yet");
@@ -721,7 +726,6 @@ bool FlowConnectDisplayUdpClientModule::requestWifiFactoryReset_()
     }
 
     const bool patchOk = cfgStore_->applyJson("{\"wifi\":{\"enabled\":true,\"ssid\":\"\",\"pass\":\"\"}}");
-    const bool eraseMdnsOk = cfgStore_->eraseKey(NvsKeys::Wifi::Mdns);
 
     WiFi.mode(WIFI_MODE_STA);
     delay(20);
@@ -735,9 +739,8 @@ bool FlowConnectDisplayUdpClientModule::requestWifiFactoryReset_()
     (void)WiFi.disconnect(true, true);
 
     if (!patchOk) {
-        LOGE("FCD WiFi factory reset failed patch=%d mdns_erase=%d wifi_err=%d",
+        LOGE("FCD WiFi factory reset failed patch=%d wifi_err=%d",
              patchOk ? 1 : 0,
-             eraseMdnsOk ? 1 : 0,
              (int)restoreErr);
         (void)nextion_.publishHomeText(HmiHomeTextField::ErrorMessage, "WiFi reset failed");
         return false;
@@ -751,9 +754,8 @@ bool FlowConnectDisplayUdpClientModule::requestWifiFactoryReset_()
     wifiFactoryResetAtMs_ = millis() + 900U;
     (void)nextion_.publishHomeText(HmiHomeTextField::ErrorMessage, "WiFi reset...");
     setFlowConnectionVisible_(false, "wifi-factory-reset", true);
-    LOGW("FCD WiFi factory reset done patch=%d mdns_erase=%d wifi_err=%d reboot_ms=900",
+    LOGW("FCD WiFi factory reset done patch=%d wifi_err=%d reboot_ms=900",
          patchOk ? 1 : 0,
-         eraseMdnsOk ? 1 : 0,
          (int)restoreErr);
     return true;
 }

@@ -5,9 +5,7 @@
     "version": 1
   },
   "docs": {
-    "hmi/tft": {
-      "label_t": "cfgmods.hmi.tft.label"
-    },
+    "hmi/tft": {},
     "hmi/tft/sensors": {
       "label_t": "cfgmods.hmi.tft.sensors.label"
     },
@@ -27,7 +25,9 @@
         "display": "hmi",
         "children": [
           "leds",
+          "buzzer",
           "nextion",
+          "nextion_udp",
           "tft",
           "venice"
         ]

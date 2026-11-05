@@ -54,5 +54,5 @@ Exemple d'application d'un patch:
 #include "Core/ServiceId.h"
 
 const ConfigStoreService* cfg = services.get<ConfigStoreService>(ServiceId::ConfigStore);
-if (cfg) cfg->applyJson(cfg->ctx, "{\"poollogic/mode\":{\"auto_mode\":true}}");
+if (cfg) cfg->applyJson(cfg->ctx, "{\"poollogic/modes\":{\"auto_mode\":true}}");
 ```

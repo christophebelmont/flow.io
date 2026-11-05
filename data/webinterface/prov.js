@@ -87,18 +87,18 @@
 
   function updateScanStatus(data) {
     if (!data || data.ok !== true) {
-      setStatus("Scan WiFi indisponible.", "error");
+      setStatus("Scan reseau indisponible.", "error");
       return;
     }
     const running = !!data.running || !!data.requested;
     const count = Number.isFinite(data.count) ? data.count : 0;
     const total = Number.isFinite(data.total_found) ? data.total_found : count;
     if (running) {
-      setStatus("Scan WiFi en cours...", "info");
+      setStatus("Scan reseau en cours...", "info");
       return;
     }
     if (count > 0) {
-      setStatus("Scan WiFi termine : " + count + " reseaux affiches (" + total + " detectes).", "ok");
+      setStatus("Scan reseau termine : " + count + " reseaux affiches (" + total + " detectes).", "ok");
       return;
     }
     setStatus("Aucun reseau visible detecte.", "info");
@@ -109,7 +109,7 @@
     try {
       if (start) {
         await apiJson("/api/wifi/scan", postForm({ force: "1" }), "scan");
-        setStatus("Scan WiFi lance...", "info");
+        setStatus("Scan reseau lance...", "info");
       }
       const data = await apiJson("/api/wifi/scan", { cache: "no-store" }, "scan");
       renderNetworks(data);
@@ -118,7 +118,7 @@
         state.scanTimer = window.setTimeout(() => refreshScan(false), 1200);
       }
     } catch (err) {
-      setStatus("Erreur scan WiFi: " + err.message, "error");
+      setStatus("Erreur scan reseau: " + err.message, "error");
     }
   }
 
@@ -139,10 +139,10 @@
       el("provWifiEnabled").checked = toBool(data.enabled);
       el("provWifiSsid").value = data.ssid || "";
       el("provWifiPass").value = data.pass || "";
-      setStatus("Configuration WiFi prete.", "ok");
+      setStatus("Configuration reseau prete.", "ok");
       refreshScan(true);
     } catch (err) {
-      setStatus("Chargement WiFi echoue: " + err.message, "error");
+      setStatus("Chargement reseau echoue: " + err.message, "error");
     }
   }
 
@@ -156,7 +156,7 @@
 
     state.saving = true;
     setBusy(true);
-    setStatus("Enregistrement WiFi...", "info");
+    setStatus("Enregistrement reseau...", "info");
     try {
       const data = await apiJson("/api/wifi/config", postForm({
         enabled: el("provWifiEnabled").checked ? "1" : "0",
@@ -164,14 +164,14 @@
         pass: el("provWifiPass").value || ""
       }), "wifi");
 
-      setStatus("Configuration WiFi enregistree. Redemarrage en cours...", "ok");
+      setStatus("Configuration reseau enregistree. Redemarrage en cours...", "ok");
       if (!data.reboot_scheduled) {
         await fetch("/api/system/reboot", { method: "POST" }).catch(() => null);
       }
     } catch (err) {
       state.saving = false;
       setBusy(false);
-      setStatus("Enregistrement WiFi echoue: " + err.message, "error");
+      setStatus("Enregistrement reseau echoue: " + err.message, "error");
     }
   }
 

@@ -25,13 +25,18 @@ enum class BoardSignal : uint8_t {
     DigitalIn2, // Digital input channel 2.
     DigitalIn3, // Digital input channel 3.
     DigitalIn4, // Digital input channel 4.
+    DigitalIn5, // Digital input channel 5.
+    DigitalIn6, // Digital input channel 6.
+    DigitalIn7, // Digital input channel 7.
+    DigitalIn8, // Digital input channel 8.
     AnalogIn1, // Analog input channel 1.
     AnalogIn2, // Analog input channel 2.
     AnalogIn3, // Analog input channel 3.
     AnalogIn4, // Analog input channel 4.
     TempProbe1, // 1-Wire temperature probe 1.
     TempProbe2, // 1-Wire temperature probe 2.
-    Tx433       // 433 MHz transmitter output.
+    Tx433,      // 433 MHz transmitter output.
+    Buzzer      // Local active buzzer output.
 };
 
 struct UartSpec {
@@ -46,8 +51,8 @@ struct UartSpec {
 
 struct I2cBusSpec {
     const char* name;   // Logical bus name.
-    uint8_t sdaPin;     // SDA GPIO pin.
-    uint8_t sclPin;     // SCL GPIO pin.
+    int8_t sdaPin;      // SDA GPIO pin (-1 when disabled/unwired).
+    int8_t sclPin;      // SCL GPIO pin (-1 when disabled/unwired).
     uint32_t frequencyHz; // I2C clock frequency in Hz.
 };
 
@@ -114,7 +119,7 @@ struct HaCapacitySpec {
     uint8_t switches = 14;
     uint8_t numbers = 14;
     uint8_t buttons = 24;
-    uint8_t discoveryCleanups = 9;
+    uint8_t selects = 4;
 };
 
 struct St7789DisplaySpec {
@@ -175,6 +180,12 @@ struct EthernetW5500Spec {
     uint32_t spiClockHz = 20000000U; // SPI clock in Hz.
 };
 
+struct HmiBuzzerSpec {
+    bool enabled = false;       // True when the board exposes a local HMI buzzer.
+    int8_t pin = -1;            // GPIO driving the active buzzer.
+    bool activeHigh = true;     // True when HIGH turns the buzzer on.
+};
+
 struct BoardSpec {
     const char* name;                  // Board identifier exposed to the app/runtime.
     const char* mdnsHost;              // Default mDNS host name for this board/profile.
@@ -193,4 +204,5 @@ struct BoardSpec {
     const SupervisorBoardSpec* supervisor = nullptr; // Optional supervisor-only extension block.
     ProvisioningPolicySpec provisioning{}; // Optional provisioning policy for staged boot.
     const EthernetW5500Spec* ethernetW5500 = nullptr; // Optional W5500 Ethernet wiring block.
+    const HmiBuzzerSpec* hmiBuzzer = nullptr; // Optional local HMI feedback buzzer wiring.
 };

@@ -4,7 +4,6 @@
 
 #include "App/AppContext.h"
 #include "Board/BoardSpec.h"
-#include "Core/ConfigMigrations.h"
 #include "Core/NvsKeys.h"
 
 namespace Profiles {
@@ -19,8 +18,6 @@ void setupProfile(AppContext& ctx)
 
     ctx.preferences.begin(NvsKeys::StorageNamespace, false);
     ctx.registry.setPreferences(ctx.preferences);
-    ctx.registry.runMigrations(CURRENT_CFG_VERSION, steps, MIGRATION_COUNT);
-
     ctx.moduleManager.add(&modules.logHubModule);
     ctx.moduleManager.add(&modules.logDispatcherModule);
     ctx.moduleManager.add(&modules.logSerialSinkModule);

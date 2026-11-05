@@ -92,6 +92,74 @@ void AlarmModule::emitAlarmEvent_(EventId id, AlarmId alarmId) const
     (void)eventBus_->post(id, &payload, sizeof(payload), ModuleId::Alarm);
 }
 
+void AlarmModule::emitAlarmActivity_(ActivityCode code, AlarmId alarmId)
+{
+    if (!activityLogSvc_ || !activityLogSvc_->emit) return;
+
+    AlarmRegistration def{};
+    uint8_t slot = ACTIVITY_TARGET_NONE;
+    bool found = false;
+    portENTER_CRITICAL(&slotsMux_);
+    const int16_t idx = findSlotById_(alarmId);
+    if (idx >= 0) {
+        def = slots_[(uint16_t)idx].def;
+        slot = (uint8_t)idx;
+        found = true;
+    }
+    portEXIT_CRITICAL(&slotsMux_);
+    if (!found || !def.activityLogEnabled) return;
+
+    ActivityEvent event{};
+    event.code = (uint16_t)code;
+    event.alarmId = (uint16_t)alarmId;
+    event.domain = (uint8_t)ActivityDomain::Alarm;
+    event.role = (uint8_t)ActivityRole::None;
+    event.targetSlot = slot;
+
+    const char* detailSuffix = "";
+    if (code == ActivityCode::AlarmRaised) {
+        event.source = (uint8_t)ActivitySource::Safety;
+        event.state = (uint8_t)ActivityState::On;
+        event.reason = (uint8_t)ActivityReason::Safety;
+        if (def.severity == AlarmSeverity::Warning) {
+            event.severity = (uint8_t)ActivitySeverity::Warning;
+        } else if (def.severity == AlarmSeverity::Alarm || def.severity == AlarmSeverity::Critical) {
+            event.severity = (uint8_t)ActivitySeverity::Alarm;
+        } else {
+            event.severity = (uint8_t)ActivitySeverity::Info;
+        }
+        snprintf(event.title, sizeof(event.title), "Alarme déclenchée");
+        snprintf(event.icon, sizeof(event.icon), "warning");
+    } else if (code == ActivityCode::AlarmConditionOk) {
+        event.source = (uint8_t)ActivitySource::Safety;
+        event.severity = (uint8_t)ActivitySeverity::Success;
+        event.state = (uint8_t)ActivityState::Off;
+        event.reason = (uint8_t)ActivityReason::Safety;
+        detailSuffix = def.latched ? " | réarmement requis" : " | levée automatiquement";
+        snprintf(event.title, sizeof(event.title), "Condition d'alarme OK");
+        snprintf(event.icon, sizeof(event.icon), "check_circle");
+    } else if (code == ActivityCode::AlarmReset) {
+        event.source = (uint8_t)ActivitySource::Manual;
+        event.severity = (uint8_t)ActivitySeverity::Success;
+        event.state = (uint8_t)ActivityState::Off;
+        event.reason = (uint8_t)ActivityReason::Manual;
+        snprintf(event.title, sizeof(event.title), "Alarme réarmée");
+        snprintf(event.icon, sizeof(event.icon), "restart_alt");
+    } else {
+        return;
+    }
+
+    snprintf(event.detail,
+             sizeof(event.detail),
+             "%.44s | %.23s #%u | %.15s%s",
+             def.title,
+             def.code,
+             (unsigned)((uint16_t)alarmId),
+             def.sourceModule,
+             detailSuffix);
+    (void)activityLogSvc_->emit(activityLogSvc_->ctx, &event);
+}
+
 void AlarmModule::noteAlarmNotified_(AlarmId id, uint32_t nowMs)
 {
     portENTER_CRITICAL(&slotsMux_);
@@ -229,6 +297,7 @@ bool AlarmModule::reset_(AlarmId id)
              condStateStr_(resetCond));
         LOGI("Alarm reset id=%u code=%s", (unsigned)id, alarmCode[0] ? alarmCode : "?");
         emitAlarmEvent_(EventId::AlarmReset, id);
+        emitAlarmActivity_(ActivityCode::AlarmReset, id);
         emitAlarmEvent_(EventId::AlarmCleared, id);
     } else if (warnConditionTrue) {
         LOGW("Alarm reset denied id=%u code=%s cond=true active=1 latched=1",
@@ -616,6 +685,7 @@ void AlarmModule::init(ConfigStore& cfg, ServiceRegistry& services)
     eventBus_ = eb ? eb->bus : nullptr;
     cmdSvc_ = services.get<CommandService>(ServiceId::Command);
     haSvc_ = services.get<HAService>(ServiceId::Ha);
+    activityLogSvc_ = services.get<ActivityLogService>(ServiceId::ActivityLog);
 
     if (!services.add(ServiceId::Alarm, &alarmSvc_)) {
         LOGE("service registration failed: %s", toString(ServiceId::Alarm));
@@ -690,6 +760,9 @@ void AlarmModule::registerHaEntities_(ServiceRegistry& services)
 
 void AlarmModule::onConfigLoaded(ConfigStore&, ServiceRegistry& services)
 {
+    if (!activityLogSvc_) {
+        activityLogSvc_ = services.get<ActivityLogService>(ServiceId::ActivityLog);
+    }
     if (!cfgMqttPub_) {
         cfgMqttPub_ = new (std::nothrow) MqttConfigRouteProducer();
     }
@@ -734,6 +807,7 @@ void AlarmModule::evaluateOnce_(uint32_t nowMs)
         bool postCleared = false;
         bool postCondTrue = false;
         bool postCondFalse = false;
+        bool postConditionOk = false;
         char alarmCode[sizeof(slots_[0].def.code)] = {0};
 
         portENTER_CRITICAL(&slotsMux_);
@@ -747,6 +821,7 @@ void AlarmModule::evaluateOnce_(uint32_t nowMs)
                     alarmCode[sizeof(alarmCode) - 1] = '\0';
                 } else if (cond == AlarmCondState::False) {
                     postCondFalse = true;
+                    postConditionOk = s.active && s.def.latched;
                     strncpy(alarmCode, s.def.code, sizeof(alarmCode) - 1);
                     alarmCode[sizeof(alarmCode) - 1] = '\0';
                 }
@@ -812,12 +887,17 @@ void AlarmModule::evaluateOnce_(uint32_t nowMs)
         if (postRaised) {
             noteAlarmNotified_(id, nowMs);
             emitAlarmEvent_(EventId::AlarmRaised, id);
+            emitAlarmActivity_(ActivityCode::AlarmRaised, id);
         } else if (postCleared) {
             noteAlarmNotified_(id, nowMs);
             emitAlarmEvent_(EventId::AlarmCleared, id);
+            emitAlarmActivity_(ActivityCode::AlarmConditionOk, id);
         } else if (postCondTrue || postCondFalse) {
             noteAlarmNotified_(id, nowMs);
             emitAlarmEvent_(EventId::AlarmConditionChanged, id);
+        }
+        if (postConditionOk) {
+            emitAlarmActivity_(ActivityCode::AlarmConditionOk, id);
         }
     }
 }

@@ -66,7 +66,7 @@ bool ConfigStore::ensureMetaStorage_()
 
     const size_t bytes = MAX_CONFIG_VARS * sizeof(ConfigMeta);
     void* mem = nullptr;
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
     if (psramFound()) {
         mem = heap_caps_calloc(MAX_CONFIG_VARS, sizeof(ConfigMeta), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (mem) {
@@ -209,16 +209,6 @@ bool ConfigStore::putString_(const char* key, const char* value)
     unlockPrefs_();
     recordNvsWrite_(wrote);
     return (wrote > 0U) || (value[0] == '\0');
-}
-
-bool ConfigStore::putUInt_(const char* key, uint32_t value)
-{
-    if (!_prefs || !key) return false;
-    if (!lockPrefs_()) return false;
-    const size_t wrote = _prefs->putUInt(key, value);
-    unlockPrefs_();
-    recordNvsWrite_(wrote);
-    return wrote == sizeof(uint32_t);
 }
 
 bool ConfigStore::readRuntimeBlob(const char* key, void* out, size_t outLen, size_t* actualLen)
@@ -826,74 +816,5 @@ bool ConfigStore::applyJson(const char* json)
         }
     }
     Log::debug(LOG_MODULE_ID, "applyJson: done");
-    return true;
-}
-
-bool ConfigStore::runMigrations(uint32_t currentVersion,
-                                const MigrationStep* steps,
-                                size_t count,
-                                const char* versionKey,
-                                bool clearOnFail)
-{
-    if (!_prefs || !steps || count == 0) return false;
-    if (!versionKey) versionKey = NvsKeys::ConfigVersion;
-
-    if (!lockPrefs_()) return false;
-    uint32_t storedVersion = _prefs->getUInt(versionKey, 0);
-    unlockPrefs_();
-    Log::debug(LOG_MODULE_ID, "migrations: stored=%lu current=%lu",
-               (unsigned long)storedVersion, (unsigned long)currentVersion);
-
-    /// Déjà à jour
-    if (storedVersion == currentVersion) return true;
-
-    /// Version future (downgrade firmware par ex)
-    if (storedVersion > currentVersion) {
-        /// selon ton choix : refuser ou accepter
-        return false;
-    }
-
-    while (storedVersion < currentVersion) {
-        bool stepFound = false;
-
-        for (size_t i = 0; i < count; ++i) {
-            const MigrationStep& s = steps[i];
-            if (s.fromVersion == storedVersion) {
-                stepFound = true;
-
-                if (!s.apply) return false;
-
-                bool ok = s.apply(*_prefs, clearOnFail);
-                if (!ok) {
-                    Log::warn(LOG_MODULE_ID, "migration failed: %lu -> %lu",
-                              (unsigned long)s.fromVersion, (unsigned long)s.toVersion);
-                    if (clearOnFail) {
-                        if (!lockPrefs_()) return false;
-                        _prefs->clear();
-                        unlockPrefs_();
-                        putUInt_(versionKey, 0);
-                    }
-                    return false;
-                }
-
-                storedVersion = s.toVersion;
-                putUInt_(versionKey, storedVersion);
-                Log::debug(LOG_MODULE_ID, "migration applied: now=%lu", (unsigned long)storedVersion);
-                break;
-            }
-        }
-
-        if (!stepFound) {
-            if (clearOnFail) {
-                _prefs->clear();
-                putUInt_(versionKey, 0);
-            }
-            return false;
-        }
-    }
-
-    /// On garantit qu'on est bien à la version courante
-    putUInt_(versionKey, currentVersion);
-    Log::debug(LOG_MODULE_ID, "migrations: completed at %lu", (unsigned long)currentVersion);
     return true;
 }

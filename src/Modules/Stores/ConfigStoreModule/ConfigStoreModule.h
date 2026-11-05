@@ -41,23 +41,30 @@ private:
         PersistenceOp op = PersistenceOp::EraseKey;
         char key[Limits::MaxNvsKeyLen + 1] = {0};
         uint8_t len = 0;
-        uint8_t bytes[16] = {0};
+        uint8_t bytes[Limits::Config::Capacity::RuntimeBlobAsyncMax] = {0};
         float floatValue = 0.0f;
         uint8_t moduleId = (uint8_t)ConfigModuleId::Unknown;
         uint8_t localBranchId = ConfigBranchRef::UnknownLocalBranch;
         char moduleName[sizeof(ConfigChangedPayload::module)] = {0};
     };
 
-    static constexpr uint8_t kPersistenceQueueLen = 16;
-    static constexpr size_t kPersistenceBlobMax = 16U;
+    static constexpr uint8_t kPersistenceQueueLen = Limits::Config::Capacity::PersistenceQueueLen;
+    static constexpr size_t kPersistenceBlobMax = Limits::Config::Capacity::RuntimeBlobAsyncMax;
 
     ConfigStore* registry = nullptr;
+    ServiceRegistry* services_ = nullptr;
     const LogHubService* logHub = nullptr;
+    const ActivityLogService* activityLog_ = nullptr;
     QueueHandle_t persistenceQ_ = nullptr;
     StaticQueue_t persistenceQStatic_{};
-    uint8_t persistenceQStorage_[kPersistenceQueueLen * sizeof(PersistenceRequest)]{};
+    uint8_t* persistenceQStorage_ = nullptr;
+#if !defined(FLOW_PROFILE_WAVESHARE)
+    uint8_t persistenceQStorageLocal_[kPersistenceQueueLen * sizeof(PersistenceRequest)]{};
+#endif
+    bool persistenceQStorageInPsram_ = false;
 
     bool applyJson_(const char* json);
+    void emitApplyJsonActivity_(const char* json);
     void toJson_(char* out, size_t outLen);
     bool toJsonModule_(const char* module, char* out, size_t outLen, bool* truncated);
     uint8_t listModules_(const char** out, uint8_t max);

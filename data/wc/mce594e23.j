@@ -1,1 +1,0 @@
-{"ok":true,"module":"pdmrt/pd2","docs":{"pdmrt/pd2/metrics_blob":{"type":"char","label_t":"cfgdocs.pdmrt.pd2.metrics_blob.label","help_t":"cfgdocs.pdmrt.pd2.metrics_blob.help","label":"Blob métriques","label_i18n":"cfgdocs.pdmrt.pd2.metrics_blob.label","help":"État/métriques persistees de l'appareil pour reprise.","help_i18n":"cfgdocs.pdmrt.pd2.metrics_blob.help"}},"meta":{}}

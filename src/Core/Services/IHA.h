@@ -63,6 +63,20 @@ struct HANumberEntry {
     const char* unit;
 };
 
+/** @brief Static Home Assistant select discovery registration. */
+struct HASelectEntry {
+    const char* ownerId;
+    const char* objectSuffix;
+    const char* name;
+    const char* stateTopicSuffix;
+    const char* valueTemplate;
+    const char* commandTopicSuffix;
+    const char* commandTemplate;
+    const char* optionsJson;
+    const char* icon;
+    const char* entityCategory;
+};
+
 /** @brief Static Home Assistant button discovery registration. */
 struct HAButtonEntry {
     const char* ownerId;
@@ -80,6 +94,7 @@ struct HAService {
     bool (*addBinarySensor)(void* ctx, const HABinarySensorEntry* entry);
     bool (*addSwitch)(void* ctx, const HASwitchEntry* entry);
     bool (*addNumber)(void* ctx, const HANumberEntry* entry);
+    bool (*addSelect)(void* ctx, const HASelectEntry* entry);
     bool (*addButton)(void* ctx, const HAButtonEntry* entry);
     bool (*requestRefresh)(void* ctx);
     void* ctx;

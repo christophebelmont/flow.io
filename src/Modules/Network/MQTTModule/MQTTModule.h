@@ -23,7 +23,7 @@
 
 /** @brief MQTT configuration values. */
 struct MQTTConfig {
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
     bool enabled = false;
 #else
     bool enabled = FLOW_WIRDEF_MQ_EN;
@@ -62,7 +62,7 @@ public:
     void init(ConfigStore& cfg, ServiceRegistry& services) override;
     void onConfigLoaded(ConfigStore& cfg, ServiceRegistry& services) override;
     bool canStart(ConfigStore&, ServiceRegistry& services) override {
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         if (!cfgData_.enabled) return true;
         const NetworkAccessService* net = services.get<NetworkAccessService>(ServiceId::NetworkAccess);
         return net && net->mode && net->mode(net->ctx) == NetworkAccessMode::Station;
@@ -73,15 +73,9 @@ public:
     }
     void onStart(ConfigStore& cfg, ServiceRegistry& services) override;
     void loop() override;
-    uint16_t taskStackSize() const override {
-#if defined(FLOW_PROFILE_FLOWIOS3)
-        return 5120;
-#else
-        return Limits::Mqtt::TaskStackSize;
-#endif
-    }
+    uint16_t taskStackSize() const override { return Limits::Mqtt::TaskStackSize; }
     uint32_t startDelayMs() const override {
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         return 4000U;
 #else
         return Limits::Boot::MqttStartDelayMs;
@@ -295,6 +289,7 @@ private:
     uint32_t handlerFailCount_ = 0;
     uint32_t oversizeDropCount_ = 0;
     uint32_t lastEnqueueRejectLogMs_ = 0;
+    uint32_t lastDataChangedTraceLogMs_ = 0;
     uint32_t occLastReportMs_ = 0;
     uint16_t occMaxJobs_ = 0;
     uint16_t occMaxHigh_ = 0;
@@ -310,6 +305,8 @@ private:
     bool enqueueSvc_(uint8_t producerId, uint16_t messageId, uint8_t prio, uint8_t flags);
     void formatTopicSvc_(const char* suffix, char* out, size_t outLen) const;
     void setState_(MQTTState s);
+    static void onRuntimeInitialSnapshotCompleteStatic_(void* ctx);
+    void onRuntimeInitialSnapshotComplete_();
     bool allocateScratchBuffers_();
     bool allocateRxQueue_();
     void refreshTopicDeviceId_();

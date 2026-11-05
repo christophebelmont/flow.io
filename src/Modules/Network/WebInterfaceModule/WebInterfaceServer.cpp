@@ -14,18 +14,21 @@
 #include "Core/Services/IAlarm.h"
 #include "Core/SystemLimits.h"
 #include "Core/SystemStats.h"
-#if !defined(FLOW_PROFILE_MICRONOVA) && !defined(FLOW_PROFILE_FLOWIOS3)
+#if !defined(FLOW_PROFILE_MICRONOVA) && !defined(FLOW_PROFILE_WAVESHARE)
 #include "Modules/Network/I2CCfgClientModule/I2CCfgClientRuntime.h"
 #endif
 #if defined(FLOW_PROFILE_MICRONOVA)
 #include "Modules/Micronova/MicronovaBoilerModule/MicronovaBoilerModuleDataModel.h"
 #include "Modules/Network/MQTTModule/MQTTRuntime.h"
 #endif
-#if defined(FLOW_PROFILE_FLOWIOS3)
-#include "Domain/Pool/PoolBindings.h"
+#if defined(FLOW_PROFILE_WAVESHARE)
+#include "Domain/Pool/PoolIds.h"
+#include "Domain/Pool/PoolDomain.h"
+#include "Core/Services/IPoolDevice.h"
 #include "Modules/IOModule/IORuntime.h"
 #include "Modules/PoolDeviceModule/PoolDeviceRuntime.h"
 #include "Modules/Network/MQTTModule/MQTTRuntime.h"
+#include "Profiles/Waveshare/WaveshareIoLayout.h"
 #endif
 
 #define LOG_MODULE_ID ((LogModuleId)LogModuleIdValue::WebInterfaceModule)
@@ -33,18 +36,21 @@
 
 #include <string.h>
 #include <strings.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <time.h>
 #include <Arduino.h>
 #include <WiFi.h>
+#include <ETH.h>
 #include <ArduinoJson.h>
-#include <HTTPClient.h>
 #include <SPIFFS.h>
 #include <FS.h>
 #include <esp_heap_caps.h>
 #include <memory>
+#include <stdarg.h>
 #include "Core/DataKeys.h"
 #include "Core/EventBus/EventPayloads.h"
+#include "Modules/Network/TimeModule/TimeRuntime.h"
 #include "Modules/Network/WifiModule/WifiRuntime.h"
 
 #ifndef FLOW_WEB_UNIFY_STATUS_CARD_ICONS
@@ -53,6 +59,10 @@
 
 #ifndef FLOW_WEB_HEAP_FORENSICS
 #define FLOW_WEB_HEAP_FORENSICS 0
+#endif
+
+#ifndef TFT_FIRMW
+#define TFT_FIRMW "0.0.0"
 #endif
 
 static void sanitizeJsonString_(char* s)
@@ -147,6 +157,78 @@ static int32_t requestIntParam_(AsyncWebServerRequest* request,
     return (int32_t)parsed;
 }
 
+#if defined(FLOW_PROFILE_WAVESHARE)
+struct WebJsonBuffer final : public Print {
+    explicit WebJsonBuffer(size_t requestedCapacity)
+        : capacity_(requestedCapacity)
+    {
+        if (capacity_ == 0U || !psramFound()) return;
+        data_ = static_cast<char*>(
+            heap_caps_malloc(capacity_, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+        );
+    }
+
+    ~WebJsonBuffer() override
+    {
+        if (data_) heap_caps_free(data_);
+    }
+
+    WebJsonBuffer(const WebJsonBuffer&) = delete;
+    WebJsonBuffer& operator=(const WebJsonBuffer&) = delete;
+
+    size_t write(uint8_t value) override
+    {
+        return write(&value, 1U);
+    }
+
+    size_t write(const uint8_t* data, size_t size) override
+    {
+        if (!data_ || !data || size == 0U) return 0U;
+        if (overflow_ || length_ >= capacity_ || size > (capacity_ - length_ - 1U)) {
+            overflow_ = true;
+            return 0U;
+        }
+        memcpy(data_ + length_, data, size);
+        length_ += size;
+        return size;
+    }
+
+    bool finish()
+    {
+        if (!data_ || overflow_ || length_ >= capacity_) return false;
+        data_[length_] = '\0';
+        return true;
+    }
+
+    void reset()
+    {
+        length_ = 0U;
+        overflow_ = false;
+        if (data_ && capacity_ > 0U) data_[0] = '\0';
+    }
+
+    bool valid() const { return data_ != nullptr; }
+    bool overflowed() const { return overflow_; }
+    size_t length() const { return length_; }
+    size_t capacity() const { return capacity_; }
+
+    size_t fillAt(uint8_t* out, size_t maxLen, size_t index) const
+    {
+        if (!out || maxLen == 0U || !data_ || index >= length_) return 0U;
+        const size_t remaining = length_ - index;
+        const size_t count = remaining < maxLen ? remaining : maxLen;
+        memcpy(out, data_ + index, count);
+        return count;
+    }
+
+private:
+    char* data_ = nullptr;
+    size_t capacity_ = 0U;
+    size_t length_ = 0U;
+    bool overflow_ = false;
+};
+#endif
+
 template <size_t N>
 static inline void sendProgmemLiteral_(AsyncWebServerRequest* request, const char* contentType, const char (&content)[N])
 {
@@ -156,16 +238,16 @@ static inline void sendProgmemLiteral_(AsyncWebServerRequest* request, const cha
 
 namespace {
 constexpr uint32_t kHttpLatencyInfoMs = 40U;
-constexpr uint32_t kHttpLatencyWarnMs = 120U;
+constexpr uint32_t kHttpLatencyWarnMs = 1000U;
 constexpr uint32_t kHttpLatencyFlowCfgInfoMs = 200U;
-constexpr uint32_t kHttpLatencyFlowCfgWarnMs = 900U;
+constexpr uint32_t kHttpLatencyFlowCfgWarnMs = 1000U;
 constexpr uint32_t kHeapGuardAssetFreeBytesLight = 8192U;
 constexpr uint32_t kHeapGuardAssetFreeBytesMinor = 12288U;
 constexpr uint32_t kHeapGuardAssetFreeBytesMajor = 15360U;
 constexpr uint32_t kHeapGuardAssetLargestBytesLight = 4096U;
 constexpr uint32_t kHeapGuardAssetLargestBytesMinor = 6144U;
 constexpr uint32_t kHeapGuardAssetLargestBytesMajor = 8192U;
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
 constexpr uint32_t kHeapGuardAssetInternalFreeBytesLight = 6144U;
 constexpr uint32_t kHeapGuardAssetInternalFreeBytesMinor = 8192U;
 constexpr uint32_t kHeapGuardAssetInternalFreeBytesMajor = 10240U;
@@ -185,7 +267,7 @@ struct WebHeapCharBuffer {
         : capacity(requestedCapacity)
     {
         if (capacity == 0U) return;
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         data = static_cast<char*>(
             heap_caps_calloc(1, capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
         );
@@ -216,187 +298,501 @@ struct BootLogJsonPageCtx {
     uint16_t count = 0;
 };
 
-struct FirmwareManifestChunkState {
-    static constexpr size_t kUrlLen = 192U;
-    static constexpr size_t kPrefixLen = 384U;
+static const char* activityDomainName_(uint8_t domain)
+{
+    switch ((ActivityDomain)domain) {
+        case ActivityDomain::System: return "system";
+        case ActivityDomain::PoolLogic: return "poollogic";
+        case ActivityDomain::PoolDevice: return "pooldevice";
+        case ActivityDomain::Alarm: return "alarm";
+        default: return "unknown";
+    }
+}
 
-    ~FirmwareManifestChunkState()
+static const char* activitySourceName_(uint8_t source)
+{
+    switch ((ActivitySource)source) {
+        case ActivitySource::System: return "system";
+        case ActivitySource::Auto: return "auto";
+        case ActivitySource::Manual: return "manual";
+        case ActivitySource::Scheduler: return "scheduler";
+        case ActivitySource::Safety: return "safety";
+        case ActivitySource::Pid: return "pid";
+        case ActivitySource::Boot: return "boot";
+        default: return "unknown";
+    }
+}
+
+static const char* activitySeverityName_(uint8_t severity)
+{
+    switch ((ActivitySeverity)severity) {
+        case ActivitySeverity::Info: return "info";
+        case ActivitySeverity::Success: return "success";
+        case ActivitySeverity::Warning: return "warning";
+        case ActivitySeverity::Alarm: return "alarm";
+        default: return "info";
+    }
+}
+
+static const char* activityRoleName_(uint8_t role)
+{
+    switch ((ActivityRole)role) {
+        case ActivityRole::None: return "none";
+        case ActivityRole::Filtration: return "filtration";
+        case ActivityRole::Swg: return "swg";
+        case ActivityRole::Robot: return "robot";
+        case ActivityRole::Filling: return "filling";
+        case ActivityRole::Ph: return "ph";
+        case ActivityRole::Disinfection: return "disinfection";
+        case ActivityRole::Heater: return "heater";
+        default: return "unknown";
+    }
+}
+
+static const char* activityStateName_(uint8_t state)
+{
+    switch ((ActivityState)state) {
+        case ActivityState::None: return "none";
+        case ActivityState::RequestedOn: return "requested_on";
+        case ActivityState::RequestedOff: return "requested_off";
+        case ActivityState::On: return "on";
+        case ActivityState::Off: return "off";
+        default: return "unknown";
+    }
+}
+
+struct ActivityJsonBufferWriter {
+    ActivityJsonBufferWriter(char* output, size_t outputLen)
+        : out(output), capacity(outputLen)
     {
-        http.end();
+        if (out && capacity > 0U) out[0] = '\0';
     }
 
-    bool begin(const char* manifestUrl, char* errOut, size_t errOutLen)
+    bool append(const char* text)
     {
-        if (!manifestUrl || manifestUrl[0] == '\0') {
-            writeError(errOut, errOutLen, "manifest url missing");
+        if (!ok || !text) return false;
+        const size_t textLen = strlen(text);
+        if (textLen >= remaining()) {
+            ok = false;
             return false;
         }
+        memcpy(out + length, text, textLen);
+        length += textLen;
+        out[length] = '\0';
+        return true;
+    }
 
-        char safeUrl[kUrlLen] = {0};
-        char current[48] = {0};
-        snprintf(safeUrl, sizeof(safeUrl), "%s", manifestUrl);
-        snprintf(current, sizeof(current), "%s", FirmwareVersion::Full);
-        sanitizeJsonString_(safeUrl);
-        sanitizeJsonString_(current);
-
-        const int prefixWritten = snprintf(prefix,
-                                           sizeof(prefix),
-                                           "{\"ok\":true,\"manifest_url\":\"%s\",\"current\":{\"supervisor\":\"%s\"},\"manifest\":",
-                                           safeUrl,
-                                           current);
-        if (prefixWritten <= 0 || (size_t)prefixWritten >= sizeof(prefix)) {
-            writeError(errOut, errOutLen, "manifest prefix too long");
+    bool appendChar(char value)
+    {
+        if (!ok || remaining() <= 1U) {
+            ok = false;
             return false;
         }
-        prefixLen = (size_t)prefixWritten;
+        out[length++] = value;
+        out[length] = '\0';
+        return true;
+    }
 
-        http.setReuse(false);
-        http.setConnectTimeout(Limits::FirmwareUpdate::Http::ConnectTimeoutMs);
-        http.setTimeout(Limits::FirmwareUpdate::Http::RequestTimeoutMs);
-        if (!http.begin(manifestUrl)) {
-            LOGE("HTTP begin failed resource=manifest url=%s", manifestUrl);
-            writeError(errOut, errOutLen, "serveur HTTP injoignable");
+    bool appendFormat(const char* format, ...)
+    {
+        if (!ok || !format || remaining() == 0U) {
+            ok = false;
             return false;
         }
-
-        const int code = http.GET();
-        if (code != HTTP_CODE_OK) {
-            writeHttpCodeError(manifestUrl, code, errOut, errOutLen);
-            http.end();
+        va_list args;
+        va_start(args, format);
+        const int wrote = vsnprintf(out + length, remaining(), format, args);
+        va_end(args);
+        if (wrote < 0 || (size_t)wrote >= remaining()) {
+            ok = false;
             return false;
         }
+        length += (size_t)wrote;
+        return true;
+    }
 
-        remaining = http.getSize();
-        if (remaining == 0) {
-            writeError(errOut, errOutLen, "manifest empty");
-            http.end();
-            return false;
+    bool appendJsonString(const char* text)
+    {
+        if (!appendChar('"')) return false;
+        if (text) {
+            for (const char* p = text; *p != '\0' && ok; ++p) {
+                switch (*p) {
+                case '"': append("\\\""); break;
+                case '\\': append("\\\\"); break;
+                case '\b': append("\\b"); break;
+                case '\f': append("\\f"); break;
+                case '\n': append("\\n"); break;
+                case '\r': append("\\r"); break;
+                case '\t': append("\\t"); break;
+                default:
+                    appendChar(((uint8_t)*p < 0x20U) ? '?' : *p);
+                    break;
+                }
+            }
+        }
+        return appendChar('"');
+    }
+
+    size_t remaining() const
+    {
+        return (out && length < capacity) ? (capacity - length) : 0U;
+    }
+
+    char* out = nullptr;
+    size_t capacity = 0U;
+    size_t length = 0U;
+    bool ok = true;
+};
+
+struct ActivityLogChunkState {
+    static constexpr size_t kPendingMax = 1024U;
+
+    ~ActivityLogChunkState()
+    {
+        if (events) heap_caps_free(events);
+    }
+
+    bool begin(const ActivityLogService* activityLog,
+               const ActivityLogStats& statsSnapshot,
+               uint16_t requestedOffset,
+               uint16_t requestedLimit,
+               bool descending)
+    {
+        stats = statsSnapshot;
+        offset = requestedOffset;
+        limit = requestedLimit;
+        newestFirst = descending;
+
+        if (!activityLog || !activityLog->readPage || stats.count == 0U ||
+            offset >= stats.count || limit == 0U) {
+            return true;
         }
 
-        stream = http.getStreamPtr();
-        if (!stream) {
-            writeError(errOut, errOutLen, "manifest stream unavailable");
-            http.end();
-            return false;
+        const uint16_t remaining = (uint16_t)(stats.count - offset);
+        capacity = (limit < remaining) ? limit : remaining;
+        const size_t bytes = (size_t)capacity * sizeof(ActivityEvent);
+
+#if defined(FLOW_PROFILE_WAVESHARE)
+        events = static_cast<ActivityEvent*>(
+            heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+        );
+        if (!events) {
+            events = static_cast<ActivityEvent*>(
+                heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+            );
         }
-        lastReadMs = millis();
+#else
+        events = static_cast<ActivityEvent*>(heap_caps_malloc(bytes, MALLOC_CAP_8BIT));
+#endif
+        if (!events) return false;
+
+        const uint16_t readOffset =
+            newestFirst ? (uint16_t)(stats.count - offset - capacity) : offset;
+        count = activityLog->readPage(activityLog->ctx,
+                                      readOffset,
+                                      capacity,
+                                      &ActivityLogChunkState::snapshotWriter,
+                                      this);
         return true;
     }
 
     size_t fill(uint8_t* buffer, size_t maxLen)
     {
         if (!buffer || maxLen == 0U) return 0U;
-        if (suffixDone) return 0U;
 
         size_t written = 0U;
-        copyStatic(prefix, prefixLen, prefixPos, buffer, maxLen, written);
-        if (written >= maxLen) return written;
-
-        while (!manifestDone && written < maxLen) {
-            if (!stream) {
-                manifestDone = true;
-                break;
+        while (written < maxLen) {
+            if (pendingPos < pendingLen) {
+                const size_t room = maxLen - written;
+                const size_t left = pendingLen - pendingPos;
+                const size_t copyLen = (left < room) ? left : room;
+                memcpy(buffer + written, pending + pendingPos, copyLen);
+                written += copyLen;
+                pendingPos += copyLen;
+                continue;
             }
-
-            const int available = stream->available();
-            if (available <= 0) {
-                if (remaining == 0) {
-                    manifestDone = true;
-                    break;
-                }
-                if (!http.connected()) {
-                    manifestDone = true;
-                    break;
-                }
-                if ((millis() - lastReadMs) > Limits::FirmwareUpdate::Http::StreamReadTimeoutMs) {
-                    manifestDone = true;
-                    break;
-                }
-                return written > 0U ? written : RESPONSE_TRY_AGAIN;
-            }
-
-            size_t wanted = maxLen - written;
-            if (remaining > 0 && wanted > (size_t)remaining) wanted = (size_t)remaining;
-            if (wanted > (size_t)available) wanted = (size_t)available;
-            if (wanted == 0U) {
-                manifestDone = true;
-                break;
-            }
-
-            const size_t got = stream->readBytes(buffer + written, wanted);
-            if (got == 0U) {
-                return written > 0U ? written : RESPONSE_TRY_AGAIN;
-            }
-            written += got;
-            manifestBytes += got;
-            lastReadMs = millis();
-            if (remaining > 0) {
-                remaining -= (int32_t)got;
-                if (remaining <= 0) manifestDone = true;
-            }
-        }
-
-        if (manifestDone && manifestBytes == 0U) {
-            copyStatic("null", 4U, nullPos, buffer, maxLen, written);
-            if (written >= maxLen) return written;
-        }
-
-        if (manifestDone) {
-            copyStatic("}", 1U, suffixPos, buffer, maxLen, written);
-            if (suffixPos >= 1U) suffixDone = true;
+            if (!prepareNext()) break;
         }
         return written;
     }
 
-    HTTPClient http;
-    Stream* stream = nullptr;
-    int32_t remaining = -1;
-    uint32_t lastReadMs = 0U;
-    char prefix[kPrefixLen] = {0};
-    size_t prefixLen = 0U;
-    size_t prefixPos = 0U;
-    size_t nullPos = 0U;
-    size_t suffixPos = 0U;
-    size_t manifestBytes = 0U;
-    bool manifestDone = false;
-    bool suffixDone = false;
-
 private:
-    static void writeError(char* out, size_t outLen, const char* msg)
+    enum class Stage : uint8_t {
+        Header,
+        Events,
+        Suffix,
+        Done,
+    };
+
+    static bool snapshotWriter(void* ctx,
+                               const ActivityEvent& event,
+                               uint16_t,
+                               uint16_t)
     {
-        if (!out || outLen == 0U) return;
-        snprintf(out, outLen, "%s", msg ? msg : "failed");
+        ActivityLogChunkState* self = static_cast<ActivityLogChunkState*>(ctx);
+        if (!self || !self->events || self->count >= self->capacity) return false;
+        self->events[self->count++] = event;
+        return true;
     }
 
-    static void writeHttpCodeError(const char* url, int code, char* errOut, size_t errOutLen)
+    bool prepareNext()
     {
-        char msg[96] = {0};
-        if (code == 404) {
-            snprintf(msg, sizeof(msg), "manifest introuvable (404)");
-        } else if (code < 0) {
-            snprintf(msg, sizeof(msg), "serveur HTTP injoignable");
-        } else {
-            snprintf(msg, sizeof(msg), "erreur HTTP %d", code);
+        pendingLen = 0U;
+        pendingPos = 0U;
+
+        while (stage != Stage::Done) {
+            if (stage == Stage::Header) {
+                const bool complete =
+                    count == 0U || ((uint32_t)offset + (uint32_t)count >= stats.count);
+                const int32_t next = complete ? -1 : (int32_t)offset + (int32_t)count;
+                ActivityJsonBufferWriter out(pending, sizeof(pending));
+                out.appendFormat(
+                    "{\"available\":%s,\"capacity\":%u,\"entries\":%u,\"dropped\":%lu,"
+                    "\"persisted\":%lu,\"persist_dropped\":%lu,\"psram\":%s,\"spiffs\":%s,"
+                    "\"offset\":%u,\"limit\":%u,\"count\":%u,\"next\":",
+                    stats.capacity > 0U ? "true" : "false",
+                    (unsigned)stats.capacity,
+                    (unsigned)stats.count,
+                    (unsigned long)stats.droppedCount,
+                    (unsigned long)stats.persistedCount,
+                    (unsigned long)stats.persistDropCount,
+                    stats.psram ? "true" : "false",
+                    stats.spiffs ? "true" : "false",
+                    (unsigned)offset,
+                    (unsigned)limit,
+                    (unsigned)count);
+                if (next < 0) out.append("null");
+                else out.appendFormat("%ld", (long)next);
+                out.appendFormat(",\"complete\":%s,\"order\":\"%s\",\"events\":[",
+                                 complete ? "true" : "false",
+                                 newestFirst ? "desc" : "asc");
+                if (!out.ok) return false;
+                pendingLen = out.length;
+                stage = Stage::Events;
+                return pendingLen > 0U;
+            }
+
+            if (stage == Stage::Events) {
+                if (eventIndex < count) {
+                    const uint16_t storedIndex =
+                        newestFirst ? (uint16_t)(count - 1U - eventIndex) : eventIndex;
+                    if (!formatEvent(events[storedIndex], eventIndex > 0U)) {
+                        snprintf(pending, sizeof(pending), "%snull", eventIndex > 0U ? "," : "");
+                        pendingLen = strlen(pending);
+                    }
+                    ++eventIndex;
+                    return pendingLen > 0U;
+                }
+                stage = Stage::Suffix;
+                continue;
+            }
+
+            if (stage == Stage::Suffix) {
+                memcpy(pending, "]}", 3U);
+                pendingLen = 2U;
+                stage = Stage::Done;
+                return true;
+            }
         }
-        LOGE("HTTP request failed resource=manifest code=%d url=%s", code, url ? url : "-");
-        writeError(errOut, errOutLen, msg);
+        return false;
     }
 
-    static void copyStatic(const char* src,
-                           size_t srcLen,
-                           size_t& pos,
-                           uint8_t* dest,
-                           size_t destLen,
-                           size_t& written)
+    bool formatEvent(const ActivityEvent& event, bool prependComma)
     {
-        if (!src || pos >= srcLen || written >= destLen) return;
-        const size_t room = destLen - written;
-        const size_t left = srcLen - pos;
-        const size_t count = left < room ? left : room;
-        memcpy(dest + written, src + pos, count);
-        written += count;
-        pos += count;
+        ActivityJsonBufferWriter out(pending, sizeof(pending));
+        if (prependComma) out.appendChar(',');
+        out.appendFormat(
+            "{\"seq\":%lu,\"ts_ms\":%lu,\"epoch_s\":%lu,\"code\":%u,\"alarm_id\":%u,"
+            "\"domain\":%u,\"source\":%u,\"severity\":%u,\"role\":%u,"
+            "\"state\":%u,\"reason\":%u,\"slot\":%u",
+            (unsigned long)event.seq,
+            (unsigned long)event.ts_ms,
+            (unsigned long)event.epoch_s,
+            (unsigned)event.code,
+            (unsigned)event.alarmId,
+            (unsigned)event.domain,
+            (unsigned)event.source,
+            (unsigned)event.severity,
+            (unsigned)event.role,
+            (unsigned)event.state,
+            (unsigned)event.reason,
+            (unsigned)event.targetSlot);
+        out.append(",\"domain_name\":");
+        out.appendJsonString(activityDomainName_(event.domain));
+        out.append(",\"source_name\":");
+        out.appendJsonString(activitySourceName_(event.source));
+        out.append(",\"severity_name\":");
+        out.appendJsonString(activitySeverityName_(event.severity));
+        out.append(",\"role_name\":");
+        out.appendJsonString(activityRoleName_(event.role));
+        out.append(",\"state_name\":");
+        out.appendJsonString(activityStateName_(event.state));
+        out.append(",\"title\":");
+        out.appendJsonString(event.title);
+        out.append(",\"detail\":");
+        out.appendJsonString(event.detail);
+        out.append(",\"icon\":");
+        out.appendJsonString(event.icon);
+        out.appendChar('}');
+        if (!out.ok) return false;
+        pendingLen = out.length;
+        return true;
     }
+
+    ActivityLogStats stats{};
+    ActivityEvent* events = nullptr;
+    uint16_t capacity = 0U;
+    uint16_t count = 0U;
+    uint16_t offset = 0U;
+    uint16_t limit = 0U;
+    uint16_t eventIndex = 0U;
+    bool newestFirst = false;
+    Stage stage = Stage::Header;
+    char pending[kPendingMax] = {0};
+    size_t pendingLen = 0U;
+    size_t pendingPos = 0U;
+};
+
+static void appendActivityModuleName_(char* out, size_t outLen, const char* moduleName)
+{
+    if (!out || outLen == 0U || !moduleName || moduleName[0] == '\0') return;
+    const size_t used = strnlen(out, outLen);
+    if (used >= outLen - 1U) return;
+
+    size_t pos = used;
+    if (pos > 0U) {
+        if (pos + 2U >= outLen) return;
+        out[pos++] = ',';
+        out[pos++] = ' ';
+    }
+
+    for (const char* p = moduleName; *p != '\0' && pos + 1U < outLen; ++p) {
+        const char c = *p;
+        out[pos++] = (c == '"' || c == '\\' || c == '\n' || c == '\r' || c == '\t') ? ' ' : c;
+    }
+    out[pos] = '\0';
+}
+
+static uint16_t summarizeConfigPatch_(const char* patchJson, char* modulesOut, size_t modulesOutLen)
+{
+    if (modulesOut && modulesOutLen > 0U) modulesOut[0] = '\0';
+    if (!patchJson || patchJson[0] == '\0') return 0;
+
+    DynamicJsonDocument doc(Limits::JsonConfigApplyBuf);
+    const DeserializationError err = deserializeJson(doc, patchJson);
+    if (err || !doc.is<JsonObjectConst>()) return 0;
+
+    uint16_t fieldCount = 0;
+    JsonObjectConst root = doc.as<JsonObjectConst>();
+    for (JsonPairConst moduleKv : root) {
+        const char* moduleName = moduleKv.key().c_str();
+        JsonVariantConst moduleVar = moduleKv.value();
+        if (!moduleVar.is<JsonObjectConst>()) continue;
+
+        uint16_t moduleFieldCount = 0;
+        JsonObjectConst moduleObj = moduleVar.as<JsonObjectConst>();
+        for (JsonPairConst valueKv : moduleObj) {
+            (void)valueKv;
+            if (fieldCount < UINT16_MAX) ++fieldCount;
+            if (moduleFieldCount < UINT16_MAX) ++moduleFieldCount;
+        }
+        if (moduleFieldCount > 0U) {
+            appendActivityModuleName_(modulesOut, modulesOutLen, moduleName);
+        }
+    }
+    return fieldCount;
+}
+
+const char* firmwareManifestCheckStateName_(FirmwareManifestCheckState state)
+{
+    switch (state) {
+        case FirmwareManifestCheckState::Idle: return "idle";
+        case FirmwareManifestCheckState::Queued: return "queued";
+        case FirmwareManifestCheckState::Downloading: return "downloading";
+        case FirmwareManifestCheckState::Ready: return "ready";
+        case FirmwareManifestCheckState::Error: return "error";
+        default: return "unknown";
+    }
+}
+
+struct FirmwareManifestResponseChunkState {
+    static constexpr size_t kPrefixReserve = 512U;
+
+    ~FirmwareManifestResponseChunkState()
+    {
+        if (data) heap_caps_free(data);
+    }
+
+    bool begin(const FirmwareUpdateService* service,
+               const FirmwareManifestCheckSnapshot& snapshot)
+    {
+        if (!service || !service->copyManifestResult ||
+            snapshot.state != FirmwareManifestCheckState::Ready ||
+            snapshot.payloadLen == 0U) {
+            return false;
+        }
+
+        char safeUrl[sizeof(snapshot.manifestUrl)] = {0};
+        char current[48] = {0};
+        snprintf(safeUrl, sizeof(safeUrl), "%s", snapshot.manifestUrl);
+        snprintf(current, sizeof(current), "%s", FirmwareVersion::Full);
+        sanitizeJsonString_(safeUrl);
+        sanitizeJsonString_(current);
+
+        capacity = kPrefixReserve + snapshot.payloadLen + 2U;
+#if defined(FLOW_PROFILE_WAVESHARE)
+        data = static_cast<char*>(
+            heap_caps_malloc(capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+        );
+#else
+        data = static_cast<char*>(heap_caps_malloc(capacity, MALLOC_CAP_8BIT));
+#endif
+        if (!data) return false;
+
+        const int prefixWritten =
+            snprintf(data,
+                     kPrefixReserve,
+                     "{\"ok\":true,\"request_id\":%lu,\"state\":\"ready\","
+                     "\"manifest_url\":\"%s\",\"current\":{\"flowios3\":\"%s\","
+                     "\"esp32s3\":\"%s\",\"waveshare\":\"%s\"},\"manifest\":",
+                     (unsigned long)snapshot.requestId,
+                     safeUrl,
+                     current,
+                     current,
+                     current);
+        if (prefixWritten <= 0 || (size_t)prefixWritten >= kPrefixReserve) return false;
+
+        const size_t prefixLen = (size_t)prefixWritten;
+        size_t copiedLen = 0U;
+        if (!service->copyManifestResult(service->ctx,
+                                         snapshot.requestId,
+                                         data + prefixLen,
+                                         capacity - prefixLen,
+                                         &copiedLen) ||
+            copiedLen != snapshot.payloadLen) {
+            return false;
+        }
+
+        length = prefixLen + copiedLen;
+        data[length++] = '}';
+        data[length] = '\0';
+        return true;
+    }
+
+    size_t fill(uint8_t* buffer, size_t maxLen)
+    {
+        if (!buffer || maxLen == 0U || !data || position >= length) return 0U;
+        const size_t remaining = length - position;
+        const size_t count = (remaining < maxLen) ? remaining : maxLen;
+        memcpy(buffer, data + position, count);
+        position += count;
+        return count;
+    }
+
+    char* data = nullptr;
+    size_t capacity = 0U;
+    size_t length = 0U;
+    size_t position = 0U;
 };
 
 const char* httpMethodName_(uint32_t method);
@@ -551,7 +947,7 @@ bool shouldRejectAssetByFreeHeap_(const char* assetPath,
                                   uint32_t* freeBytesOut = nullptr,
                                   uint32_t* largestBytesOut = nullptr)
 {
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
     const uint32_t freeInternal = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     const uint32_t largestInternal =
         (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -563,7 +959,7 @@ bool shouldRejectAssetByFreeHeap_(const char* assetPath,
     if (freeBytesOut) *freeBytesOut = freeBytes;
     if (largestBytesOut) *largestBytesOut = largestBytes;
 #endif
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
     const uint32_t minInternalFreeBytes = isLightWebAssetPath_(assetPath)
         ? kHeapGuardAssetInternalFreeBytesLight
         : isMinorWebAssetPath_(assetPath)
@@ -598,6 +994,34 @@ void buildProvisioningApSsid_(char* out, size_t outLen)
     const uint8_t b1 = (uint8_t)(chipId >> 8);
     const uint8_t b2 = (uint8_t)(chipId >> 0);
     snprintf(out, outLen, "flow.io-%s-%02X%02X%02X", FLOW_BUILD_PROFILE_NAME, b0, b1, b2);
+}
+
+bool isBlankText_(const char* text, size_t maxLen)
+{
+    if (!text) return true;
+    const size_t len = strnlen(text, maxLen);
+    if (len == 0U || len >= maxLen) return true;
+    for (size_t i = 0; i < len; ++i) {
+        if (!isspace((unsigned char)text[i])) return false;
+    }
+    return true;
+}
+
+void loadConfiguredDeviceName_(ConfigStore* cfgStore, char* out, size_t outLen)
+{
+    if (!out || outLen == 0U) return;
+    snprintf(out, outLen, "flowio");
+    if (!cfgStore) return;
+
+    char systemJson[128] = {0};
+    if (!cfgStore->toJsonModule("system", systemJson, sizeof(systemJson), nullptr, false)) return;
+
+    StaticJsonDocument<128> doc;
+    if (deserializeJson(doc, systemJson) != DeserializationError::Ok || !doc.is<JsonObjectConst>()) return;
+
+    const char* configured = doc.as<JsonObjectConst>()["devicename"] | "";
+    if (isBlankText_(configured, outLen)) return;
+    snprintf(out, outLen, "%s", configured);
 }
 
 bool isModuleFlagAndStringConfigured_(ConfigStore* cfgStore,
@@ -1360,9 +1784,9 @@ const char kMicronovaRuntimeManifestJson[] PROGMEM = R"json({
     {"id":1702,"runtimeId":1702,"moduleId":17,"module":"system","valueId":2,"key":"system.uptime_ms","label":"Uptime","type":"uint32","domain":"system","group":"Système","unit":"ms","decimals":0,"order":20},
     {"id":1703,"runtimeId":1703,"moduleId":17,"module":"system","valueId":3,"key":"system.heap_free","label":"Heap libre","type":"uint32","domain":"system","group":"Mémoire","unit":"B","decimals":0,"order":30},
     {"id":1704,"runtimeId":1704,"moduleId":17,"module":"system","valueId":4,"key":"system.heap_min_free","label":"Heap minimum","type":"uint32","domain":"system","group":"Mémoire","unit":"B","decimals":0,"order":40},
-    {"id":1001,"runtimeId":1001,"moduleId":10,"module":"wifi","valueId":1,"key":"wifi.ready","label":"WiFi connecté","type":"bool","domain":"wifi","group":"WiFi","unit":null,"decimals":null,"order":10,"display":"boolean"},
-    {"id":1002,"runtimeId":1002,"moduleId":10,"module":"wifi","valueId":2,"key":"wifi.ip","label":"Adresse IP","type":"string","domain":"wifi","group":"WiFi","unit":null,"decimals":null,"order":20},
-    {"id":1003,"runtimeId":1003,"moduleId":10,"module":"wifi","valueId":3,"key":"wifi.rssi","label":"RSSI","type":"int32","domain":"wifi","group":"WiFi","unit":"dBm","decimals":0,"order":30},
+    {"id":1001,"runtimeId":1001,"moduleId":10,"module":"wifi","valueId":1,"key":"wifi.ready","label":"Réseau connecté","type":"bool","domain":"wifi","group":"Réseau","unit":null,"decimals":null,"order":10,"display":"boolean"},
+    {"id":1002,"runtimeId":1002,"moduleId":10,"module":"wifi","valueId":2,"key":"wifi.ip","label":"Adresse IP","type":"string","domain":"wifi","group":"Réseau","unit":null,"decimals":null,"order":20},
+    {"id":1003,"runtimeId":1003,"moduleId":10,"module":"wifi","valueId":3,"key":"wifi.rssi","label":"RSSI","type":"int32","domain":"wifi","group":"Réseau","unit":"dBm","decimals":0,"order":30},
     {"id":1004,"runtimeId":1004,"moduleId":10,"module":"wifi","valueId":4,"key":"network.type","label":"Type","type":"string","domain":"wifi","group":"Réseau","unit":null,"decimals":null,"order":40}
   ]
 })json";
@@ -1513,8 +1937,8 @@ void sendMicronovaLocalRuntimeValuesResponse_(AsyncWebServerRequest* request,
 }
 #endif
 
-#if defined(FLOW_PROFILE_FLOWIOS3)
-bool flowios3LoadPoolModeFlags_(ConfigStore* cfgStore,
+#if defined(FLOW_PROFILE_WAVESHARE)
+bool waveshareLoadPoolModeFlags_(ConfigStore* cfgStore,
                                 bool& hasMode,
                                 bool& autoMode,
                                 bool& winterMode,
@@ -1530,7 +1954,7 @@ bool flowios3LoadPoolModeFlags_(ConfigStore* cfgStore,
 
     char moduleJson[320] = {0};
     bool truncated = false;
-    if (!cfgStore->toJsonModule("poollogic/mode", moduleJson, sizeof(moduleJson), &truncated, true)) {
+    if (!cfgStore->toJsonModule("poollogic/modes", moduleJson, sizeof(moduleJson), &truncated, true)) {
         return false;
     }
 
@@ -1542,12 +1966,30 @@ bool flowios3LoadPoolModeFlags_(ConfigStore* cfgStore,
     hasMode = true;
     autoMode = root["auto_mode"] | false;
     winterMode = root["winter_mode"] | false;
-    phAutoMode = root["ph_auto_mode"] | false;
-    orpAutoMode = root["orp_auto_mode"] | false;
+
+    memset(moduleJson, 0, sizeof(moduleJson));
+    truncated = false;
+    if (cfgStore->toJsonModule("poollogic/ph", moduleJson, sizeof(moduleJson), &truncated, true)) {
+        StaticJsonDocument<128> phDoc;
+        if (!deserializeJson(phDoc, moduleJson)) {
+            JsonObjectConst phRoot = phDoc.as<JsonObjectConst>();
+            if (!phRoot.isNull()) phAutoMode = phRoot["ph_auto_mode"] | false;
+        }
+    }
+
+    memset(moduleJson, 0, sizeof(moduleJson));
+    truncated = false;
+    if (cfgStore->toJsonModule("poollogic/chlorine", moduleJson, sizeof(moduleJson), &truncated, true)) {
+        StaticJsonDocument<128> disDoc;
+        if (!deserializeJson(disDoc, moduleJson)) {
+            JsonObjectConst disRoot = disDoc.as<JsonObjectConst>();
+            if (!disRoot.isNull()) orpAutoMode = disRoot["dis_auto_mode"] | false;
+        }
+    }
     return true;
 }
 
-void flowios3LoadMqttServer_(ConfigStore* cfgStore, char* out, size_t outLen)
+void waveshareLoadMqttServer_(ConfigStore* cfgStore, char* out, size_t outLen)
 {
     if (!out || outLen == 0U) return;
     out[0] = '\0';
@@ -1572,7 +2014,7 @@ void flowios3LoadMqttServer_(ConfigStore* cfgStore, char* out, size_t outLen)
     }
 }
 
-void flowios3LoadAlarmMasks_(const AlarmService* alarmSvc,
+void waveshareLoadAlarmMasks_(const AlarmService* alarmSvc,
                              uint32_t& activeMask,
                              uint32_t& resettableMask,
                              uint32_t& conditionMask)
@@ -1603,7 +2045,7 @@ void flowios3LoadAlarmMasks_(const AlarmService* alarmSvc,
     }
 }
 
-struct Flowios3RuntimeContext {
+struct WaveshareRuntimeContext {
     bool poolModeLoaded = false;
     bool poolModeAvailable = false;
     bool poolAutoMode = false;
@@ -1620,11 +2062,11 @@ struct Flowios3RuntimeContext {
     SystemStatsSnapshot systemStats{};
 };
 
-void flowios3EnsurePoolMode_(Flowios3RuntimeContext& ctx, ConfigStore* cfgStore)
+void waveshareEnsurePoolMode_(WaveshareRuntimeContext& ctx, ConfigStore* cfgStore)
 {
     if (ctx.poolModeLoaded) return;
     ctx.poolModeLoaded = true;
-    ctx.poolModeAvailable = flowios3LoadPoolModeFlags_(cfgStore,
+    ctx.poolModeAvailable = waveshareLoadPoolModeFlags_(cfgStore,
                                                        ctx.poolModeAvailable,
                                                        ctx.poolAutoMode,
                                                        ctx.poolWinterMode,
@@ -1632,111 +2074,111 @@ void flowios3EnsurePoolMode_(Flowios3RuntimeContext& ctx, ConfigStore* cfgStore)
                                                        ctx.poolOrpAutoMode);
 }
 
-void flowios3EnsureMqttServer_(Flowios3RuntimeContext& ctx, ConfigStore* cfgStore)
+void waveshareEnsureMqttServer_(WaveshareRuntimeContext& ctx, ConfigStore* cfgStore)
 {
     if (ctx.mqttServerLoaded) return;
     ctx.mqttServerLoaded = true;
-    flowios3LoadMqttServer_(cfgStore, ctx.mqttServer, sizeof(ctx.mqttServer));
+    waveshareLoadMqttServer_(cfgStore, ctx.mqttServer, sizeof(ctx.mqttServer));
 }
 
-void flowios3EnsureAlarmMasks_(Flowios3RuntimeContext& ctx, const AlarmService* alarmSvc)
+void waveshareEnsureAlarmMasks_(WaveshareRuntimeContext& ctx, const AlarmService* alarmSvc)
 {
     if (ctx.alarmMasksLoaded) return;
     ctx.alarmMasksLoaded = true;
-    flowios3LoadAlarmMasks_(alarmSvc, ctx.alarmActiveMask, ctx.alarmResettableMask, ctx.alarmConditionMask);
+    waveshareLoadAlarmMasks_(alarmSvc, ctx.alarmActiveMask, ctx.alarmResettableMask, ctx.alarmConditionMask);
 }
 
-void flowios3EnsureSystemStats_(Flowios3RuntimeContext& ctx)
+void waveshareEnsureSystemStats_(WaveshareRuntimeContext& ctx)
 {
     if (ctx.systemStatsLoaded) return;
     ctx.systemStatsLoaded = true;
     SystemStats::collect(ctx.systemStats);
 }
 
-void flowios3PrintUnavailableByManifestType_(Print& out, bool& firstValue, RuntimeUiId id)
+void wavesharePrintUnavailableByManifestType_(Print& out, bool& firstValue, RuntimeUiId id)
 {
     const RuntimeUiManifestItem* item = findRuntimeUiManifestItem(id);
     printRuntimeUnavailable_(out, firstValue, id, item ? item->key : "", item ? item->type : "unknown");
 }
 
-bool appendFlowios3LocalRuntimeValue_(Print& out,
+bool appendWaveshareLocalRuntimeValue_(Print& out,
                                       DataStore* dataStore,
                                       ConfigStore* cfgStore,
                                       const AlarmService* alarmSvc,
                                       RuntimeUiId id,
                                       bool& firstValue,
-                                      Flowios3RuntimeContext& ctx)
+                                      WaveshareRuntimeContext& ctx)
 {
     if (!dataStore) {
-        flowios3PrintUnavailableByManifestType_(out, firstValue, id);
+        wavesharePrintUnavailableByManifestType_(out, firstValue, id);
         return true;
     }
 
     switch (id) {
         case 901:
-            flowios3EnsureAlarmMasks_(ctx, alarmSvc);
+            waveshareEnsureAlarmMasks_(ctx, alarmSvc);
             printRuntimeU32_(out, firstValue, id, "alarms.active_mask", ctx.alarmActiveMask);
             return true;
         case 902:
-            flowios3EnsureAlarmMasks_(ctx, alarmSvc);
+            waveshareEnsureAlarmMasks_(ctx, alarmSvc);
             printRuntimeU32_(out, firstValue, id, "alarms.resettable_mask", ctx.alarmResettableMask);
             return true;
         case 903:
-            flowios3EnsureAlarmMasks_(ctx, alarmSvc);
+            waveshareEnsureAlarmMasks_(ctx, alarmSvc);
             printRuntimeU32_(out, firstValue, id, "alarms.condition_mask", ctx.alarmConditionMask);
             return true;
         case 2401:
-            flowios3EnsurePoolMode_(ctx, cfgStore);
+            waveshareEnsurePoolMode_(ctx, cfgStore);
             if (!ctx.poolModeAvailable) {
-                flowios3PrintUnavailableByManifestType_(out, firstValue, id);
+                wavesharePrintUnavailableByManifestType_(out, firstValue, id);
             } else {
                 printRuntimeBool_(out, firstValue, id, "pool.auto_mode", ctx.poolAutoMode);
             }
             return true;
         case 2402:
-            flowios3EnsurePoolMode_(ctx, cfgStore);
+            waveshareEnsurePoolMode_(ctx, cfgStore);
             if (!ctx.poolModeAvailable) {
-                flowios3PrintUnavailableByManifestType_(out, firstValue, id);
+                wavesharePrintUnavailableByManifestType_(out, firstValue, id);
             } else {
                 printRuntimeBool_(out, firstValue, id, "pool.winter_mode", ctx.poolWinterMode);
             }
             return true;
         case 2403:
-            flowios3EnsurePoolMode_(ctx, cfgStore);
+            waveshareEnsurePoolMode_(ctx, cfgStore);
             if (!ctx.poolModeAvailable) {
-                flowios3PrintUnavailableByManifestType_(out, firstValue, id);
+                wavesharePrintUnavailableByManifestType_(out, firstValue, id);
             } else {
                 printRuntimeBool_(out, firstValue, id, "pool.ph_auto_mode", ctx.poolPhAutoMode);
             }
             return true;
         case 2404:
-            flowios3EnsurePoolMode_(ctx, cfgStore);
+            waveshareEnsurePoolMode_(ctx, cfgStore);
             if (!ctx.poolModeAvailable) {
-                flowios3PrintUnavailableByManifestType_(out, firstValue, id);
+                wavesharePrintUnavailableByManifestType_(out, firstValue, id);
             } else {
-                printRuntimeBool_(out, firstValue, id, "pool.orp_auto_mode", ctx.poolOrpAutoMode);
+                printRuntimeBool_(out, firstValue, id, "pool.dis_auto_mode", ctx.poolOrpAutoMode);
             }
             return true;
         case 2301:
         case 2302:
         case 2303:
         case 2304: {
-            uint8_t slot = PoolBinding::kDeviceSlotFiltrationPump;
+            uint8_t slot = PoolIds::DeviceFiltrationPump;
             const char* key = "pool.filtration_on";
             if (id == 2302) {
-                slot = PoolBinding::kDeviceSlotPhPump;
+                slot = PoolIds::DevicePhPump;
                 key = "pool.ph_pump_on";
             } else if (id == 2303) {
-                slot = PoolBinding::kDeviceSlotChlorinePump;
+                slot = PoolIds::DeviceChlorinePump;
                 key = "pool.chlorine_pump_on";
             } else if (id == 2304) {
-                slot = PoolBinding::kDeviceSlotRobot;
+                slot = PoolIds::DeviceRobot;
                 key = "pool.robot_on";
             }
 
             PoolDeviceRuntimeStateEntry state{};
             if (!poolDeviceRuntimeState(*dataStore, slot, state)) {
-                flowios3PrintUnavailableByManifestType_(out, firstValue, id);
+                wavesharePrintUnavailableByManifestType_(out, firstValue, id);
             } else {
                 printRuntimeBool_(out, firstValue, id, key, state.actualOn);
             }
@@ -1746,9 +2188,9 @@ bool appendFlowios3LocalRuntimeValue_(Print& out,
             printRuntimeBool_(out, firstValue, id, "mqtt.ready", mqttReady(*dataStore));
             return true;
         case 2102:
-            flowios3EnsureMqttServer_(ctx, cfgStore);
+            waveshareEnsureMqttServer_(ctx, cfgStore);
             if (ctx.mqttServer[0] == '\0') {
-                flowios3PrintUnavailableByManifestType_(out, firstValue, id);
+                wavesharePrintUnavailableByManifestType_(out, firstValue, id);
             } else {
                 printRuntimeString_(out, firstValue, id, "mqtt.server", ctx.mqttServer);
             }
@@ -1770,36 +2212,36 @@ bool appendFlowios3LocalRuntimeValue_(Print& out,
         case 2203:
         case 2204:
         case 2206: {
-            uint8_t runtimeIndex = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotWaterTemp].runtimeIndex;
+            uint8_t runtimeIndex = 4;
             const char* key = "pool.water_temp";
             const char* unit = "\xC2\xB0""C";
             if (id == 2202) {
-                runtimeIndex = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotAirTemp].runtimeIndex;
+                runtimeIndex = 5;
                 key = "pool.air_temp";
             } else if (id == 2203) {
-                runtimeIndex = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotPh].runtimeIndex;
+                runtimeIndex = 1;
                 key = "pool.ph";
                 unit = nullptr;
             } else if (id == 2204) {
-                runtimeIndex = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotOrp].runtimeIndex;
+                runtimeIndex = 0;
                 key = "pool.orp";
                 unit = "mV";
             } else if (id == 2206) {
-                runtimeIndex = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotPsi].runtimeIndex;
+                runtimeIndex = 2;
                 key = "pool.psi";
                 unit = "PSI";
             }
 
             float value = 0.0f;
             if (!ioEndpointFloat(*dataStore, runtimeIndex, value)) {
-                flowios3PrintUnavailableByManifestType_(out, firstValue, id);
+                wavesharePrintUnavailableByManifestType_(out, firstValue, id);
             } else {
                 printRuntimeF32_(out, firstValue, id, key, value, unit);
             }
             return true;
         }
         case 2205: {
-            const uint8_t runtimeIndex = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotWaterCounter].runtimeIndex;
+            const uint8_t runtimeIndex = 20;
             float value = 0.0f;
             if (ioEndpointFloat(*dataStore, runtimeIndex, value)) {
                 printRuntimeF32_(out, firstValue, id, "pool.water_counter", value, "L");
@@ -1810,7 +2252,7 @@ bool appendFlowios3LocalRuntimeValue_(Print& out,
                 printRuntimeF32_(out, firstValue, id, "pool.water_counter", (float)counterInt, "L");
                 return true;
             }
-            flowios3PrintUnavailableByManifestType_(out, firstValue, id);
+            wavesharePrintUnavailableByManifestType_(out, firstValue, id);
             return true;
         }
         case 2207:
@@ -1821,22 +2263,31 @@ bool appendFlowios3LocalRuntimeValue_(Print& out,
         case 2212:
         case 2213:
         case 2214:
-            flowios3PrintUnavailableByManifestType_(out, firstValue, id);
+            wavesharePrintUnavailableByManifestType_(out, firstValue, id);
             return true;
         case 1801:
             printRuntimeString_(out, firstValue, id, "system.firmware", FirmwareVersion::Full);
             return true;
         case 1802:
-            flowios3EnsureSystemStats_(ctx);
+            waveshareEnsureSystemStats_(ctx);
             printRuntimeU32_(out, firstValue, id, "system.uptime_ms", (uint32_t)ctx.systemStats.uptimeMs, "ms");
             return true;
         case 1803:
-            flowios3EnsureSystemStats_(ctx);
+            waveshareEnsureSystemStats_(ctx);
             printRuntimeU32_(out, firstValue, id, "system.heap_free", ctx.systemStats.heap.freeBytes, "B");
             return true;
         case 1804:
-            flowios3EnsureSystemStats_(ctx);
+            waveshareEnsureSystemStats_(ctx);
             printRuntimeU32_(out, firstValue, id, "system.heap_min_free", ctx.systemStats.heap.minFreeBytes, "B");
+            return true;
+        case 1301:
+            printRuntimeBool_(out, firstValue, id, "time.ready", timeReady(*dataStore) || timeSource(*dataStore) != TimeSource::None);
+            return true;
+        case 1302:
+            printRuntimeString_(out, firstValue, id, "time.source", timeSourceText(*dataStore));
+            return true;
+        case 1303:
+            printRuntimeString_(out, firstValue, id, "time.quality", timeQualityText(*dataStore));
             return true;
         case 1001:
             printRuntimeBool_(out, firstValue, id, "wifi.ready", networkReady(*dataStore));
@@ -1850,7 +2301,7 @@ bool appendFlowios3LocalRuntimeValue_(Print& out,
         }
         case 1003:
             if (!WiFi.isConnected()) {
-                flowios3PrintUnavailableByManifestType_(out, firstValue, id);
+                wavesharePrintUnavailableByManifestType_(out, firstValue, id);
             } else {
                 printRuntimeI32_(out, firstValue, id, "wifi.rssi", (int32_t)WiFi.RSSI(), "dBm");
             }
@@ -1859,12 +2310,12 @@ bool appendFlowios3LocalRuntimeValue_(Print& out,
             printRuntimeString_(out, firstValue, id, "network.type", (networkReady(*dataStore) && !WiFi.isConnected()) ? "ethernet" : "wifi");
             return true;
         default:
-            flowios3PrintUnavailableByManifestType_(out, firstValue, id);
+            wavesharePrintUnavailableByManifestType_(out, firstValue, id);
             return true;
     }
 }
 
-void sendFlowios3LocalRuntimeValuesResponse_(AsyncWebServerRequest* request,
+void sendWaveshareLocalRuntimeValuesResponse_(AsyncWebServerRequest* request,
                                              DataStore* dataStore,
                                              ConfigStore* cfgStore,
                                              const AlarmService* alarmSvc,
@@ -1880,19 +2331,19 @@ void sendFlowios3LocalRuntimeValuesResponse_(AsyncWebServerRequest* request,
         return;
     }
 
-    Flowios3RuntimeContext ctx{};
+    WaveshareRuntimeContext ctx{};
     AsyncResponseStream* response = request->beginResponseStream("application/json");
     addNoCacheHeaders_(response);
     response->print("{\"ok\":true,\"values\":[");
     bool firstValue = true;
     for (size_t i = 0U; i < idCount; ++i) {
-        (void)appendFlowios3LocalRuntimeValue_(*response, dataStore, cfgStore, alarmSvc, ids[i], firstValue, ctx);
+        (void)appendWaveshareLocalRuntimeValue_(*response, dataStore, cfgStore, alarmSvc, ids[i], firstValue, ctx);
     }
     response->print("]}");
     request->send(response);
 }
 
-bool flowios3BuildStatusDomainJson_(FlowStatusDomain domain,
+bool waveshareBuildStatusDomainJson_(FlowStatusDomain domain,
                                     DataStore* dataStore,
                                     ConfigStore* cfgStore,
                                     const AlarmService* alarmSvc,
@@ -1902,19 +2353,34 @@ bool flowios3BuildStatusDomainJson_(FlowStatusDomain domain,
     if (!out || outLen == 0U) return false;
     out[0] = '\0';
 
-    Flowios3RuntimeContext ctx{};
+    WaveshareRuntimeContext ctx{};
     StaticJsonDocument<768> doc;
     doc["ok"] = true;
 
     if (domain == FlowStatusDomain::System) {
-        flowios3EnsureSystemStats_(ctx);
+        char deviceName[48] = {0};
+        loadConfiguredDeviceName_(cfgStore, deviceName, sizeof(deviceName));
+        waveshareEnsureSystemStats_(ctx);
+        doc["devicename"] = deviceName;
         doc["fw"] = FirmwareVersion::Full;
         doc["upms"] = (uint64_t)ctx.systemStats.uptimeMs64;
+        JsonObject time = doc.createNestedObject("time");
+        time["rdy"] = dataStore ? (timeReady(*dataStore) || timeSource(*dataStore) != TimeSource::None) : false;
+        time["src"] = dataStore ? timeSourceText(*dataStore) : "none";
+        time["src_id"] = dataStore ? (uint8_t)timeSource(*dataStore) : 0U;
+        time["qlt"] = dataStore ? timeQualityText(*dataStore) : "invalid";
+        time["qlt_id"] = dataStore ? (uint8_t)timeQuality(*dataStore) : 0U;
+        time["last_ntp"] = dataStore ? (uint32_t)timeLastNtpSyncUtc(*dataStore) : 0U;
+        time["last_rtc"] = dataStore ? (uint32_t)timeLastRtcSyncUtc(*dataStore) : 0U;
         JsonObject heap = doc.createNestedObject("heap");
         heap["free"] = ctx.systemStats.heap.freeBytes;
         heap["min_free"] = ctx.systemStats.heap.minFreeBytes;
         heap["larg"] = ctx.systemStats.heap.largestFreeBlock;
         heap["frag"] = ctx.systemStats.heap.fragPercent;
+        heap["internal_free"] = ctx.systemStats.heap.internalFreeBytes;
+        heap["internal_min"] = ctx.systemStats.heap.internalMinFreeBytes;
+        heap["internal_larg"] = ctx.systemStats.heap.internalLargestFreeBlock;
+        heap["internal_frag"] = ctx.systemStats.heap.internalFragPercent;
         return serializeJson(doc, out, outLen) > 0U;
     }
 
@@ -1922,14 +2388,19 @@ bool flowios3BuildStatusDomainJson_(FlowStatusDomain domain,
         JsonObject wifi = doc.createNestedObject("wifi");
         const bool wifiUp = dataStore ? networkReady(*dataStore) : false;
         const bool wifiConnected = WiFi.isConnected();
+        const bool ethernetActive = wifiUp && !wifiConnected;
         wifi["rdy"] = wifiUp;
-        wifi["typ"] = (wifiUp && !wifiConnected) ? "ethernet" : "wifi";
+        wifi["typ"] = ethernetActive ? "ethernet" : "wifi";
         IpV4 ip = dataStore ? networkIp(*dataStore) : IpV4{{0, 0, 0, 0}};
         char ipText[20] = {0};
         snprintf(ipText, sizeof(ipText), "%u.%u.%u.%u", (unsigned)ip.b[0], (unsigned)ip.b[1], (unsigned)ip.b[2], (unsigned)ip.b[3]);
         wifi["ip"] = ipText;
         uint8_t mac[6] = {0};
-        WiFi.macAddress(mac);
+        if (ethernetActive) {
+            ETH.macAddress(mac);
+        } else {
+            WiFi.macAddress(mac);
+        }
         char macText[18] = {0};
         snprintf(macText, sizeof(macText), "%02X:%02X:%02X:%02X:%02X:%02X",
                  (unsigned)mac[0], (unsigned)mac[1], (unsigned)mac[2],
@@ -1948,7 +2419,7 @@ bool flowios3BuildStatusDomainJson_(FlowStatusDomain domain,
     if (domain == FlowStatusDomain::Mqtt) {
         JsonObject mqtt = doc.createNestedObject("mqtt");
         mqtt["rdy"] = dataStore ? mqttReady(*dataStore) : false;
-        flowios3EnsureMqttServer_(ctx, cfgStore);
+        waveshareEnsureMqttServer_(ctx, cfgStore);
         mqtt["srv"] = ctx.mqttServer;
         mqtt["rxdrp"] = dataStore ? mqttRxDrop(*dataStore) : 0U;
         mqtt["prsf"] = dataStore ? mqttParseFail(*dataStore) : 0U;
@@ -1964,7 +2435,7 @@ bool flowios3BuildStatusDomainJson_(FlowStatusDomain domain,
         bool winterMode = false;
         bool phAutoMode = false;
         bool orpAutoMode = false;
-        (void)flowios3LoadPoolModeFlags_(cfgStore, hasMode, autoMode, winterMode, phAutoMode, orpAutoMode);
+        (void)waveshareLoadPoolModeFlags_(cfgStore, hasMode, autoMode, winterMode, phAutoMode, orpAutoMode);
         pool["has"] = hasMode;
         pool["auto"] = autoMode;
         pool["wint"] = winterMode;
@@ -1981,10 +2452,10 @@ bool flowios3BuildStatusDomainJson_(FlowStatusDomain domain,
             const float rounded = (decimals == 0U) ? roundf(value) : (roundf(value * scale) / scale);
             pool[key] = rounded;
         };
-        setFloat("wat", PoolBinding::kSensorBindings[PoolBinding::kSensorSlotWaterTemp].runtimeIndex, 1U);
-        setFloat("air", PoolBinding::kSensorBindings[PoolBinding::kSensorSlotAirTemp].runtimeIndex, 1U);
-        setFloat("ph", PoolBinding::kSensorBindings[PoolBinding::kSensorSlotPh].runtimeIndex, 2U);
-        setFloat("orp", PoolBinding::kSensorBindings[PoolBinding::kSensorSlotOrp].runtimeIndex, 0U);
+        setFloat("wat", 4, 1U);
+        setFloat("air", 5, 1U);
+        setFloat("ph", 1, 2U);
+        setFloat("orp", 0, 0U);
 
         auto setDevice = [&](const char* key, uint8_t slot) {
             PoolDeviceRuntimeStateEntry state{};
@@ -1994,10 +2465,10 @@ bool flowios3BuildStatusDomainJson_(FlowStatusDomain domain,
             }
             pool[key] = state.actualOn;
         };
-        setDevice("fil", PoolBinding::kDeviceSlotFiltrationPump);
-        setDevice("php", PoolBinding::kDeviceSlotPhPump);
-        setDevice("clp", PoolBinding::kDeviceSlotChlorinePump);
-        setDevice("rbt", PoolBinding::kDeviceSlotRobot);
+        setDevice("fil", PoolIds::DeviceFiltrationPump);
+        setDevice("php", PoolIds::DevicePhPump);
+        setDevice("clp", PoolIds::DeviceChlorinePump);
+        setDevice("rbt", PoolIds::DeviceRobot);
         return serializeJson(doc, out, outLen) > 0U;
     }
 
@@ -2018,7 +2489,7 @@ bool flowios3BuildStatusDomainJson_(FlowStatusDomain domain,
     }
 
     if (domain == FlowStatusDomain::Alarm) {
-        flowios3EnsureAlarmMasks_(ctx, alarmSvc);
+        waveshareEnsureAlarmMasks_(ctx, alarmSvc);
         JsonObject alm = doc.createNestedObject("alm");
         const uint32_t activeMask = ctx.alarmActiveMask;
         uint8_t count = 0U;
@@ -2039,7 +2510,7 @@ bool flowios3BuildStatusDomainJson_(FlowStatusDomain domain,
     return false;
 }
 
-bool sendFlowios3StatusCompactResponse_(AsyncWebServerRequest* request,
+bool sendWaveshareStatusCompactResponse_(AsyncWebServerRequest* request,
                                         DataStore* dataStore,
                                         ConfigStore* cfgStore,
                                         const AlarmService* alarmSvc)
@@ -2050,11 +2521,11 @@ bool sendFlowios3StatusCompactResponse_(AsyncWebServerRequest* request,
     char mqttJson[384] = {0};
     char poolJson[512] = {0};
     char i2cJson[256] = {0};
-    if (!flowios3BuildStatusDomainJson_(FlowStatusDomain::System, dataStore, cfgStore, alarmSvc, systemJson, sizeof(systemJson))) return false;
-    if (!flowios3BuildStatusDomainJson_(FlowStatusDomain::Wifi, dataStore, cfgStore, alarmSvc, wifiJson, sizeof(wifiJson))) return false;
-    if (!flowios3BuildStatusDomainJson_(FlowStatusDomain::Mqtt, dataStore, cfgStore, alarmSvc, mqttJson, sizeof(mqttJson))) return false;
-    if (!flowios3BuildStatusDomainJson_(FlowStatusDomain::Pool, dataStore, cfgStore, alarmSvc, poolJson, sizeof(poolJson))) return false;
-    if (!flowios3BuildStatusDomainJson_(FlowStatusDomain::I2c, dataStore, cfgStore, alarmSvc, i2cJson, sizeof(i2cJson))) return false;
+    if (!waveshareBuildStatusDomainJson_(FlowStatusDomain::System, dataStore, cfgStore, alarmSvc, systemJson, sizeof(systemJson))) return false;
+    if (!waveshareBuildStatusDomainJson_(FlowStatusDomain::Wifi, dataStore, cfgStore, alarmSvc, wifiJson, sizeof(wifiJson))) return false;
+    if (!waveshareBuildStatusDomainJson_(FlowStatusDomain::Mqtt, dataStore, cfgStore, alarmSvc, mqttJson, sizeof(mqttJson))) return false;
+    if (!waveshareBuildStatusDomainJson_(FlowStatusDomain::Pool, dataStore, cfgStore, alarmSvc, poolJson, sizeof(poolJson))) return false;
+    if (!waveshareBuildStatusDomainJson_(FlowStatusDomain::I2c, dataStore, cfgStore, alarmSvc, i2cJson, sizeof(i2cJson))) return false;
 
     StaticJsonDocument<768> systemDoc;
     StaticJsonDocument<512> wifiDoc;
@@ -2071,6 +2542,7 @@ bool sendFlowios3StatusCompactResponse_(AsyncWebServerRequest* request,
     addNoCacheHeaders_(response);
     response->print("{\"ok\":true");
     JsonObjectConst systemRoot = systemDoc.as<JsonObjectConst>();
+    if (!systemRoot["devicename"].isNull()) appendJsonFieldValue_(*response, "devicename", systemRoot["devicename"]);
     if (!systemRoot["fw"].isNull()) appendJsonFieldValue_(*response, "fw", systemRoot["fw"]);
     if (!systemRoot["upms"].isNull()) appendJsonFieldValue_(*response, "upms", systemRoot["upms"]);
     if (!systemRoot["heap"].isNull()) appendJsonFieldValue_(*response, "heap", systemRoot["heap"]);
@@ -2083,34 +2555,52 @@ bool sendFlowios3StatusCompactResponse_(AsyncWebServerRequest* request,
     if (!poolRoot["pool"].isNull()) appendJsonFieldValue_(*response, "pool", poolRoot["pool"]);
     JsonObjectConst i2cRoot = i2cDoc.as<JsonObjectConst>();
     if (!i2cRoot["i2c"].isNull()) appendJsonFieldValue_(*response, "i2c", i2cRoot["i2c"]);
+    if (dataStore) {
+        response->print(",\"time\":{");
+        response->print("\"rdy\":");
+        response->print((timeReady(*dataStore) || timeSource(*dataStore) != TimeSource::None) ? "true" : "false");
+        response->print(",\"src\":");
+        printJsonEscaped_(*response, timeSourceText(*dataStore));
+        response->print(",\"src_id\":");
+        response->print((unsigned)timeSource(*dataStore));
+        response->print(",\"qlt\":");
+        printJsonEscaped_(*response, timeQualityText(*dataStore));
+        response->print(",\"qlt_id\":");
+        response->print((unsigned)timeQuality(*dataStore));
+        response->print(",\"last_ntp\":");
+        response->print((unsigned long)timeLastNtpSyncUtc(*dataStore));
+        response->print(",\"last_rtc\":");
+        response->print((unsigned long)timeLastRtcSyncUtc(*dataStore));
+        response->print('}');
+    }
 
     response->print("}");
     request->send(response);
     return true;
 }
 
-struct Flowios3DashboardSlotConfig {
+struct WaveshareDashboardSlotConfig {
     bool enabled = true;
     RuntimeUiId runtimeUiId = 0U;
     char label[24] = {0};
     uint8_t colorId = 0U;
 };
 
-struct Flowios3AlarmDashboardSlotConfig {
+struct WaveshareAlarmDashboardSlotConfig {
     bool enabled = true;
     uint16_t alarmId = 0U;
     char label[24] = {0};
     uint8_t colorId = 0U;
 };
 
-struct Flowios3AlarmDashboardSlotState {
+struct WaveshareAlarmDashboardSlotState {
     bool available = false;
     bool latched = false;
     bool conditionKnown = false;
     bool conditionTrue = false;
 };
 
-struct Flowios3DashboardRuntimeValue {
+struct WaveshareDashboardRuntimeValue {
     bool available = false;
     RuntimeUiWireType wireType = RuntimeUiWireType::Unavailable;
     bool boolValue = false;
@@ -2120,8 +2610,8 @@ struct Flowios3DashboardRuntimeValue {
     char stringValue[64] = {0};
 };
 
-constexpr uint8_t kFlowios3DashboardSlotCount = 8U;
-constexpr RuntimeUiId kFlowios3DashboardDefaultRuntimeUiIds[kFlowios3DashboardSlotCount] = {
+constexpr uint8_t kWaveshareDashboardSlotCount = 8U;
+constexpr RuntimeUiId kWaveshareDashboardDefaultRuntimeUiIds[kWaveshareDashboardSlotCount] = {
     makeRuntimeUiId(ModuleId::Io, 1),
     makeRuntimeUiId(ModuleId::Io, 2),
     makeRuntimeUiId(ModuleId::Io, 3),
@@ -2131,7 +2621,7 @@ constexpr RuntimeUiId kFlowios3DashboardDefaultRuntimeUiIds[kFlowios3DashboardSl
     makeRuntimeUiId(ModuleId::Io, 7),
     makeRuntimeUiId(ModuleId::Io, 6),
 };
-constexpr const char* kFlowios3DashboardDefaultLabels[kFlowios3DashboardSlotCount] = {
+constexpr const char* kWaveshareDashboardDefaultLabels[kWaveshareDashboardSlotCount] = {
     "Eau",
     "Air",
     "pH",
@@ -2141,7 +2631,7 @@ constexpr const char* kFlowios3DashboardDefaultLabels[kFlowios3DashboardSlotCoun
     "BMP280",
     "PSI",
 };
-constexpr uint8_t kFlowios3DashboardDefaultColorIds[kFlowios3DashboardSlotCount] = {
+constexpr uint8_t kWaveshareDashboardDefaultColorIds[kWaveshareDashboardSlotCount] = {
     0U,
     1U,
     2U,
@@ -2151,7 +2641,7 @@ constexpr uint8_t kFlowios3DashboardDefaultColorIds[kFlowios3DashboardSlotCount]
     6U,
     7U,
 };
-constexpr uint16_t kFlowios3AlarmDashboardDefaultIds[kFlowios3DashboardSlotCount] = {
+constexpr uint16_t kWaveshareAlarmDashboardDefaultIds[kWaveshareDashboardSlotCount] = {
     (uint16_t)AlarmId::PoolPsiLow,
     (uint16_t)AlarmId::PoolPsiHigh,
     (uint16_t)AlarmId::PoolPhTankLow,
@@ -2161,7 +2651,7 @@ constexpr uint16_t kFlowios3AlarmDashboardDefaultIds[kFlowios3DashboardSlotCount
     (uint16_t)AlarmId::PoolWaterLevelLow,
     (uint16_t)AlarmId::PoolWaterLevelLow,
 };
-constexpr bool kFlowios3AlarmDashboardDefaultEnabled[kFlowios3DashboardSlotCount] = {
+constexpr bool kWaveshareAlarmDashboardDefaultEnabled[kWaveshareDashboardSlotCount] = {
     true,
     true,
     true,
@@ -2171,7 +2661,7 @@ constexpr bool kFlowios3AlarmDashboardDefaultEnabled[kFlowios3DashboardSlotCount
     true,
     false,
 };
-constexpr const char* kFlowios3AlarmDashboardDefaultLabels[kFlowios3DashboardSlotCount] = {
+constexpr const char* kWaveshareAlarmDashboardDefaultLabels[kWaveshareDashboardSlotCount] = {
     "PSI bas",
     "PSI haut",
     "pH vide",
@@ -2181,7 +2671,7 @@ constexpr const char* kFlowios3AlarmDashboardDefaultLabels[kFlowios3DashboardSlo
     "Eau basse",
     "",
 };
-constexpr uint8_t kFlowios3AlarmDashboardDefaultColorIds[kFlowios3DashboardSlotCount] = {
+constexpr uint8_t kWaveshareAlarmDashboardDefaultColorIds[kWaveshareDashboardSlotCount] = {
     17U,
     17U,
     8U,
@@ -2191,24 +2681,24 @@ constexpr uint8_t kFlowios3AlarmDashboardDefaultColorIds[kFlowios3DashboardSlotC
     5U,
     19U,
 };
-constexpr const char* kFlowios3DashboardColorHex[] = {
+constexpr const char* kWaveshareDashboardColorHex[] = {
     "#E6EFFF", "#E5F8FC", "#E8FAEF", "#F0EAFE", "#E4F6FA", "#E3F7FE", "#EAF8FD",
     "#FEF0E8", "#FCE7EF", "#FFF0E1", "#FFF7D9", "#EDF8E7", "#F0FAE6", "#F5EEFF",
     "#EBEEFF", "#EEF7FF", "#F4FADE", "#FFE9E4", "#F9EEE8", "#F1F4F8", "#FFFFFF",
 };
 
-const char* flowios3DashboardColorHex_(uint8_t colorId, uint8_t slot)
+const char* waveshareDashboardColorHex_(uint8_t colorId, uint8_t slot)
 {
-    const uint8_t colorCount = (uint8_t)(sizeof(kFlowios3DashboardColorHex) / sizeof(kFlowios3DashboardColorHex[0]));
-    if (colorId < colorCount) return kFlowios3DashboardColorHex[colorId];
-    if (slot < kFlowios3DashboardSlotCount) {
-        const uint8_t fallbackId = kFlowios3DashboardDefaultColorIds[slot];
-        if (fallbackId < colorCount) return kFlowios3DashboardColorHex[fallbackId];
+    const uint8_t colorCount = (uint8_t)(sizeof(kWaveshareDashboardColorHex) / sizeof(kWaveshareDashboardColorHex[0]));
+    if (colorId < colorCount) return kWaveshareDashboardColorHex[colorId];
+    if (slot < kWaveshareDashboardSlotCount) {
+        const uint8_t fallbackId = kWaveshareDashboardDefaultColorIds[slot];
+        if (fallbackId < colorCount) return kWaveshareDashboardColorHex[fallbackId];
     }
     return "#FFFFFF";
 }
 
-const char* flowios3AlarmDashboardLabel_(uint16_t alarmId)
+const char* waveshareAlarmDashboardLabel_(uint16_t alarmId)
 {
     switch ((AlarmId)alarmId) {
         case AlarmId::PoolPsiLow: return "PSI bas";
@@ -2223,7 +2713,7 @@ const char* flowios3AlarmDashboardLabel_(uint16_t alarmId)
     }
 }
 
-void flowios3DashboardFallbackLabel_(RuntimeUiId id, char* out, size_t outLen)
+void waveshareDashboardFallbackLabel_(RuntimeUiId id, char* out, size_t outLen)
 {
     if (!out || outLen == 0U) return;
     out[0] = '\0';
@@ -2252,16 +2742,16 @@ void flowios3DashboardFallbackLabel_(RuntimeUiId id, char* out, size_t outLen)
     out[j] = '\0';
 }
 
-void flowios3LoadDashboardSlotConfig_(ConfigStore* cfgStore, uint8_t slot, Flowios3DashboardSlotConfig& out)
+void waveshareLoadDashboardSlotConfig_(ConfigStore* cfgStore, uint8_t slot, WaveshareDashboardSlotConfig& out)
 {
     out.enabled = true;
-    out.runtimeUiId = (slot < kFlowios3DashboardSlotCount) ? kFlowios3DashboardDefaultRuntimeUiIds[slot] : 0U;
-    out.colorId = (slot < kFlowios3DashboardSlotCount) ? kFlowios3DashboardDefaultColorIds[slot] : 0U;
+    out.runtimeUiId = (slot < kWaveshareDashboardSlotCount) ? kWaveshareDashboardDefaultRuntimeUiIds[slot] : 0U;
+    out.colorId = (slot < kWaveshareDashboardSlotCount) ? kWaveshareDashboardDefaultColorIds[slot] : 0U;
     snprintf(out.label,
              sizeof(out.label),
              "%s",
-             (slot < kFlowios3DashboardSlotCount) ? kFlowios3DashboardDefaultLabels[slot] : "Mesure");
-    if (!cfgStore || slot >= kFlowios3DashboardSlotCount) return;
+             (slot < kWaveshareDashboardSlotCount) ? kWaveshareDashboardDefaultLabels[slot] : "Mesure");
+    if (!cfgStore || slot >= kWaveshareDashboardSlotCount) return;
 
     char moduleName[32] = {0};
     snprintf(moduleName, sizeof(moduleName), "tft/s3/sensors/slot%02u", (unsigned)slot);
@@ -2280,16 +2770,16 @@ void flowios3LoadDashboardSlotConfig_(ConfigStore* cfgStore, uint8_t slot, Flowi
     }
 }
 
-void flowios3LoadAlarmDashboardSlotConfig_(ConfigStore* cfgStore, uint8_t slot, Flowios3AlarmDashboardSlotConfig& out)
+void waveshareLoadAlarmDashboardSlotConfig_(ConfigStore* cfgStore, uint8_t slot, WaveshareAlarmDashboardSlotConfig& out)
 {
-    out.enabled = (slot < kFlowios3DashboardSlotCount) ? kFlowios3AlarmDashboardDefaultEnabled[slot] : false;
-    out.alarmId = (slot < kFlowios3DashboardSlotCount) ? kFlowios3AlarmDashboardDefaultIds[slot] : 0U;
-    out.colorId = (slot < kFlowios3DashboardSlotCount) ? kFlowios3AlarmDashboardDefaultColorIds[slot] : 0U;
+    out.enabled = (slot < kWaveshareDashboardSlotCount) ? kWaveshareAlarmDashboardDefaultEnabled[slot] : false;
+    out.alarmId = (slot < kWaveshareDashboardSlotCount) ? kWaveshareAlarmDashboardDefaultIds[slot] : 0U;
+    out.colorId = (slot < kWaveshareDashboardSlotCount) ? kWaveshareAlarmDashboardDefaultColorIds[slot] : 0U;
     snprintf(out.label,
              sizeof(out.label),
              "%s",
-             (slot < kFlowios3DashboardSlotCount) ? kFlowios3AlarmDashboardDefaultLabels[slot] : "");
-    if (!cfgStore || slot >= kFlowios3DashboardSlotCount) return;
+             (slot < kWaveshareDashboardSlotCount) ? kWaveshareAlarmDashboardDefaultLabels[slot] : "");
+    if (!cfgStore || slot >= kWaveshareDashboardSlotCount) return;
 
     char moduleName[32] = {0};
     snprintf(moduleName, sizeof(moduleName), "tft/s3/alarms/slot%02u", (unsigned)slot);
@@ -2308,7 +2798,7 @@ void flowios3LoadAlarmDashboardSlotConfig_(ConfigStore* cfgStore, uint8_t slot, 
     }
 }
 
-bool flowios3SetDashboardRuntimeFromIoValue_(const IoValue& value, Flowios3DashboardRuntimeValue& out)
+bool waveshareSetDashboardRuntimeFromIoValue_(const IoValue& value, WaveshareDashboardRuntimeValue& out)
 {
     if (!value.valid) return false;
     out.available = true;
@@ -2327,18 +2817,18 @@ bool flowios3SetDashboardRuntimeFromIoValue_(const IoValue& value, Flowios3Dashb
     return true;
 }
 
-bool flowios3ReadDashboardIoValue_(const IOServiceV2* ioSvc, IoId ioId, Flowios3DashboardRuntimeValue& out)
+bool waveshareReadDashboardIoValue_(const IOServiceV2* ioSvc, IoId ioId, WaveshareDashboardRuntimeValue& out)
 {
     if (!ioSvc || !ioSvc->readValue) return false;
     IoValue value{};
     if (ioSvc->readValue(ioSvc->ctx, ioId, &value) != IO_OK) return false;
-    return flowios3SetDashboardRuntimeFromIoValue_(value, out);
+    return waveshareSetDashboardRuntimeFromIoValue_(value, out);
 }
 
-bool flowios3ReadDashboardIoBackendValue_(const IOServiceV2* ioSvc,
+bool waveshareReadDashboardIoBackendValue_(const IOServiceV2* ioSvc,
                                           uint8_t backend,
                                           uint8_t channel,
-                                          Flowios3DashboardRuntimeValue& out)
+                                          WaveshareDashboardRuntimeValue& out)
 {
     if (!ioSvc || !ioSvc->count || !ioSvc->idAt || !ioSvc->meta) return false;
     const uint8_t count = ioSvc->count(ioSvc->ctx);
@@ -2348,29 +2838,29 @@ bool flowios3ReadDashboardIoBackendValue_(const IOServiceV2* ioSvc,
         IoEndpointMeta meta{};
         if (ioSvc->meta(ioSvc->ctx, ioId, &meta) != IO_OK) continue;
         if (meta.backend == backend && meta.channel == channel) {
-            return flowios3ReadDashboardIoValue_(ioSvc, ioId, out);
+            return waveshareReadDashboardIoValue_(ioSvc, ioId, out);
         }
     }
     return false;
 }
 
-bool flowios3ReadDashboardPoolSensorDataStore_(DataStore* dataStore,
+bool waveshareReadDashboardPoolSensorDataStore_(DataStore* dataStore,
                                                uint8_t valueId,
-                                               Flowios3DashboardRuntimeValue& out)
+                                               WaveshareDashboardRuntimeValue& out)
 {
     if (!dataStore) return false;
 
-    uint8_t runtimeIndex = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotWaterTemp].runtimeIndex;
+    uint8_t runtimeIndex = 4;
     if (valueId == 2U) {
-        runtimeIndex = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotAirTemp].runtimeIndex;
+        runtimeIndex = 5;
     } else if (valueId == 3U) {
-        runtimeIndex = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotPh].runtimeIndex;
+        runtimeIndex = 1;
     } else if (valueId == 4U) {
-        runtimeIndex = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotOrp].runtimeIndex;
+        runtimeIndex = 0;
     } else if (valueId == 5U) {
-        runtimeIndex = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotWaterCounter].runtimeIndex;
+        runtimeIndex = 20;
     } else if (valueId == 6U) {
-        runtimeIndex = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotPsi].runtimeIndex;
+        runtimeIndex = 2;
     } else if (valueId != 1U) {
         return false;
     }
@@ -2394,13 +2884,13 @@ bool flowios3ReadDashboardPoolSensorDataStore_(DataStore* dataStore,
     return false;
 }
 
-bool flowios3ReadDashboardRuntimeValue_(DataStore* dataStore,
+bool waveshareReadDashboardRuntimeValue_(DataStore* dataStore,
                                         ConfigStore* cfgStore,
                                         const AlarmService* alarmSvc,
                                         const IOServiceV2* ioSvc,
                                         RuntimeUiId id,
-                                        Flowios3DashboardRuntimeValue& out,
-                                        Flowios3RuntimeContext& ctx)
+                                        WaveshareDashboardRuntimeValue& out,
+                                        WaveshareRuntimeContext& ctx)
 {
     if (!findRuntimeUiManifestItem(id)) return false;
 
@@ -2408,7 +2898,7 @@ bool flowios3ReadDashboardRuntimeValue_(DataStore* dataStore,
     const uint8_t valueId = runtimeUiValueId(id);
     switch (module) {
         case ModuleId::Alarm:
-            flowios3EnsureAlarmMasks_(ctx, alarmSvc);
+            waveshareEnsureAlarmMasks_(ctx, alarmSvc);
             out.available = true;
             out.wireType = RuntimeUiWireType::UInt32;
             if (valueId == 1U) out.u32Value = ctx.alarmActiveMask;
@@ -2418,7 +2908,7 @@ bool flowios3ReadDashboardRuntimeValue_(DataStore* dataStore,
             return true;
 
         case ModuleId::PoolLogic:
-            flowios3EnsurePoolMode_(ctx, cfgStore);
+            waveshareEnsurePoolMode_(ctx, cfgStore);
             if (!ctx.poolModeAvailable) return false;
             out.available = true;
             out.wireType = RuntimeUiWireType::Bool;
@@ -2432,10 +2922,10 @@ bool flowios3ReadDashboardRuntimeValue_(DataStore* dataStore,
         case ModuleId::PoolDevice: {
             if (!dataStore) return false;
             uint8_t deviceSlot = 0xFFU;
-            if (valueId == 1U) deviceSlot = PoolBinding::kDeviceSlotFiltrationPump;
-            else if (valueId == 2U) deviceSlot = PoolBinding::kDeviceSlotPhPump;
-            else if (valueId == 3U) deviceSlot = PoolBinding::kDeviceSlotChlorinePump;
-            else if (valueId == 4U) deviceSlot = PoolBinding::kDeviceSlotRobot;
+            if (valueId == 1U) deviceSlot = PoolIds::DeviceFiltrationPump;
+            else if (valueId == 2U) deviceSlot = PoolIds::DevicePhPump;
+            else if (valueId == 3U) deviceSlot = PoolIds::DeviceChlorinePump;
+            else if (valueId == 4U) deviceSlot = PoolIds::DeviceRobot;
             else return false;
 
             PoolDeviceRuntimeStateEntry state{};
@@ -2455,7 +2945,7 @@ bool flowios3ReadDashboardRuntimeValue_(DataStore* dataStore,
                 return true;
             }
             if (valueId == 2U) {
-                flowios3EnsureMqttServer_(ctx, cfgStore);
+                waveshareEnsureMqttServer_(ctx, cfgStore);
                 if (ctx.mqttServer[0] == '\0') return false;
                 out.wireType = RuntimeUiWireType::String;
                 snprintf(out.stringValue, sizeof(out.stringValue), "%s", ctx.mqttServer);
@@ -2471,23 +2961,23 @@ bool flowios3ReadDashboardRuntimeValue_(DataStore* dataStore,
 
         case ModuleId::Io:
             if (valueId >= 1U && valueId <= 6U) {
-                IoId ioId = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotWaterTemp].ioId;
-                if (valueId == 2U) ioId = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotAirTemp].ioId;
-                else if (valueId == 3U) ioId = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotPh].ioId;
-                else if (valueId == 4U) ioId = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotOrp].ioId;
-                else if (valueId == 5U) ioId = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotWaterCounter].ioId;
-                else if (valueId == 6U) ioId = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotPsi].ioId;
-                return flowios3ReadDashboardIoValue_(ioSvc, ioId, out) ||
-                       flowios3ReadDashboardPoolSensorDataStore_(dataStore, valueId, out);
+                IoId ioId = ioIdFromSlot(analogInputSlot(4));
+                if (valueId == 2U) ioId = ioIdFromSlot(analogInputSlot(5));
+                else if (valueId == 3U) ioId = ioIdFromSlot(analogInputSlot(1));
+                else if (valueId == 4U) ioId = ioIdFromSlot(analogInputSlot(0));
+                else if (valueId == 5U) ioId = ioIdFromSlot(digitalInputSlot(12));
+                else if (valueId == 6U) ioId = ioIdFromSlot(analogInputSlot(2));
+                return waveshareReadDashboardIoValue_(ioSvc, ioId, out) ||
+                       waveshareReadDashboardPoolSensorDataStore_(dataStore, valueId, out);
             }
-            if (valueId == 7U) return flowios3ReadDashboardIoBackendValue_(ioSvc, IO_BACKEND_BMP280, 0U, out);
-            if (valueId == 8U) return flowios3ReadDashboardIoBackendValue_(ioSvc, IO_BACKEND_BME680, 0U, out);
-            if (valueId == 9U) return flowios3ReadDashboardIoBackendValue_(ioSvc, IO_BACKEND_BMP280, 1U, out);
-            if (valueId == 10U) return flowios3ReadDashboardIoBackendValue_(ioSvc, IO_BACKEND_SHT40, 0U, out);
-            if (valueId == 11U) return flowios3ReadDashboardIoBackendValue_(ioSvc, IO_BACKEND_SHT40, 1U, out);
-            if (valueId == 12U) return flowios3ReadDashboardIoBackendValue_(ioSvc, IO_BACKEND_BME680, 1U, out);
-            if (valueId == 13U) return flowios3ReadDashboardIoBackendValue_(ioSvc, IO_BACKEND_BME680, 2U, out);
-            if (valueId == 14U) return flowios3ReadDashboardIoBackendValue_(ioSvc, IO_BACKEND_BME680, 3U, out);
+            if (valueId == 7U) return waveshareReadDashboardIoBackendValue_(ioSvc, IO_BACKEND_BMP280, 0U, out);
+            if (valueId == 8U) return waveshareReadDashboardIoBackendValue_(ioSvc, IO_BACKEND_BME680, 0U, out);
+            if (valueId == 9U) return waveshareReadDashboardIoBackendValue_(ioSvc, IO_BACKEND_BMP280, 1U, out);
+            if (valueId == 10U) return waveshareReadDashboardIoBackendValue_(ioSvc, IO_BACKEND_SHT40, 0U, out);
+            if (valueId == 11U) return waveshareReadDashboardIoBackendValue_(ioSvc, IO_BACKEND_SHT40, 1U, out);
+            if (valueId == 12U) return waveshareReadDashboardIoBackendValue_(ioSvc, IO_BACKEND_BME680, 1U, out);
+            if (valueId == 13U) return waveshareReadDashboardIoBackendValue_(ioSvc, IO_BACKEND_BME680, 2U, out);
+            if (valueId == 14U) return waveshareReadDashboardIoBackendValue_(ioSvc, IO_BACKEND_BME680, 3U, out);
             return false;
 
         case ModuleId::System:
@@ -2497,7 +2987,7 @@ bool flowios3ReadDashboardRuntimeValue_(DataStore* dataStore,
                 snprintf(out.stringValue, sizeof(out.stringValue), "%s", FirmwareVersion::Full);
                 return true;
             }
-            flowios3EnsureSystemStats_(ctx);
+            waveshareEnsureSystemStats_(ctx);
             out.wireType = RuntimeUiWireType::UInt32;
             if (valueId == 2U) out.u32Value = (uint32_t)ctx.systemStats.uptimeMs;
             else if (valueId == 3U) out.u32Value = ctx.systemStats.heap.freeBytes;
@@ -2538,7 +3028,7 @@ bool flowios3ReadDashboardRuntimeValue_(DataStore* dataStore,
     }
 }
 
-void flowios3TrimDashboardSlotFloat_(char* text)
+void waveshareTrimDashboardSlotFloat_(char* text)
 {
     if (!text) return;
     char* dot = strchr(text, '.');
@@ -2550,7 +3040,7 @@ void flowios3TrimDashboardSlotFloat_(char* text)
     if (strcmp(text, "-0") == 0) snprintf(text, 4, "0");
 }
 
-uint8_t flowios3DashboardSlotDecimals_(RuntimeUiId id, RuntimeUiWireType type)
+uint8_t waveshareDashboardSlotDecimals_(RuntimeUiId id, RuntimeUiWireType type)
 {
     if (type != RuntimeUiWireType::Float32) return 0U;
     if (id == makeRuntimeUiId(ModuleId::Io, 3)) return 2U;
@@ -2561,8 +3051,8 @@ uint8_t flowios3DashboardSlotDecimals_(RuntimeUiId id, RuntimeUiWireType type)
     return 1U;
 }
 
-void flowios3FormatDashboardRuntimeValue_(RuntimeUiId id,
-                                          const Flowios3DashboardRuntimeValue& value,
+void waveshareFormatDashboardRuntimeValue_(RuntimeUiId id,
+                                          const WaveshareDashboardRuntimeValue& value,
                                           char* valueOut,
                                           size_t valueOutLen,
                                           char* unitOut,
@@ -2594,10 +3084,10 @@ void flowios3FormatDashboardRuntimeValue_(RuntimeUiId id,
             snprintf(valueOut, valueOutLen, "%lu", (unsigned long)value.u32Value);
             return;
         case RuntimeUiWireType::Float32: {
-            const uint8_t decimals = flowios3DashboardSlotDecimals_(id, value.wireType);
+            const uint8_t decimals = waveshareDashboardSlotDecimals_(id, value.wireType);
             if (decimals > 0U) {
                 snprintf(valueOut, valueOutLen, "%.*f", (int)decimals, (double)value.f32Value);
-                flowios3TrimDashboardSlotFloat_(valueOut);
+                waveshareTrimDashboardSlotFloat_(valueOut);
             } else {
                 snprintf(valueOut, valueOutLen, "%ld", lroundf(value.f32Value));
             }
@@ -2616,11 +3106,691 @@ void flowios3FormatDashboardRuntimeValue_(RuntimeUiId id,
     }
 }
 
-bool flowios3ReadAlarmDashboardSlotState_(const AlarmService* alarmSvc,
-                                          uint16_t alarmId,
-                                          Flowios3AlarmDashboardSlotState& out)
+const char* waveshareIoBackendLabel_(uint8_t backend)
 {
-    out = Flowios3AlarmDashboardSlotState{};
+    switch (backend) {
+        case IO_BACKEND_GPIO: return "GPIO";
+        case IO_BACKEND_PCF8574: return "PCF8574";
+        case IO_BACKEND_ADS1115_INT: return "ADS1115 int";
+        case IO_BACKEND_ADS1115_EXT_DIFF: return "ADS1115 ext";
+        case IO_BACKEND_DS18B20: return "DS18B20";
+        case IO_BACKEND_SHT40: return "SHT40";
+        case IO_BACKEND_BMP280: return "BMP280";
+        case IO_BACKEND_BME680: return "BME680";
+        case IO_BACKEND_INA226: return "INA226";
+        case IO_BACKEND_TCA9554: return "TCA9554";
+        case IO_BACKEND_MCP23017: return "MCP23017";
+        default: return "unknown";
+    }
+}
+
+const char* waveshareIoSlotKindLabel_(uint8_t kind)
+{
+    switch (kind) {
+        case IO_SLOT_ANALOG_INPUT: return "analog_in";
+        case IO_SLOT_DIGITAL_INPUT: return "digital_in";
+        case IO_SLOT_DIGITAL_OUTPUT: return "digital_out";
+        default: return "unknown";
+    }
+}
+
+const char* waveshareIoPortKindLabel_(uint8_t kind)
+{
+    switch (kind) {
+        case IO_PORT_KIND_GPIO_INPUT: return "gpio_input";
+        case IO_PORT_KIND_GPIO_OUTPUT: return "gpio_output";
+        case IO_PORT_KIND_PCF8574_OUTPUT: return "pcf8574_output";
+        case IO_PORT_KIND_ADS_INTERNAL_SINGLE: return "ads1115_internal";
+        case IO_PORT_KIND_ADS_EXTERNAL_DIFF: return "ads1115_external_diff";
+        case IO_PORT_KIND_DS18_WATER: return "ds18b20_water";
+        case IO_PORT_KIND_DS18_AIR: return "ds18b20_air";
+        case IO_PORT_KIND_INA226: return "ina226";
+        case IO_PORT_KIND_SHT40: return "sht40";
+        case IO_PORT_KIND_BMP280: return "bmp280";
+        case IO_PORT_KIND_BME680: return "bme680";
+        case IO_PORT_KIND_TCA9554_OUTPUT: return "tca9554_output";
+        case IO_PORT_KIND_MCP23017_OUTPUT: return "mcp23017_output";
+        case IO_PORT_KIND_MCP23017_INPUT: return "mcp23017_input";
+        default: return "none";
+    }
+}
+
+const char* waveshareIoPortDirectionLabel_(uint8_t kind)
+{
+    switch (kind) {
+        case IO_PORT_KIND_GPIO_INPUT:
+        case IO_PORT_KIND_ADS_INTERNAL_SINGLE:
+        case IO_PORT_KIND_ADS_EXTERNAL_DIFF:
+        case IO_PORT_KIND_DS18_WATER:
+        case IO_PORT_KIND_DS18_AIR:
+        case IO_PORT_KIND_INA226:
+        case IO_PORT_KIND_SHT40:
+        case IO_PORT_KIND_BMP280:
+        case IO_PORT_KIND_BME680:
+        case IO_PORT_KIND_MCP23017_INPUT:
+            return "input";
+        case IO_PORT_KIND_GPIO_OUTPUT:
+        case IO_PORT_KIND_PCF8574_OUTPUT:
+        case IO_PORT_KIND_TCA9554_OUTPUT:
+        case IO_PORT_KIND_MCP23017_OUTPUT:
+            return "output";
+        default:
+            return "unknown";
+    }
+}
+
+const char* wavesharePoolDeviceBlockReasonLabel_(uint8_t reason)
+{
+    switch (reason) {
+        case POOL_DEVICE_BLOCK_NONE: return "";
+        case POOL_DEVICE_BLOCK_DISABLED: return "disabled";
+        case POOL_DEVICE_BLOCK_INTERLOCK: return "interlock";
+        case POOL_DEVICE_BLOCK_IO_ERROR: return "io_error";
+        case POOL_DEVICE_BLOCK_MAX_UPTIME: return "max_uptime";
+        case POOL_DEVICE_BLOCK_UNBOUND: return "unbound";
+        case POOL_DEVICE_BLOCK_IO_DISABLED: return "io_disabled";
+        default: return "blocked";
+    }
+}
+
+bool waveshareIoPortBackendChannel_(const IOBindingPortSpec& spec, uint8_t& backendOut, uint8_t& channelOut)
+{
+    switch (spec.kind) {
+        case IO_PORT_KIND_GPIO_INPUT:
+        case IO_PORT_KIND_GPIO_OUTPUT:
+            backendOut = IO_BACKEND_GPIO;
+            channelOut = spec.channel;
+            return true;
+        case IO_PORT_KIND_PCF8574_OUTPUT:
+            backendOut = IO_BACKEND_PCF8574;
+            channelOut = spec.channel;
+            return true;
+        case IO_PORT_KIND_ADS_INTERNAL_SINGLE:
+            backendOut = IO_BACKEND_ADS1115_INT;
+            channelOut = spec.channel;
+            return true;
+        case IO_PORT_KIND_ADS_EXTERNAL_DIFF:
+            backendOut = IO_BACKEND_ADS1115_EXT_DIFF;
+            channelOut = spec.channel;
+            return true;
+        case IO_PORT_KIND_DS18_WATER:
+        case IO_PORT_KIND_DS18_AIR:
+            backendOut = IO_BACKEND_DS18B20;
+            channelOut = spec.channel;
+            return true;
+        case IO_PORT_KIND_INA226:
+            backendOut = IO_BACKEND_INA226;
+            channelOut = spec.channel;
+            return true;
+        case IO_PORT_KIND_SHT40:
+            backendOut = IO_BACKEND_SHT40;
+            channelOut = spec.channel;
+            return true;
+        case IO_PORT_KIND_BMP280:
+            backendOut = IO_BACKEND_BMP280;
+            channelOut = spec.channel;
+            return true;
+        case IO_PORT_KIND_BME680:
+            backendOut = IO_BACKEND_BME680;
+            channelOut = spec.channel;
+            return true;
+        case IO_PORT_KIND_TCA9554_OUTPUT:
+            backendOut = IO_BACKEND_TCA9554;
+            channelOut = spec.channel;
+            return true;
+        case IO_PORT_KIND_MCP23017_OUTPUT:
+        case IO_PORT_KIND_MCP23017_INPUT:
+            backendOut = IO_BACKEND_MCP23017;
+            channelOut = spec.channel;
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool waveshareIoPortMatchesMeta_(const IOBindingPortSpec& spec, const IoEndpointMeta& meta)
+{
+    return meta.bindingPort != IO_PORT_INVALID && spec.portId == meta.bindingPort;
+}
+
+const IOBindingPortSpec* waveshareFindPortForMeta_(const IoEndpointMeta& meta)
+{
+    using namespace Profiles::Waveshare::IoLayout;
+    for (const IOBindingPortSpec& spec : kBindingPorts) {
+        if (waveshareIoPortMatchesMeta_(spec, meta)) return &spec;
+    }
+    return nullptr;
+}
+
+const DomainIoSlotBinding* waveshareFindDomainBinding_(DomainSlotId domainSlot)
+{
+    for (const DomainIoSlotBinding& binding : PoolDomain::kDomainIoSlots) {
+        if (binding.domainSlot == domainSlot) return &binding;
+    }
+    return nullptr;
+}
+
+const DomainSlotPreset* waveshareFindDomainSlotPreset_(DomainSlotId domainSlot)
+{
+    for (const DomainSlotPreset& preset : PoolDomain::kDomainSlots) {
+        if (preset.id == domainSlot) return &preset;
+    }
+    return nullptr;
+}
+
+void waveshareFormatIoValue_(const IoEndpointMeta& meta, const IoValue& value, char* out, size_t outLen)
+{
+    if (!out || outLen == 0U) return;
+    out[0] = '\0';
+    if (!value.valid) {
+        snprintf(out, outLen, "-");
+        return;
+    }
+    if (value.type == IO_VAL_BOOL) {
+        snprintf(out, outLen, "%s", value.v.b ? "on" : "off");
+        return;
+    }
+    if (value.type == IO_VAL_INT32) {
+        snprintf(out, outLen, "%ld", (long)value.v.i32);
+        return;
+    }
+    int precision = (int)meta.precision;
+    if (precision < 0) precision = 0;
+    if (precision > 4) precision = 4;
+    snprintf(out, outLen, "%.*f", precision, (double)value.v.f);
+    waveshareTrimDashboardSlotFloat_(out);
+}
+
+struct WaveshareIoSummaryState {
+    DomainSlotId domainSlot = DOMAIN_SLOT_INVALID;
+    const char* state = "sleeping";
+    const char* error = "";
+    bool active = false;
+    bool manuallyDisabled = false;
+    bool errorState = false;
+    IoEndpointMeta meta{};
+    IoValue value{};
+    bool hasMeta = false;
+    bool hasValue = false;
+    bool hasBindingPort = false;
+    bool hasPoolDevice = false;
+    PoolDeviceSvcMeta poolMeta{};
+    uint8_t poolActualOn = 0U;
+    uint32_t poolActualTsMs = 0U;
+};
+
+WaveshareIoSummaryState waveshareIoSummaryStateForSlot_(const DomainStatusService* domainStatusSvc,
+                                                        DomainSlotId domainSlot)
+{
+    WaveshareIoSummaryState out{};
+    out.domainSlot = domainSlot;
+    DomainSlotStatus shared{};
+    if (!domainStatusSvc || !domainStatusSvc->slotStatus ||
+        !domainStatusSvc->slotStatus(domainStatusSvc->ctx, domainSlot, &shared)) {
+        out.error = "not_configured";
+        return out;
+    }
+
+    out.state = domainSlotRuntimeStateName(shared.state);
+    out.active = shared.active != 0U;
+    out.manuallyDisabled = shared.state == DomainSlotRuntimeState::ManuallyDisabled;
+    out.errorState = shared.error != 0U;
+    out.meta = shared.meta;
+    out.value = shared.value;
+    out.hasMeta = shared.hasMeta != 0U;
+    out.hasValue = shared.hasValue != 0U;
+    out.hasBindingPort = shared.hasBindingPort != 0U;
+    out.hasPoolDevice = shared.hasPoolDevice != 0U;
+    out.poolMeta = shared.poolMeta;
+    out.poolActualOn = shared.poolActualOn;
+    out.poolActualTsMs = shared.poolActualTsMs;
+    out.error = (shared.reason == DomainSlotStatusReason::PoolDeviceBlocked)
+        ? wavesharePoolDeviceBlockReasonLabel_(shared.poolMeta.blockReason)
+        : domainSlotStatusReasonName(shared.reason);
+    return out;
+}
+
+const WaveshareIoSummaryState* waveshareFindIoSummaryState_(const WaveshareIoSummaryState* states,
+                                                           size_t stateCount,
+                                                           DomainSlotId domainSlot)
+{
+    if (!states) return nullptr;
+    for (size_t i = 0U; i < stateCount; ++i) {
+        if (states[i].domainSlot == domainSlot) return &states[i];
+    }
+    return nullptr;
+}
+
+struct WaveshareBindingPortState {
+    IoId ioId = IO_ID_INVALID;
+    uint32_t tsMs = 0U;
+    char valueText[32] = {0};
+    const char* state = "sleeping";
+    const char* reason = "";
+    bool bound = false;
+    bool valueOk = false;
+};
+
+void waveshareCollectBindingPortStates_(const IOServiceV2* ioSvc,
+                                        WaveshareBindingPortState* states,
+                                        size_t stateCount)
+{
+    using namespace Profiles::Waveshare::IoLayout;
+    if (!states || stateCount == 0U || !ioSvc || !ioSvc->count || !ioSvc->idAt || !ioSvc->meta) return;
+
+    if (ioSvc->bindingPortStatus) {
+        for (size_t portIndex = 0U; portIndex < stateCount; ++portIndex) {
+            IoRuntimeStatus runtime{};
+            if (ioSvc->bindingPortStatus(ioSvc->ctx, kBindingPorts[portIndex].portId, &runtime) != IO_OK) continue;
+            states[portIndex].state = ioRuntimeStateName(runtime.state);
+            states[portIndex].reason = ioRuntimeReasonName(runtime.reason);
+        }
+    }
+
+    const uint8_t endpointCount = ioSvc->count(ioSvc->ctx);
+    for (uint8_t i = 0U; i < endpointCount; ++i) {
+        IoId ioId = IO_ID_INVALID;
+        if (ioSvc->idAt(ioSvc->ctx, i, &ioId) != IO_OK) continue;
+
+        IoEndpointMeta meta{};
+        if (ioSvc->meta(ioSvc->ctx, ioId, &meta) != IO_OK) continue;
+        const IOBindingPortSpec* port = waveshareFindPortForMeta_(meta);
+        if (!port) continue;
+
+        const size_t portIndex = (size_t)(port - kBindingPorts);
+        if (portIndex >= stateCount || states[portIndex].bound) continue;
+
+        WaveshareBindingPortState& state = states[portIndex];
+        state.bound = true;
+        state.ioId = ioId;
+
+        IoRuntimeStatus runtime{};
+        if (ioSvc->runtimeStatus && ioSvc->runtimeStatus(ioSvc->ctx, ioId, &runtime) == IO_OK) {
+            state.state = ioRuntimeStateName(runtime.state);
+            state.reason = ioRuntimeReasonName(runtime.reason);
+            if (runtime.state != IO_RUNTIME_ACTIVE) continue;
+        }
+
+        IoValue value{};
+        if (!ioSvc->readValue || ioSvc->readValue(ioSvc->ctx, ioId, &value) != IO_OK || !value.valid) {
+            state.state = "error";
+            state.reason = "read_failed";
+            continue;
+        }
+        state.valueOk = true;
+        state.state = "active";
+        state.reason = "";
+        state.tsMs = value.tsMs;
+        waveshareFormatIoValue_(meta, value, state.valueText, sizeof(state.valueText));
+    }
+}
+
+void wavesharePrintPoolDeviceJson_(Print& response, const WaveshareIoSummaryState& state)
+{
+    if (!state.hasPoolDevice) {
+        response.print("null");
+        return;
+    }
+    response.print("{\"slot\":");
+    response.print((unsigned)state.poolMeta.slot);
+    response.print(",\"label\":");
+    printJsonEscaped_(response, state.poolMeta.label);
+    response.print(",\"enabled\":");
+    response.print(state.poolMeta.enabled ? "true" : "false");
+    response.print(",\"actual_on\":");
+    response.print(state.poolActualOn ? "true" : "false");
+    response.print(",\"block_reason\":");
+    printJsonEscaped_(response, wavesharePoolDeviceBlockReasonLabel_(state.poolMeta.blockReason));
+    response.print("}");
+}
+
+struct WaveshareIoResponseSnapshot {
+    static constexpr size_t kBindingPortCount =
+        sizeof(Profiles::Waveshare::IoLayout::kBindingPorts) /
+        sizeof(Profiles::Waveshare::IoLayout::kBindingPorts[0]);
+    static constexpr size_t kDomainSlotCount =
+        sizeof(PoolDomain::kDomainSlots) / sizeof(PoolDomain::kDomainSlots[0]);
+
+    WaveshareBindingPortState bindingStates[kBindingPortCount]{};
+    WaveshareIoSummaryState domainStates[kDomainSlotCount]{};
+    uint16_t bindingActive = 0U;
+    uint16_t bindingManuallyDisabled = 0U;
+    uint16_t bindingError = 0U;
+    uint16_t ioActive = 0U;
+    uint16_t ioManuallyDisabled = 0U;
+    uint16_t ioError = 0U;
+    DomainStatusSummary domainSummary{};
+    uint8_t driverActive[11] = {0};
+    uint8_t driverManuallyDisabled[11] = {0};
+    uint8_t driverError[11] = {0};
+};
+
+void waveshareCollectIoResponseSnapshot_(const IOServiceV2* ioSvc,
+                                         const DomainStatusService* domainStatusSvc,
+                                         WaveshareIoResponseSnapshot& snapshot)
+{
+    waveshareCollectBindingPortStates_(ioSvc,
+                                       snapshot.bindingStates,
+                                       WaveshareIoResponseSnapshot::kBindingPortCount);
+    for (const WaveshareBindingPortState& state : snapshot.bindingStates) {
+        if (strcmp(state.state, "active") == 0) ++snapshot.bindingActive;
+        else if (strcmp(state.state, "manually_disabled") == 0) ++snapshot.bindingManuallyDisabled;
+        else if (strcmp(state.state, "error") == 0) ++snapshot.bindingError;
+    }
+
+    snapshot.domainSummary.total = (uint16_t)WaveshareIoResponseSnapshot::kDomainSlotCount;
+    for (size_t i = 0U; i < WaveshareIoResponseSnapshot::kDomainSlotCount; ++i) {
+        const DomainSlotPreset& preset = PoolDomain::kDomainSlots[i];
+        WaveshareIoSummaryState& state = snapshot.domainStates[i];
+        state = waveshareIoSummaryStateForSlot_(domainStatusSvc, preset.id);
+        if (state.active) ++snapshot.domainSummary.active;
+        else if (state.manuallyDisabled) ++snapshot.domainSummary.manuallyDisabled;
+        else if (state.errorState) ++snapshot.domainSummary.error;
+        else ++snapshot.domainSummary.sleeping;
+    }
+
+    for (const DomainIoSlotBinding& binding : PoolDomain::kDomainIoSlots) {
+        const WaveshareIoSummaryState* state =
+            waveshareFindIoSummaryState_(snapshot.domainStates,
+                                         WaveshareIoResponseSnapshot::kDomainSlotCount,
+                                         binding.domainSlot);
+        if (!state) continue;
+        if (state->active) {
+            ++snapshot.ioActive;
+            if (state->hasMeta && state->meta.backend < 11U) {
+                ++snapshot.driverActive[state->meta.backend];
+            }
+        }
+        if (state->manuallyDisabled) {
+            ++snapshot.ioManuallyDisabled;
+            if (state->hasMeta && state->meta.backend < 11U) {
+                ++snapshot.driverManuallyDisabled[state->meta.backend];
+            }
+        }
+        if (state->errorState) {
+            ++snapshot.ioError;
+            if (state->hasMeta && state->meta.backend < 11U) {
+                ++snapshot.driverError[state->meta.backend];
+            }
+        }
+    }
+}
+
+void wavesharePrintIoSlotTopologyJson_(Print& response,
+                                       const WaveshareIoSummaryState& state,
+                                       const DomainIoSlotBinding& binding,
+                                       const DomainSlotPreset* domainPreset)
+{
+    response.print("{\"io_slot\":");
+    printJsonEscaped_(response, waveshareIoSlotKindLabel_(ioSlotKind(binding.ioSlot)));
+    response.print(",\"io_slot_index\":");
+    response.print((unsigned)ioSlotIndex(binding.ioSlot));
+    response.print(",\"io_id\":");
+    response.print((unsigned)ioIdFromSlot(binding.ioSlot));
+    response.print(",\"io_id_label\":");
+    printJsonEscaped_(response, "");
+    response.print(",\"domain_slot_id\":");
+    response.print((unsigned)binding.domainSlot);
+    response.print(",\"kind\":");
+    printJsonEscaped_(response, waveshareIoSlotKindLabel_(ioSlotKind(binding.ioSlot)));
+    const IOBindingPortSpec* port = state.hasMeta ? waveshareFindPortForMeta_(state.meta) : nullptr;
+    uint8_t portBackend = IO_BACKEND_GPIO;
+    uint8_t portChannel = 0U;
+    const bool hasPort = port && waveshareIoPortBackendChannel_(*port, portBackend, portChannel);
+    response.print(",\"driver\":");
+    printJsonEscaped_(response, hasPort ? waveshareIoBackendLabel_(portBackend) : "");
+    response.print(",\"channel\":");
+    if (hasPort) response.print((unsigned)portChannel);
+    else response.print("null");
+    response.print(",\"binding_port\":");
+    response.print(port ? (unsigned)port->portId : 0U);
+    response.print(",\"label\":");
+    printJsonEscaped_(response, domainPreset && domainPreset->displayName ? domainPreset->displayName : "");
+    response.print(",\"config_name\":");
+    printJsonEscaped_(response, state.hasMeta ? state.meta.name : "");
+    response.print("}");
+}
+
+void wavesharePrintIoSlotRuntimeJson_(Print& response,
+                                      const WaveshareIoSummaryState& state,
+                                      const DomainIoSlotBinding& binding)
+{
+    char valueText[32] = {0};
+    if (state.hasValue) waveshareFormatIoValue_(state.meta, state.value, valueText, sizeof(valueText));
+    response.print("{\"domain_slot_id\":");
+    response.print((unsigned)binding.domainSlot);
+    response.print(",\"io_slot\":");
+    printJsonEscaped_(response, waveshareIoSlotKindLabel_(ioSlotKind(binding.ioSlot)));
+    response.print(",\"io_slot_index\":");
+    response.print((unsigned)ioSlotIndex(binding.ioSlot));
+    response.print(",\"io_id\":");
+    response.print((unsigned)ioIdFromSlot(binding.ioSlot));
+    response.print(",\"state\":");
+    printJsonEscaped_(response, state.state);
+    response.print(",\"last_value\":");
+    printJsonEscaped_(response, valueText[0] != '\0' ? valueText : "-");
+    response.print(",\"ts_ms\":");
+    response.print(state.hasValue ? (unsigned long)state.value.tsMs : 0UL);
+    response.print(",\"error\":");
+    printJsonEscaped_(response, state.error);
+    response.print(",\"pool_device\":");
+    wavesharePrintPoolDeviceJson_(response, state);
+    response.print("}");
+}
+
+void buildWaveshareIoTopologyResponse_(Print& response,
+                                       const WaveshareIoResponseSnapshot& snapshot,
+                                       uint32_t revision)
+{
+    using namespace Profiles::Waveshare::IoLayout;
+    response.print("{\"ok\":true,\"schema\":3,\"revision\":");
+    response.print((unsigned long)revision);
+    response.print(",\"binding_ports\":[");
+    bool first = true;
+    for (size_t portIndex = 0U; portIndex < WaveshareIoResponseSnapshot::kBindingPortCount; ++portIndex) {
+        const IOBindingPortSpec& spec = kBindingPorts[portIndex];
+        uint8_t backend = IO_BACKEND_GPIO;
+        uint8_t channel = 0U;
+        (void)waveshareIoPortBackendChannel_(spec, backend, channel);
+        if (!first) response.print(',');
+        response.print("{\"port_id\":");
+        response.print((unsigned)spec.portId);
+        response.print(",\"board_port\":");
+        printJsonEscaped_(response, spec.boardLabel ? spec.boardLabel : "");
+        response.print(",\"kind\":");
+        printJsonEscaped_(response, waveshareIoPortKindLabel_(spec.kind));
+        response.print(",\"direction\":");
+        printJsonEscaped_(response, waveshareIoPortDirectionLabel_(spec.kind));
+        response.print(",\"driver\":");
+        printJsonEscaped_(response, waveshareIoBackendLabel_(backend));
+        response.print(",\"channel\":");
+        response.print((unsigned)channel);
+        response.print("}");
+        first = false;
+    }
+
+    response.print("],\"io_slots\":[");
+    first = true;
+    for (const DomainIoSlotBinding& binding : PoolDomain::kDomainIoSlots) {
+        const WaveshareIoSummaryState* state =
+            waveshareFindIoSummaryState_(snapshot.domainStates,
+                                         WaveshareIoResponseSnapshot::kDomainSlotCount,
+                                         binding.domainSlot);
+        if (!state) continue;
+        if (!first) response.print(',');
+        wavesharePrintIoSlotTopologyJson_(response,
+                                          *state,
+                                          binding,
+                                          waveshareFindDomainSlotPreset_(binding.domainSlot));
+        first = false;
+    }
+
+    response.print("],\"domain_slots\":[");
+    first = true;
+    for (size_t i = 0U; i < WaveshareIoResponseSnapshot::kDomainSlotCount; ++i) {
+        const DomainSlotPreset& preset = PoolDomain::kDomainSlots[i];
+        const DomainIoSlotBinding* binding = waveshareFindDomainBinding_(preset.id);
+        const IoSlotId ioSlot = binding ? binding->ioSlot : IO_SLOT_INVALID;
+        const WaveshareIoSummaryState& state = snapshot.domainStates[i];
+        if (!first) response.print(',');
+        response.print("{\"domain_slot_id\":");
+        response.print((unsigned)preset.id);
+        response.print(",\"endpoint_id\":");
+        printJsonEscaped_(response, preset.endpointId ? preset.endpointId : "");
+        response.print(",\"io_name\":");
+        printJsonEscaped_(response, state.hasMeta ? state.meta.name : "");
+        response.print(",\"display_name\":");
+        printJsonEscaped_(response, preset.displayName ? preset.displayName : "");
+        response.print(",\"slot_kind\":");
+        printJsonEscaped_(response, waveshareIoSlotKindLabel_(preset.slotKind));
+        response.print(",\"io_slot\":");
+        printJsonEscaped_(response, ioSlot == IO_SLOT_INVALID ? "" : waveshareIoSlotKindLabel_(ioSlotKind(ioSlot)));
+        response.print(",\"io_slot_index\":");
+        response.print(ioSlot == IO_SLOT_INVALID ? 0U : (unsigned)ioSlotIndex(ioSlot));
+        response.print("}");
+        first = false;
+    }
+    response.print("]}");
+}
+
+void buildWaveshareIoRuntimeResponse_(Print& response,
+                                      const WaveshareIoResponseSnapshot& snapshot,
+                                      uint32_t topologyRevision)
+{
+    using namespace Profiles::Waveshare::IoLayout;
+    response.print("{\"ok\":true,\"schema\":3,\"topology_revision\":");
+    response.print((unsigned long)topologyRevision);
+    response.print(",\"summary\":{");
+    response.print("\"binding_ports_total\":");
+    response.print((unsigned)WaveshareIoResponseSnapshot::kBindingPortCount);
+    response.print(",\"binding_ports_active\":");
+    response.print((unsigned)snapshot.bindingActive);
+    response.print(",\"binding_ports_manually_disabled\":");
+    response.print((unsigned)snapshot.bindingManuallyDisabled);
+    response.print(",\"binding_ports_error\":");
+    response.print((unsigned)snapshot.bindingError);
+    response.print(",\"io_slots_total\":");
+    response.print((unsigned)(sizeof(PoolDomain::kDomainIoSlots) / sizeof(PoolDomain::kDomainIoSlots[0])));
+    response.print(",\"io_slots_active\":");
+    response.print((unsigned)snapshot.ioActive);
+    response.print(",\"io_slots_manually_disabled\":");
+    response.print((unsigned)snapshot.ioManuallyDisabled);
+    response.print(",\"io_slots_error\":");
+    response.print((unsigned)snapshot.ioError);
+    response.print(",\"domain_slots_total\":");
+    response.print((unsigned)(sizeof(PoolDomain::kDomainSlots) / sizeof(PoolDomain::kDomainSlots[0])));
+    response.print(",\"domain_slots_active\":");
+    response.print((unsigned)snapshot.domainSummary.active);
+    response.print(",\"domain_slots_manually_disabled\":");
+    response.print((unsigned)snapshot.domainSummary.manuallyDisabled);
+    response.print(",\"domain_slots_error\":");
+    response.print((unsigned)snapshot.domainSummary.error);
+    response.print(",\"error_slots\":");
+    response.print((unsigned)snapshot.domainSummary.error);
+    response.print("},\"drivers\":[");
+    bool first = true;
+    for (uint8_t backend = 0U; backend < 11U; ++backend) {
+        if (snapshot.driverActive[backend] == 0U &&
+            snapshot.driverManuallyDisabled[backend] == 0U &&
+            snapshot.driverError[backend] == 0U) continue;
+        if (!first) response.print(',');
+        response.print("{\"driver\":");
+        printJsonEscaped_(response, waveshareIoBackendLabel_(backend));
+        response.print(",\"active_slots\":");
+        response.print((unsigned)snapshot.driverActive[backend]);
+        response.print(",\"manually_disabled_slots\":");
+        response.print((unsigned)snapshot.driverManuallyDisabled[backend]);
+        response.print(",\"error_slots\":");
+        response.print((unsigned)snapshot.driverError[backend]);
+        response.print("}");
+        first = false;
+    }
+
+    response.print("],\"binding_ports\":[");
+    first = true;
+    for (size_t portIndex = 0U; portIndex < WaveshareIoResponseSnapshot::kBindingPortCount; ++portIndex) {
+        const IOBindingPortSpec& spec = kBindingPorts[portIndex];
+        const WaveshareBindingPortState& state = snapshot.bindingStates[portIndex];
+        if (!first) response.print(',');
+        response.print("{\"port_id\":");
+        response.print((unsigned)spec.portId);
+        response.print(",\"io_id\":");
+        response.print(state.bound ? (unsigned)state.ioId : (unsigned)IO_ID_INVALID);
+        response.print(",\"io_id_label\":");
+        printJsonEscaped_(response, state.bound ? "" : "Non affecte");
+        response.print(",\"state\":");
+        printJsonEscaped_(response, state.state);
+        response.print(",\"reason\":");
+        printJsonEscaped_(response, state.reason);
+        response.print(",\"last_value\":");
+        printJsonEscaped_(response, state.valueOk ? state.valueText : "-");
+        response.print(",\"ts_ms\":");
+        response.print(state.valueOk ? (unsigned long)state.tsMs : 0UL);
+        response.print("}");
+        first = false;
+    }
+
+    response.print("],\"io_slots\":[");
+    first = true;
+    for (const DomainIoSlotBinding& binding : PoolDomain::kDomainIoSlots) {
+        const WaveshareIoSummaryState* state =
+            waveshareFindIoSummaryState_(snapshot.domainStates,
+                                         WaveshareIoResponseSnapshot::kDomainSlotCount,
+                                         binding.domainSlot);
+        if (!state) continue;
+        if (!first) response.print(',');
+        wavesharePrintIoSlotRuntimeJson_(response, *state, binding);
+        first = false;
+    }
+
+    response.print("],\"domain_slots\":[");
+    first = true;
+    for (size_t i = 0U; i < WaveshareIoResponseSnapshot::kDomainSlotCount; ++i) {
+        const DomainSlotPreset& preset = PoolDomain::kDomainSlots[i];
+        if (!first) response.print(',');
+        const WaveshareIoSummaryState& state = snapshot.domainStates[i];
+        char valueText[32] = {0};
+        if (state.hasValue) waveshareFormatIoValue_(state.meta, state.value, valueText, sizeof(valueText));
+        response.print("{\"domain_slot_id\":");
+        response.print((unsigned)preset.id);
+        response.print(",\"state\":");
+        printJsonEscaped_(response, state.state);
+        response.print(",\"last_value\":");
+        printJsonEscaped_(response, valueText[0] != '\0' ? valueText : "-");
+        response.print(",\"pool_device\":");
+        wavesharePrintPoolDeviceJson_(response, state);
+        response.print("}");
+        first = false;
+    }
+
+    response.print("],\"error_slots\":[");
+    first = true;
+    for (size_t i = 0U; i < WaveshareIoResponseSnapshot::kDomainSlotCount; ++i) {
+        const DomainSlotPreset& preset = PoolDomain::kDomainSlots[i];
+        const DomainIoSlotBinding* binding = waveshareFindDomainBinding_(preset.id);
+        const IoSlotId ioSlot = binding ? binding->ioSlot : IO_SLOT_INVALID;
+        const WaveshareIoSummaryState& state = snapshot.domainStates[i];
+        if (!state.errorState) continue;
+        if (!first) response.print(',');
+        response.print("{\"domain_slot_id\":");
+        response.print((unsigned)preset.id);
+        response.print(",\"label\":");
+        printJsonEscaped_(response, preset.displayName ? preset.displayName : "");
+        response.print(",\"io_slot\":");
+        printJsonEscaped_(response, ioSlot == IO_SLOT_INVALID ? "" : waveshareIoSlotKindLabel_(ioSlotKind(ioSlot)));
+        response.print(",\"error\":");
+        printJsonEscaped_(response, state.error);
+        response.print("}");
+        first = false;
+    }
+    response.print("]}");
+}
+
+bool waveshareReadAlarmDashboardSlotState_(const AlarmService* alarmSvc,
+                                          uint16_t alarmId,
+                                          WaveshareAlarmDashboardSlotState& out)
+{
+    out = WaveshareAlarmDashboardSlotState{};
     if (!alarmSvc || !alarmSvc->buildAlarmState || alarmId == 0U) return false;
 
     char stateJson[144] = {0};
@@ -2636,25 +3806,25 @@ bool flowios3ReadAlarmDashboardSlotState_(const AlarmService* alarmSvc,
     return true;
 }
 
-void sendFlowios3DashboardSlotsResponse_(AsyncResponseStream& response,
+void sendWaveshareDashboardSlotsResponse_(AsyncResponseStream& response,
                                          bool& firstSlot,
                                          DataStore* dataStore,
                                          ConfigStore* cfgStore,
                                          const AlarmService* alarmSvc,
                                          const IOServiceV2* ioSvc)
 {
-    Flowios3RuntimeContext ctx{};
-    for (uint8_t i = 0U; i < kFlowios3DashboardSlotCount; ++i) {
-        Flowios3DashboardSlotConfig slot{};
-        flowios3LoadDashboardSlotConfig_(cfgStore, i, slot);
+    WaveshareRuntimeContext ctx{};
+    for (uint8_t i = 0U; i < kWaveshareDashboardSlotCount; ++i) {
+        WaveshareDashboardSlotConfig slot{};
+        waveshareLoadDashboardSlotConfig_(cfgStore, i, slot);
 
         char label[32] = {0};
         snprintf(label, sizeof(label), "%s", slot.label);
-        if (label[0] == '\0') flowios3DashboardFallbackLabel_(slot.runtimeUiId, label, sizeof(label));
+        if (label[0] == '\0') waveshareDashboardFallbackLabel_(slot.runtimeUiId, label, sizeof(label));
 
-        Flowios3DashboardRuntimeValue runtimeValue{};
+        WaveshareDashboardRuntimeValue runtimeValue{};
         const bool available = slot.enabled &&
-                               flowios3ReadDashboardRuntimeValue_(dataStore,
+                               waveshareReadDashboardRuntimeValue_(dataStore,
                                                                   cfgStore,
                                                                   alarmSvc,
                                                                   ioSvc,
@@ -2665,7 +3835,7 @@ void sendFlowios3DashboardSlotsResponse_(AsyncResponseStream& response,
 
         char valueText[40] = {0};
         char unitText[12] = {0};
-        flowios3FormatDashboardRuntimeValue_(slot.runtimeUiId,
+        waveshareFormatDashboardRuntimeValue_(slot.runtimeUiId,
                                              runtimeValue,
                                              valueText,
                                              sizeof(valueText),
@@ -2686,7 +3856,7 @@ void sendFlowios3DashboardSlotsResponse_(AsyncResponseStream& response,
         response.print(",\"unit\":");
         printJsonEscaped_(response, unitText);
         response.print(",\"bg_color\":");
-        printJsonEscaped_(response, flowios3DashboardColorHex_(slot.colorId, i));
+        printJsonEscaped_(response, waveshareDashboardColorHex_(slot.colorId, i));
         response.print(",\"available\":");
         response.print(available ? "true" : "false");
         response.print("}");
@@ -2694,26 +3864,26 @@ void sendFlowios3DashboardSlotsResponse_(AsyncResponseStream& response,
     }
 }
 
-void sendFlowios3AlarmDashboardSlotsResponse_(AsyncResponseStream& response,
+void sendWaveshareAlarmDashboardSlotsResponse_(AsyncResponseStream& response,
                                               bool& firstSlot,
                                               ConfigStore* cfgStore,
                                               const AlarmService* alarmSvc)
 {
-    for (uint8_t i = 0U; i < kFlowios3DashboardSlotCount; ++i) {
-        Flowios3AlarmDashboardSlotConfig slot{};
-        flowios3LoadAlarmDashboardSlotConfig_(cfgStore, i, slot);
+    for (uint8_t i = 0U; i < kWaveshareDashboardSlotCount; ++i) {
+        WaveshareAlarmDashboardSlotConfig slot{};
+        waveshareLoadAlarmDashboardSlotConfig_(cfgStore, i, slot);
 
         char label[32] = {0};
         if (slot.enabled) {
             snprintf(label, sizeof(label), "%s", slot.label);
             if (label[0] == '\0') {
-                snprintf(label, sizeof(label), "%s", flowios3AlarmDashboardLabel_(slot.alarmId));
+                snprintf(label, sizeof(label), "%s", waveshareAlarmDashboardLabel_(slot.alarmId));
             }
         }
 
-        Flowios3AlarmDashboardSlotState state{};
+        WaveshareAlarmDashboardSlotState state{};
         const bool available = slot.enabled &&
-                               flowios3ReadAlarmDashboardSlotState_(alarmSvc, slot.alarmId, state);
+                               waveshareReadAlarmDashboardSlotState_(alarmSvc, slot.alarmId, state);
         state.available = available;
 
         if (!firstSlot) response.print(',');
@@ -2726,7 +3896,7 @@ void sendFlowios3AlarmDashboardSlotsResponse_(AsyncResponseStream& response,
         response.print(",\"label\":");
         printJsonEscaped_(response, label);
         response.print(",\"bg_color\":");
-        printJsonEscaped_(response, flowios3DashboardColorHex_(slot.colorId, i));
+        printJsonEscaped_(response, waveshareDashboardColorHex_(slot.colorId, i));
         response.print(",\"available\":");
         response.print(available ? "true" : "false");
         response.print(",\"latched\":");
@@ -2739,6 +3909,7 @@ void sendFlowios3AlarmDashboardSlotsResponse_(AsyncResponseStream& response,
         firstSlot = false;
     }
 }
+
 #endif
 
 bool parseRuntimeUiIdsCsv_(const char* raw, RuntimeUiId* idsOut, size_t capacity, size_t& countOut)
@@ -2857,7 +4028,7 @@ bool dashboardSlotDegreeCUnit_(const char* unit)
     return (uint8_t)unit[0] == 0xC2 && (uint8_t)unit[1] == 0xB0 && unit[2] == 'C' && unit[3] == '\0';
 }
 
-#if !defined(FLOW_PROFILE_MICRONOVA) && !defined(FLOW_PROFILE_FLOWIOS3)
+#if !defined(FLOW_PROFILE_MICRONOVA) && !defined(FLOW_PROFILE_WAVESHARE)
 void dashboardSlotBgColorHex_(uint16_t color565, char* out, size_t outLen)
 {
     if (!out || outLen < 8U) return;
@@ -2993,7 +4164,7 @@ struct HttpLatencyScope {
         if (elapsedMs < infoMs) return;
 
         const char* method = req ? httpMethodName_(req->method()) : "?";
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         const uint32_t heapFree = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         const uint32_t heapLargest =
             (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -3063,14 +4234,14 @@ static const char kWebInterfaceFallbackPage[] PROGMEM = R"HTML(
 <body>
 <header>
   <h1>flow.io Rescue</h1>
-  <p>Console minimale embarquee dans le firmware Supervisor. Elle reste disponible meme si la partition SPIFFS ne contient plus l'interface web.</p>
+  <p>Console minimale embarquee dans le firmware Waveshare. Elle reste disponible meme si la partition SPIFFS ne contient plus l'interface web.</p>
 </header>
 <main>
   <section class="wide">
     <h2>Etat</h2>
     <div class="row">
       <button class="secondary" id="refresh" type="button">Rafraichir</button>
-      <button class="secondary" id="scan" type="button">Scanner Wi-Fi</button>
+      <button class="secondary" id="scan" type="button">Scanner le réseau</button>
       <a href="/webinterface?full=1" style="align-self:center">Essayer l'interface complete</a>
     </div>
     <div class="status" id="status">Chargement...</div>
@@ -3078,8 +4249,8 @@ static const char kWebInterfaceFallbackPage[] PROGMEM = R"HTML(
 
   <div class="grid">
     <section>
-      <h2>Wi-Fi Supervisor</h2>
-      <label><input id="wifiEnabled" type="checkbox" checked />Activer le Wi-Fi station</label>
+      <h2>Réseau Waveshare</h2>
+      <label><input id="wifiEnabled" type="checkbox" checked />Activer le réseau station</label>
       <label for="wifiList">Reseaux detectes</label>
       <select id="wifiList"><option value="">Saisie manuelle</option></select>
       <label for="ssid">SSID</label>
@@ -3087,7 +4258,7 @@ static const char kWebInterfaceFallbackPage[] PROGMEM = R"HTML(
       <label for="pass">Mot de passe</label>
       <input id="pass" type="password" autocomplete="off" />
       <div class="row">
-        <button id="saveWifi" type="button">Enregistrer Wi-Fi</button>
+        <button id="saveWifi" type="button">Enregistrer réseau</button>
       </div>
       <div class="status" id="wifiMsg">-</div>
     </section>
@@ -3108,13 +4279,13 @@ static const char kWebInterfaceFallbackPage[] PROGMEM = R"HTML(
     <section class="wide">
       <h2>Upgrade de secours</h2>
       <p>Renseigner une URL explicite vers l'image a installer.</p>
-      <label for="supUrl">URL explicite firmware Supervisor</label>
-      <input id="supUrl" placeholder="http://serveur/binary/firmware-supervisor.bin" autocomplete="off" />
-      <label for="spiffsUrl">URL explicite image SPIFFS Supervisor</label>
-      <input id="spiffsUrl" placeholder="http://serveur/binary/spiffs-supervisor.bin" autocomplete="off" />
+      <label for="waveshareUrl">URL explicite firmware Waveshare</label>
+      <input id="waveshareUrl" placeholder="http://serveur/binary/waveshare.bin" autocomplete="off" />
+      <label for="spiffsUrl">URL explicite image SPIFFS</label>
+      <input id="spiffsUrl" placeholder="http://serveur/binary/waveshare-spiffs.bin" autocomplete="off" />
       <div class="row">
-        <button class="warn" id="updateSpiffs" type="button">Upgrade SPIFFS Supervisor</button>
-        <button class="warn" id="updateSupervisor" type="button">Upgrade Supervisor</button>
+        <button class="warn" id="updateSpiffs" type="button">Upgrade SPIFFS</button>
+        <button class="warn" id="updateWaveshare" type="button">Upgrade Waveshare</button>
       </div>
       <div class="status" id="updateMsg">-</div>
     </section>
@@ -3224,7 +4395,7 @@ static const char kWebInterfaceFallbackPage[] PROGMEM = R"HTML(
           pass: $("pass").value
         })
       });
-      put(wifiMsg, out.reboot_scheduled ? "Wi-Fi enregistre. Redemarrage planifie." : "Wi-Fi enregistre.", "ok");
+      put(wifiMsg, out.reboot_scheduled ? "Réseau enregistre. Redemarrage planifie." : "Réseau enregistre.", "ok");
       await refreshAll();
     } catch (e) {
       put(wifiMsg, e.message, "bad");
@@ -3255,7 +4426,24 @@ static const char kWebInterfaceFallbackPage[] PROGMEM = R"HTML(
   async function checkManifest() {
     setBusy(true);
     try {
-      const out = await api("/api/fwupdate/check");
+      const started = await api("/api/fwupdate/check", { method: "POST" });
+      const requestId = Number(started && started.request_id);
+      if (!Number.isFinite(requestId) || requestId <= 0) {
+        throw new Error("identifiant de vérification invalide");
+      }
+      const deadline = Date.now() + 85000;
+      let out = null;
+      while (Date.now() < deadline) {
+        out = await api("/api/fwupdate/check?request_id=" + encodeURIComponent(String(requestId)));
+        if (out && out.state === "ready") break;
+        if (!out || (out.state !== "queued" && out.state !== "downloading")) {
+          throw new Error("état de vérification inattendu");
+        }
+        await new Promise((resolve) => setTimeout(resolve, 450));
+      }
+      if (!out || out.state !== "ready") {
+        throw new Error("délai de vérification du manifest dépassé");
+      }
       put(fwCfgMsg, out, "ok");
     } catch (e) {
       put(fwCfgMsg, e.message, "bad");
@@ -3266,8 +4454,8 @@ static const char kWebInterfaceFallbackPage[] PROGMEM = R"HTML(
 
   async function startUpdate(target) {
     const isSpiffs = target === "spiffs";
-    const url = (isSpiffs ? $("spiffsUrl").value : $("supUrl").value).trim();
-    const label = isSpiffs ? "SPIFFS Supervisor" : "Supervisor";
+    const url = (isSpiffs ? $("spiffsUrl").value : $("waveshareUrl").value).trim();
+    const label = isSpiffs ? "SPIFFS" : "Waveshare";
     if (!confirm("Lancer l'upgrade " + label + " ?")) return;
     setBusy(true);
     try {
@@ -3305,7 +4493,7 @@ static const char kWebInterfaceFallbackPage[] PROGMEM = R"HTML(
   $("saveFwCfg").addEventListener("click", saveFwConfig);
   $("checkManifest").addEventListener("click", checkManifest);
   $("updateSpiffs").addEventListener("click", () => startUpdate("spiffs"));
-  $("updateSupervisor").addEventListener("click", () => startUpdate("supervisor"));
+  $("updateWaveshare").addEventListener("click", () => startUpdate("waveshare"));
   refreshAll();
   pollStatus();
 })();
@@ -3533,46 +4721,185 @@ WebInterfaceModule::~WebInterfaceModule()
 {
     freeLocalLogQueue_();
     freeRuntimeValuesBodyScratch_();
+#if defined(FLOW_PROFILE_WAVESHARE)
+    if (ioResponseSnapshot_) heap_caps_free(ioResponseSnapshot_);
+#endif
 }
+
+#if defined(FLOW_PROFILE_WAVESHARE)
+void WebInterfaceModule::refreshIoResponseCaches_()
+{
+    constexpr uint32_t kRuntimeRefreshMs = 1000U;
+    constexpr uint32_t kTopologySafetyRefreshMs = 60000U;
+    constexpr uint32_t kRetryDelayMs = 250U;
+    constexpr size_t kTopologyCapacity = 32U * 1024U;
+    constexpr size_t kRuntimeCapacity = 24U * 1024U;
+
+    const uint32_t nowMs = millis();
+    if ((uint32_t)(nowMs - ioLastResponseBuildAttemptMs_) < kRetryDelayMs) return;
+
+    bool hasTopology = false;
+    bool hasRuntime = false;
+    uint32_t topologyChangeGeneration = 0U;
+    uint32_t topologyBuiltGeneration = 0U;
+    portENTER_CRITICAL(&ioResponseMux_);
+    hasTopology = (bool)ioTopologyResponse_;
+    hasRuntime = (bool)ioRuntimeResponse_;
+    topologyChangeGeneration = ioTopologyChangeGeneration_;
+    topologyBuiltGeneration = ioTopologyBuiltGeneration_;
+    portEXIT_CRITICAL(&ioResponseMux_);
+
+    const bool topologyDue = topologyChangeGeneration != topologyBuiltGeneration || !hasTopology ||
+        (uint32_t)(nowMs - ioLastTopologyBuildMs_) >= kTopologySafetyRefreshMs;
+    const bool runtimeDue = !hasRuntime ||
+        (uint32_t)(nowMs - ioLastRuntimeBuildMs_) >= kRuntimeRefreshMs;
+    if (!topologyDue && !runtimeDue) return;
+    ioLastResponseBuildAttemptMs_ = nowMs;
+
+    if (!ioSvc_ && services_) {
+        ioSvc_ = services_->get<IOServiceV2>(ServiceId::Io);
+    }
+    const DomainStatusService* domainStatusSvc = services_
+        ? services_->get<DomainStatusService>(ServiceId::DomainStatus)
+        : nullptr;
+    if (!ioSvc_ || !domainStatusSvc) return;
+
+    if (!ioResponseSnapshot_) {
+        ioResponseSnapshot_ = heap_caps_malloc(sizeof(WaveshareIoResponseSnapshot),
+                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    }
+    auto* snapshot = static_cast<WaveshareIoResponseSnapshot*>(ioResponseSnapshot_);
+    if (!snapshot) {
+        LOGW("IO web snapshot allocation failed bytes=%u", (unsigned)sizeof(WaveshareIoResponseSnapshot));
+        return;
+    }
+    memset(snapshot, 0, sizeof(*snapshot));
+    waveshareCollectIoResponseSnapshot_(ioSvc_, domainStatusSvc, *snapshot);
+
+    uint32_t publishedRevision = ioTopologyRevision_;
+    if (topologyDue) {
+        const uint32_t nextRevision = ioTopologyRevision_ + 1U;
+        auto next = std::make_shared<WebJsonBuffer>(kTopologyCapacity);
+        if (next && next->valid()) {
+            buildWaveshareIoTopologyResponse_(*next, *snapshot, nextRevision);
+        }
+        if (next && next->finish()) {
+            std::shared_ptr<WebJsonBuffer> previous;
+            portENTER_CRITICAL(&ioResponseMux_);
+            previous.swap(ioTopologyResponse_);
+            ioTopologyResponse_.swap(next);
+            ioTopologyRevision_ = nextRevision;
+            ioTopologyBuiltGeneration_ = topologyChangeGeneration;
+            publishedRevision = nextRevision;
+            portEXIT_CRITICAL(&ioResponseMux_);
+            ioLastTopologyBuildMs_ = nowMs;
+            LOGI("IO topology cache ready revision=%lu bytes=%u capacity=%u memory=psram",
+                 (unsigned long)nextRevision,
+                 (unsigned)ioTopologyResponse_->length(),
+                 (unsigned)kTopologyCapacity);
+        } else {
+            LOGE("IO topology cache overflow/allocation failure capacity=%u overflow=%u",
+                 (unsigned)kTopologyCapacity,
+                 (unsigned)(next && next->overflowed()));
+        }
+    }
+
+    if (runtimeDue) {
+        std::shared_ptr<WebJsonBuffer> next;
+        portENTER_CRITICAL(&ioResponseMux_);
+        if (ioRuntimeSpareResponse_ && ioRuntimeSpareResponse_.use_count() == 1) {
+            next.swap(ioRuntimeSpareResponse_);
+        }
+        portEXIT_CRITICAL(&ioResponseMux_);
+        if (next) next->reset();
+        else next = std::make_shared<WebJsonBuffer>(kRuntimeCapacity);
+        if (next && next->valid()) {
+            buildWaveshareIoRuntimeResponse_(*next, *snapshot, publishedRevision);
+        }
+        if (next && next->finish()) {
+            std::shared_ptr<WebJsonBuffer> previous;
+            portENTER_CRITICAL(&ioResponseMux_);
+            previous.swap(ioRuntimeResponse_);
+            ioRuntimeResponse_.swap(next);
+            if (!ioRuntimeSpareResponse_) {
+                ioRuntimeSpareResponse_.swap(previous);
+            }
+            portEXIT_CRITICAL(&ioResponseMux_);
+            ioLastRuntimeBuildMs_ = nowMs;
+        } else {
+            LOGE("IO runtime cache overflow/allocation failure capacity=%u overflow=%u",
+                 (unsigned)kRuntimeCapacity,
+                 (unsigned)(next && next->overflowed()));
+        }
+    }
+
+}
+
+void WebInterfaceModule::sendIoResponseCache_(AsyncWebServerRequest* request, bool topology)
+{
+    if (!request) return;
+    std::shared_ptr<WebJsonBuffer> state;
+    portENTER_CRITICAL(&ioResponseMux_);
+    state = topology ? ioTopologyResponse_ : ioRuntimeResponse_;
+    portEXIT_CRITICAL(&ioResponseMux_);
+
+    if (!state || !state->valid() || state->length() == 0U) {
+        request->send(503,
+                      "application/json",
+                      "{\"ok\":false,\"err\":{\"code\":\"NotReady\",\"where\":\"io.cache\"}}");
+        return;
+    }
+
+    AsyncWebServerResponse* response = request->beginResponse(
+        "application/json",
+        state->length(),
+        [state](uint8_t* buffer, size_t maxLen, size_t index) -> size_t {
+            return state->fillAt(buffer, maxLen, index);
+        }
+    );
+    addNoCacheHeaders_(response);
+    request->send(response);
+}
+
+#endif
 
 void WebInterfaceModule::initRuntimeValuesBodyScratch_()
 {
-#if defined(FLOW_PROFILE_FLOWIOS3)
-    if (runtimeValuesBodyScratchInPsram_) return;
-    if (!psramFound()) {
-        runtimeValuesBodyScratch_ = runtimeValuesBodyScratchLocal_;
-        runtimeValuesBodyScratchInPsram_ = false;
-        LOGW("Web runtime body scratch keeps internal RAM (PSRAM not found) size=%u",
-             (unsigned)kRuntimeValuesBodyMax);
-        return;
+#if defined(FLOW_PROFILE_WAVESHARE)
+    if (runtimeValuesBodyScratch_) return;
+    void* ptr = nullptr;
+    bool allocatedInPsram = false;
+    if (psramFound()) {
+        ptr = heap_caps_malloc(kRuntimeValuesBodyMax + 1U, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        allocatedInPsram = (ptr != nullptr);
     }
-
-    void* ptr = heap_caps_malloc(kRuntimeValuesBodyMax + 1U, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!ptr) {
-        runtimeValuesBodyScratch_ = runtimeValuesBodyScratchLocal_;
-        runtimeValuesBodyScratchInPsram_ = false;
-        LOGW("Web runtime body scratch PSRAM alloc failed, fallback to internal size=%u",
-             (unsigned)kRuntimeValuesBodyMax);
+        ptr = heap_caps_malloc(kRuntimeValuesBodyMax + 1U, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    if (!ptr) {
+        LOGW("Web runtime body scratch unavailable size=%u", (unsigned)kRuntimeValuesBodyMax);
         return;
     }
-
     runtimeValuesBodyScratch_ = static_cast<char*>(ptr);
     runtimeValuesBodyScratch_[0] = '\0';
-    runtimeValuesBodyScratchInPsram_ = true;
-    LOGI("Web runtime body scratch in PSRAM size=%u free_psram=%luKB",
+    runtimeValuesBodyScratchOwned_ = true;
+    runtimeValuesBodyScratchInPsram_ = allocatedInPsram;
+    LOGI("Web runtime body scratch allocated size=%u memory=%s free_psram=%luKB",
          (unsigned)kRuntimeValuesBodyMax,
+         runtimeValuesBodyScratchInPsram_ ? "psram" : "internal",
          (unsigned long)(ESP.getFreePsram() / 1024U));
 #endif
 }
 
 void WebInterfaceModule::freeRuntimeValuesBodyScratch_()
 {
-#if defined(FLOW_PROFILE_FLOWIOS3)
-    if (runtimeValuesBodyScratchInPsram_ && runtimeValuesBodyScratch_) {
+#if defined(FLOW_PROFILE_WAVESHARE)
+    if (runtimeValuesBodyScratchOwned_ && runtimeValuesBodyScratch_) {
         heap_caps_free(runtimeValuesBodyScratch_);
     }
-    runtimeValuesBodyScratch_ = runtimeValuesBodyScratchLocal_;
+    runtimeValuesBodyScratch_ = nullptr;
     runtimeValuesBodyScratchInPsram_ = false;
+    runtimeValuesBodyScratchOwned_ = false;
 #endif
 }
 
@@ -3581,7 +4908,7 @@ bool WebInterfaceModule::initLocalLogQueue_()
     if (localLogQueue_) return true;
 
     const size_t storageBytes = (size_t)kLocalLogQueueLen * kLocalLogLineMax;
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
     if (psramFound()) {
         localLogQueueStorage_ = static_cast<uint8_t*>(
             heap_caps_malloc(storageBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
@@ -3794,6 +5121,119 @@ void WebInterfaceModule::sendBootLogHttpResponse_(AsyncWebServerRequest* request
     request->send(response);
 }
 
+void WebInterfaceModule::sendActivityLogHttpResponse_(AsyncWebServerRequest* request, bool statusOnly)
+{
+    if (!request) return;
+    noteHttpActivity_();
+
+    if (!activityLog_ && services_) {
+        activityLog_ = services_->get<ActivityLogService>(ServiceId::ActivityLog);
+    }
+
+    ActivityLogStats stats{};
+    bool available = false;
+    if (activityLog_ && activityLog_->getStats) {
+        activityLog_->getStats(activityLog_->ctx, &stats);
+        available = (stats.capacity > 0U);
+    }
+
+    int32_t requestedOffset = statusOnly ? 0 : requestIntParam_(request, "offset", 0);
+    int32_t requestedLimit = statusOnly ? 0 : requestIntParam_(request, "limit", 32);
+    if (requestedOffset < 0) requestedOffset = 0;
+    if (requestedLimit <= 0) requestedLimit = statusOnly ? 0 : 32;
+    if (requestedLimit > 64) requestedLimit = 64;
+
+    const uint16_t offset = (requestedOffset > UINT16_MAX) ? UINT16_MAX : (uint16_t)requestedOffset;
+    const uint16_t limit = (requestedLimit > UINT16_MAX) ? UINT16_MAX : (uint16_t)requestedLimit;
+
+    if (statusOnly) {
+        char out[320] = {0};
+        snprintf(out,
+                 sizeof(out),
+                 "{\"available\":%s,\"capacity\":%u,\"entries\":%u,\"dropped\":%lu,"
+                 "\"persisted\":%lu,\"persist_dropped\":%lu,\"psram\":%s,\"spiffs\":%s}",
+                 available ? "true" : "false",
+                 (unsigned)stats.capacity,
+                 (unsigned)stats.count,
+                 (unsigned long)stats.droppedCount,
+                 (unsigned long)stats.persistedCount,
+                 (unsigned long)stats.persistDropCount,
+                 stats.psram ? "true" : "false",
+                 stats.spiffs ? "true" : "false");
+        AsyncWebServerResponse* response = request->beginResponse(200, "application/json", out);
+        addNoCacheHeaders_(response);
+        request->send(response);
+        return;
+    }
+
+    char order[8] = {0};
+    copyRequestParamValue_(request, "order", false, order, sizeof(order), "asc");
+    const bool descending = strcasecmp(order, "desc") == 0;
+
+    auto state = std::make_shared<ActivityLogChunkState>();
+    if (!state || !state->begin(available ? activityLog_ : nullptr,
+                                stats,
+                                offset,
+                                available ? limit : 0U,
+                                descending)) {
+        request->send(503,
+                      "application/json",
+                      "{\"ok\":false,\"err\":{\"code\":\"LowMemory\",\"where\":\"activity.snapshot\"}}");
+        return;
+    }
+
+    AsyncWebServerResponse* response =
+        request->beginChunkedResponse("application/json",
+                                      [state](uint8_t* buffer, size_t maxLen, size_t) -> size_t {
+                                          return state->fill(buffer, maxLen);
+                                      });
+    addNoCacheHeaders_(response);
+    request->send(response);
+}
+
+void WebInterfaceModule::emitConfigActivity_(const char* contextLabel, const char* modulesLabel, uint16_t fieldCount)
+{
+    if (fieldCount == 0U) return;
+    if (!activityLog_ && services_) {
+        activityLog_ = services_->get<ActivityLogService>(ServiceId::ActivityLog);
+    }
+    if (!activityLog_ || !activityLog_->emit) return;
+
+    ActivityEvent event{};
+    event.code = (uint16_t)ActivityCode::SystemConfigChanged;
+    event.domain = (uint8_t)ActivityDomain::System;
+    event.source = (uint8_t)ActivitySource::Manual;
+    event.severity = (uint8_t)ActivitySeverity::Info;
+    event.role = (uint8_t)ActivityRole::None;
+    event.state = (uint8_t)ActivityState::None;
+    event.reason = (uint8_t)ActivityReason::Manual;
+    event.targetSlot = ACTIVITY_TARGET_NONE;
+    snprintf(event.title, sizeof(event.title), "Configuration modifiée");
+    if (modulesLabel && modulesLabel[0] != '\0') {
+        snprintf(event.detail,
+                 sizeof(event.detail),
+                 "%s: %u champ(s) appliqué(s) dans %s.",
+                 (contextLabel && contextLabel[0] != '\0') ? contextLabel : "Configuration",
+                 (unsigned)fieldCount,
+                 modulesLabel);
+    } else {
+        snprintf(event.detail,
+                 sizeof(event.detail),
+                 "%s: %u champ(s) appliqué(s).",
+                 (contextLabel && contextLabel[0] != '\0') ? contextLabel : "Configuration",
+                 (unsigned)fieldCount);
+    }
+    snprintf(event.icon, sizeof(event.icon), "settings");
+    (void)activityLog_->emit(activityLog_->ctx, &event);
+}
+
+void WebInterfaceModule::emitConfigPatchActivity_(const char* contextLabel, const char* patchJson)
+{
+    char modules[72] = {0};
+    const uint16_t fieldCount = summarizeConfigPatch_(patchJson, modules, sizeof(modules));
+    emitConfigActivity_(contextLabel, modules, fieldCount);
+}
+
 void WebInterfaceModule::init(ConfigStore& cfg, ServiceRegistry& services)
 {
     cfgStore_ = &cfg;
@@ -3807,6 +5247,7 @@ void WebInterfaceModule::init(ConfigStore& cfg, ServiceRegistry& services)
 #else
     bootLogCapture_ = nullptr;
 #endif
+    activityLog_ = services.get<ActivityLogService>(ServiceId::ActivityLog);
     wifiSvc_ = services.get<WifiService>(ServiceId::Wifi);
     cmdSvc_ = services.get<CommandService>(ServiceId::Command);
     hmiSvc_ = services.get<HmiService>(ServiceId::Hmi);
@@ -3820,6 +5261,7 @@ void WebInterfaceModule::init(ConfigStore& cfg, ServiceRegistry& services)
     fwUpdateSvc_ = services.get<FirmwareUpdateService>(ServiceId::FirmwareUpdate);
     if (eventBus_) {
         eventBus_->subscribe(EventId::DataChanged, &WebInterfaceModule::onEventStatic_, this);
+        eventBus_->subscribe(EventId::ConfigChanged, &WebInterfaceModule::onEventStatic_, this);
     }
 
     if (!services.add(ServiceId::WebInterface, &webInterfaceSvc_)) {
@@ -3840,7 +5282,7 @@ void WebInterfaceModule::init(ConfigStore& cfg, ServiceRegistry& services)
     health_.paused = uartPaused_;
     portEXIT_CRITICAL(&healthMux_);
 
-#if defined(FLOW_PROFILE_MICRONOVA) || defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_MICRONOVA) || defined(FLOW_PROFILE_WAVESHARE)
     LOGI("WebInterface local runtime deferred (server deferred)");
 #else
     startLocalRuntime_();
@@ -3849,14 +5291,14 @@ void WebInterfaceModule::init(ConfigStore& cfg, ServiceRegistry& services)
 
 void WebInterfaceModule::onStart(ConfigStore&, ServiceRegistry&)
 {
-#if defined(FLOW_PROFILE_MICRONOVA) || defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_MICRONOVA) || defined(FLOW_PROFILE_WAVESHARE)
     startLocalRuntime_();
 #endif
 }
 
 void WebInterfaceModule::startLocalRuntime_()
 {
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
     // flow.io exposes its own LogHub on /wslog; there is no secondary UART
     // bridge to read, especially now that USB CDC on boot is disabled.
     bridgeUartEnabled_ = false;
@@ -3878,7 +5320,7 @@ void WebInterfaceModule::startLocalRuntime_()
         return;
     }
 
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
     LOGI("WebInterface local log runtime enabled on flow.io (serial bridge disabled)");
     return;
 #endif
@@ -4367,6 +5809,29 @@ void WebInterfaceModule::startServer_()
         HttpLatencyScope latency(request, "/api/logs/boot");
         sendBootLogHttpResponse_(request, false);
     });
+    server_.on("/api/activity/status", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        HttpLatencyScope latency(request, "/api/activity/status");
+        sendActivityLogHttpResponse_(request, true);
+    });
+    server_.on("/api/activity/logs", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        HttpLatencyScope latency(request, "/api/activity/logs");
+        sendActivityLogHttpResponse_(request, false);
+    });
+    server_.on("/api/activity/purge", HTTP_POST, [this](AsyncWebServerRequest* request) {
+        HttpLatencyScope latency(request, "/api/activity/purge");
+        noteHttpActivity_();
+        if (!activityLog_ && services_) {
+            activityLog_ = services_->get<ActivityLogService>(ServiceId::ActivityLog);
+        }
+        if (!activityLog_ || !activityLog_->clear) {
+            request->send(503, "application/json", "{\"ok\":false,\"err\":{\"code\":\"NotReady\",\"where\":\"activity.clear\"}}");
+            return;
+        }
+        const bool ok = activityLog_->clear(activityLog_->ctx);
+        request->send(ok ? 200 : 500,
+                      "application/json",
+                      ok ? "{\"ok\":true}" : "{\"ok\":false,\"err\":{\"code\":\"Failed\",\"where\":\"activity.clear\"}}");
+    });
     server_.on("/api/cfgdoc/index", HTTP_GET, [this, beginSpiffsAssetResponse, sendPreparedAssetResponse](AsyncWebServerRequest* request) {
         HttpLatencyScope latency(request, "/api/cfgdoc/index");
         SpiffsAssetForensicMeta forensicMeta{};
@@ -4488,7 +5953,7 @@ void WebInterfaceModule::startServer_()
     });
     server_.on("/api/web/meta", HTTP_GET, [this](AsyncWebServerRequest* request) {
         HttpLatencyScope latency(request, "/api/web/meta");
-        StaticJsonDocument<896> doc;
+        StaticJsonDocument<1024> doc;
         NetworkAccessMode mode = NetworkAccessMode::None;
         if (!netAccessSvc_ && services_) {
             netAccessSvc_ = services_->get<NetworkAccessService>(ServiceId::NetworkAccess);
@@ -4501,30 +5966,42 @@ void WebInterfaceModule::startServer_()
         const char* modeTxt = "none";
         if (mode == NetworkAccessMode::Station) modeTxt = "station";
         else if (mode == NetworkAccessMode::AccessPoint) modeTxt = "ap";
+        const char* transportTxt = networkTransport_(mode);
 
         doc["ok"] = true;
         doc["web_asset_version"] = webAssetVersion_();
         doc["firmware_version"] = FirmwareVersion::Full;
         doc["profile"] = FLOW_BUILD_PROFILE_NAME;
         doc["profile_name"] = FLOW_BUILD_PROFILE_NAME;
+        char deviceName[48] = {0};
+        loadConfiguredDeviceName_(cfgStore_, deviceName, sizeof(deviceName));
+        doc["devicename"] = deviceName;
         doc["network_mode"] = modeTxt;
+        doc["network_transport"] = transportTxt;
         doc["is_ap_portal"] = (mode == NetworkAccessMode::AccessPoint);
         doc["provisioning_only"] = provisioningOnly_;
         doc["full_ui_enabled"] = !provisioningOnly_;
         doc["reboot_after_wifi_save"] = provisioningOnly_ || (mode == NetworkAccessMode::AccessPoint);
-        uint32_t nextionDisplayVersion = 0U;
+        char nextionDisplayVersion[9]{};
         if (!hmiSvc_ && services_) {
             hmiSvc_ = services_->get<HmiService>(ServiceId::Hmi);
         }
-        if (hmiSvc_ && hmiSvc_->getDisplayVersion &&
-            hmiSvc_->getDisplayVersion(hmiSvc_->ctx, &nextionDisplayVersion)) {
+        const bool nextionVersionDetected =
+            hmiSvc_ && hmiSvc_->getDisplayVersion &&
+            hmiSvc_->getDisplayVersion(hmiSvc_->ctx, nextionDisplayVersion, sizeof(nextionDisplayVersion));
+        const bool nextionVersionCompatible =
+            nextionVersionDetected && strcmp(nextionDisplayVersion, TFT_FIRMW) == 0;
+        doc["nextion_display_version_detected"] = nextionVersionDetected;
+        doc["nextion_display_version_compatible"] = nextionVersionCompatible;
+        doc["nextion_display_expected_version"] = TFT_FIRMW;
+        if (nextionVersionDetected) {
             doc["nextion_display_version"] = nextionDisplayVersion;
         }
 #if defined(FLOW_PROFILE_MICRONOVA)
         doc["local_runtime"] = true;
         doc["local_config_label"] = "Config Store Micronova";
         doc["remote_config_enabled"] = false;
-#elif defined(FLOW_PROFILE_FLOWIOS3)
+#elif defined(FLOW_PROFILE_WAVESHARE)
         doc["local_runtime"] = true;
         doc["local_config_label"] = "Config Store flow.io";
         doc["remote_config_enabled"] = false;
@@ -4543,8 +6020,12 @@ void WebInterfaceModule::startServer_()
         heap["min_free"] = snap.heap.minFreeBytes;
         heap["largest"] = snap.heap.largestFreeBlock;
         heap["frag"] = snap.heap.fragPercent;
+        heap["internal_free"] = snap.heap.internalFreeBytes;
+        heap["internal_min_free"] = snap.heap.internalMinFreeBytes;
+        heap["internal_largest"] = snap.heap.internalLargestFreeBlock;
+        heap["internal_frag"] = snap.heap.internalFragPercent;
 
-        char out[768] = {0};
+        char out[960] = {0};
         const size_t n = serializeJson(doc, out, sizeof(out));
         if (n == 0 || n >= sizeof(out)) {
             request->send(500, "application/json",
@@ -4581,7 +6062,7 @@ void WebInterfaceModule::startServer_()
              || true
 #endif
             );
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         if (mode == NetworkAccessMode::AccessPoint && !request->hasParam("full")) {
             if (provisioningUiAssetsAvailable()) {
                 SpiffsAssetForensicMeta forensicMeta{};
@@ -4694,15 +6175,17 @@ void WebInterfaceModule::startServer_()
         const char* modeTxt = "none";
         if (mode == NetworkAccessMode::Station) modeTxt = "station";
         else if (mode == NetworkAccessMode::AccessPoint) modeTxt = "ap";
+        const char* transportTxt = networkTransport_(mode);
 
         char ip[16] = {0};
         (void)getNetworkIp_(ip, sizeof(ip), nullptr);
 
-        char out[96] = {0};
+        char out[128] = {0};
         const int n = snprintf(out,
                                sizeof(out),
-                               "{\"ok\":true,\"mode\":\"%s\",\"ip\":\"%s\"}",
+                               "{\"ok\":true,\"mode\":\"%s\",\"transport\":\"%s\",\"ip\":\"%s\"}",
                                modeTxt,
+                               transportTxt,
                                ip);
         if (n <= 0 || (size_t)n >= sizeof(out)) {
             request->send(500, "application/json",
@@ -4769,27 +6252,32 @@ void WebInterfaceModule::startServer_()
         request->send(200, "application/json", out);
     });
 
-    server_.on("/api/fwupdate/check", HTTP_GET, [this](AsyncWebServerRequest* request) {
+    server_.on("/api/fwupdate/check", HTTP_POST, [this](AsyncWebServerRequest* request) {
         HttpLatencyScope latency(request, "/api/fwupdate/check");
         if (!fwUpdateSvc_ && services_) {
             fwUpdateSvc_ = services_->get<FirmwareUpdateService>(ServiceId::FirmwareUpdate);
         }
-        if (!fwUpdateSvc_ || !fwUpdateSvc_->manifestUrl) {
+        if (!fwUpdateSvc_ || !fwUpdateSvc_->startManifestCheck) {
             request->send(503, "application/json",
                           "{\"ok\":false,\"err\":{\"code\":\"NotReady\",\"where\":\"fwupdate.check\"}}");
             return;
         }
 
-        char url[FirmwareManifestChunkState::kUrlLen] = {0};
         char err[128] = {0};
-        if (!fwUpdateSvc_->manifestUrl(fwUpdateSvc_->ctx, url, sizeof(url), err, sizeof(err))) {
+        uint32_t requestId = 0U;
+        if (!fwUpdateSvc_->startManifestCheck(fwUpdateSvc_->ctx,
+                                              &requestId,
+                                              err,
+                                              sizeof(err))) {
             sanitizeJsonString_(err);
             char msg[320] = {0};
             const int n = snprintf(msg,
                                    sizeof(msg),
                                    "{\"ok\":false,\"err\":{\"code\":\"Failed\",\"where\":\"fwupdate.check\",\"msg\":\"%s\"}}",
                                    err[0] ? err : "failed");
-            request->send(409,
+            const int status =
+                strstr(err, "storage unavailable") ? 503 : 409;
+            request->send(status,
                           "application/json",
                           (n > 0 && (size_t)n < sizeof(msg))
                               ? msg
@@ -4797,22 +6285,97 @@ void WebInterfaceModule::startServer_()
             return;
         }
 
-        auto state = std::make_shared<FirmwareManifestChunkState>();
-        if (!state || !state->begin(url, err, sizeof(err))) {
-            sanitizeJsonString_(err);
-            char msg[320] = {0};
-            const int n = snprintf(msg,
-                                   sizeof(msg),
-                                   "{\"ok\":false,\"err\":{\"code\":\"Failed\",\"where\":\"fwupdate.check\",\"msg\":\"%s\"}}",
-                                   err[0] ? err : "failed");
-            request->send(409,
+        char out[128] = {0};
+        const int n = snprintf(out,
+                               sizeof(out),
+                               "{\"ok\":true,\"request_id\":%lu,\"state\":\"queued\"}",
+                               (unsigned long)requestId);
+        request->send((n > 0 && (size_t)n < sizeof(out)) ? 202 : 500,
+                      "application/json",
+                      (n > 0 && (size_t)n < sizeof(out))
+                          ? out
+                          : "{\"ok\":false,\"err\":{\"code\":\"Failed\",\"where\":\"fwupdate.check\"}}");
+    });
+
+    server_.on("/api/fwupdate/check", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        HttpLatencyScope latency(request, "/api/fwupdate/check");
+        if (!fwUpdateSvc_ && services_) {
+            fwUpdateSvc_ = services_->get<FirmwareUpdateService>(ServiceId::FirmwareUpdate);
+        }
+        if (!fwUpdateSvc_ || !fwUpdateSvc_->manifestCheckStatus ||
+            !fwUpdateSvc_->copyManifestResult) {
+            request->send(503, "application/json",
+                          "{\"ok\":false,\"err\":{\"code\":\"NotReady\",\"where\":\"fwupdate.check\"}}");
+            return;
+        }
+
+        const int32_t requestIdRaw = requestIntParam_(request, "request_id", 0);
+        if (requestIdRaw <= 0) {
+            request->send(400,
                           "application/json",
-                          (n > 0 && (size_t)n < sizeof(msg))
-                              ? msg
+                          "{\"ok\":false,\"err\":{\"code\":\"BadRequest\",\"where\":\"fwupdate.check.request_id\"}}");
+            return;
+        }
+
+        FirmwareManifestCheckSnapshot snapshot{};
+        const uint32_t requestId = (uint32_t)requestIdRaw;
+        if (!fwUpdateSvc_->manifestCheckStatus(fwUpdateSvc_->ctx,
+                                               requestId,
+                                               &snapshot)) {
+            request->send(404,
+                          "application/json",
+                          "{\"ok\":false,\"err\":{\"code\":\"NotFound\",\"where\":\"fwupdate.check.request_id\"}}");
+            return;
+        }
+
+        if (snapshot.state == FirmwareManifestCheckState::Queued ||
+            snapshot.state == FirmwareManifestCheckState::Downloading) {
+            char out[160] = {0};
+            const int n = snprintf(out,
+                                   sizeof(out),
+                                   "{\"ok\":true,\"request_id\":%lu,\"state\":\"%s\",\"ts_ms\":%lu}",
+                                   (unsigned long)snapshot.requestId,
+                                   firmwareManifestCheckStateName_(snapshot.state),
+                                   (unsigned long)snapshot.updatedAtMs);
+            request->send((n > 0 && (size_t)n < sizeof(out)) ? 202 : 500,
+                          "application/json",
+                          (n > 0 && (size_t)n < sizeof(out))
+                              ? out
                               : "{\"ok\":false,\"err\":{\"code\":\"Failed\",\"where\":\"fwupdate.check\"}}");
             return;
         }
 
+        if (snapshot.state == FirmwareManifestCheckState::Error) {
+            sanitizeJsonString_(snapshot.message);
+            char out[320] = {0};
+            const int n = snprintf(out,
+                                   sizeof(out),
+                                   "{\"ok\":false,\"request_id\":%lu,\"state\":\"error\","
+                                   "\"err\":{\"code\":\"Failed\",\"where\":\"fwupdate.check\",\"msg\":\"%s\"}}",
+                                   (unsigned long)snapshot.requestId,
+                                   snapshot.message[0] ? snapshot.message : "failed");
+            request->send((n > 0 && (size_t)n < sizeof(out)) ? 502 : 500,
+                          "application/json",
+                          (n > 0 && (size_t)n < sizeof(out))
+                              ? out
+                              : "{\"ok\":false,\"err\":{\"code\":\"Failed\",\"where\":\"fwupdate.check\"}}");
+            return;
+        }
+
+        if (snapshot.state != FirmwareManifestCheckState::Ready) {
+            request->send(409,
+                          "application/json",
+                          "{\"ok\":false,\"err\":{\"code\":\"InvalidState\",\"where\":\"fwupdate.check\"}}");
+            return;
+        }
+
+        auto state = std::make_shared<FirmwareManifestResponseChunkState>();
+        if (!state || !state->begin(fwUpdateSvc_, snapshot)) {
+            request->send(503,
+                          "application/json",
+                          "{\"ok\":false,\"err\":{\"code\":\"LowMemory\",\"where\":\"fwupdate.check.response\"}}");
+            return;
+        }
         AsyncWebServerResponse* response =
             request->beginChunkedResponse("application/json",
                                           [state](uint8_t* buffer, size_t maxLen, size_t) -> size_t {
@@ -4859,6 +6422,7 @@ void WebInterfaceModule::startServer_()
             return;
         }
 
+        emitConfigActivity_("Mise à jour", "fwupdate", (uint16_t)((hasHost ? 1U : 0U) + (hasUpdatePath ? 1U : 0U)));
         request->send(200, "application/json", "{\"ok\":true}");
     });
 
@@ -5065,6 +6629,7 @@ void WebInterfaceModule::startServer_()
                           "{\"ok\":false,\"err\":{\"code\":\"Failed\",\"where\":\"wifi.config.set\"}}");
             return;
         }
+        emitConfigPatchActivity_("WiFi", patchJson);
 
         if (!netAccessSvc_ && services_) {
             netAccessSvc_ = services_->get<NetworkAccessService>(ServiceId::NetworkAccess);
@@ -5140,7 +6705,7 @@ void WebInterfaceModule::startServer_()
             LOGW("flow.io reboot request failed err=%s", flowRebootErr[0] ? flowRebootErr : "unknown");
         }
 
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         if (wasApProvisioning) {
             scheduleReboot_(1200U, "prov.done.wifi");
             request->send(200, "application/json", "{\"ok\":true,\"reboot_scheduled\":true}");
@@ -5237,6 +6802,7 @@ void WebInterfaceModule::startServer_()
                           "{\"ok\":false,\"err\":{\"code\":\"Failed\",\"where\":\"mqtt.config.set\"}}");
             return;
         }
+        emitConfigPatchActivity_("MQTT", patchJson);
         const bool provisioningConfigured =
             provisioningOnly_ &&
             provisioningDisableAfterConfigured_ &&
@@ -5301,9 +6867,9 @@ void WebInterfaceModule::startServer_()
         char srcStr[24] = {0};
         copyRequestParamValue_(request, "src", false, srcStr, sizeof(srcStr), "");
         LOGD("runtime.call route=/api/flow/status src=%s", srcStr[0] ? srcStr : "-");
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         const AlarmService* alarmSvc = services_ ? services_->get<AlarmService>(ServiceId::Alarm) : nullptr;
-        if (!sendFlowios3StatusCompactResponse_(request, dataStore_, cfgStore_, alarmSvc)) {
+        if (!sendWaveshareStatusCompactResponse_(request, dataStore_, cfgStore_, alarmSvc)) {
             request->send(500, "application/json",
                           "{\"ok\":false,\"err\":{\"code\":\"Failed\",\"where\":\"flow.status.local\"}}");
         }
@@ -5352,10 +6918,10 @@ void WebInterfaceModule::startServer_()
             return;
         }
 
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         char domainBuf[768] = {0};
         const AlarmService* alarmSvc = services_ ? services_->get<AlarmService>(ServiceId::Alarm) : nullptr;
-        if (!flowios3BuildStatusDomainJson_(domain, dataStore_, cfgStore_, alarmSvc, domainBuf, sizeof(domainBuf))) {
+        if (!waveshareBuildStatusDomainJson_(domain, dataStore_, cfgStore_, alarmSvc, domainBuf, sizeof(domainBuf))) {
             request->send(200, "application/json",
                           "{\"ok\":false,\"err\":{\"code\":\"Failed\",\"where\":\"flow.status.domain.local\"}}");
             return;
@@ -5436,6 +7002,35 @@ void WebInterfaceModule::startServer_()
                       "{\"ok\":false,\"err\":{\"code\":\"Disabled\",\"where\":\"runtime.alarms.disabled\"}}");
     });
 
+    server_.on("/api/io/topology", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        HttpLatencyScope latency(request, "/api/io/topology");
+        LOGD("runtime.call route=/api/io/topology");
+#if defined(FLOW_PROFILE_WAVESHARE)
+        sendIoResponseCache_(request, true);
+#else
+        request->send(404, "application/json",
+                      "{\"ok\":false,\"err\":{\"code\":\"Unsupported\",\"where\":\"io.topology\"}}");
+#endif
+    });
+
+    server_.on("/api/io/runtime", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        HttpLatencyScope latency(request, "/api/io/runtime");
+        LOGD("runtime.call route=/api/io/runtime");
+#if defined(FLOW_PROFILE_WAVESHARE)
+        sendIoResponseCache_(request, false);
+#else
+        request->send(404, "application/json",
+                      "{\"ok\":false,\"err\":{\"code\":\"Unsupported\",\"where\":\"io.runtime\"}}");
+#endif
+    });
+
+    server_.on("/api/io/summary", HTTP_GET, [](AsyncWebServerRequest* request) {
+        request->send(410,
+                      "application/json",
+                      "{\"ok\":false,\"err\":{\"code\":\"Replaced\",\"where\":\"io.summary\","
+                      "\"detail\":\"Use /api/io/topology and /api/io/runtime\"}}");
+    });
+
     server_.on("/api/runtime/dashboard_slots", HTTP_GET, [this](AsyncWebServerRequest* request) {
         HttpLatencyScope latency(request, "/api/runtime/dashboard_slots");
         LOGD("runtime.call route=/api/runtime/dashboard_slots");
@@ -5443,13 +7038,13 @@ void WebInterfaceModule::startServer_()
         addNoCacheHeaders_(response);
         response->print("{\"ok\":true,\"slots\":[");
         bool first = true;
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         if (!ioSvc_ && services_) {
             ioSvc_ = services_->get<IOServiceV2>(ServiceId::Io);
         }
         {
             const AlarmService* alarmSvc = services_ ? services_->get<AlarmService>(ServiceId::Alarm) : nullptr;
-            sendFlowios3DashboardSlotsResponse_(*response, first, dataStore_, cfgStore_, alarmSvc, ioSvc_);
+            sendWaveshareDashboardSlotsResponse_(*response, first, dataStore_, cfgStore_, alarmSvc, ioSvc_);
         }
 #elif !defined(FLOW_PROFILE_MICRONOVA)
         if (dataStore_) {
@@ -5492,10 +7087,10 @@ void WebInterfaceModule::startServer_()
 #endif
         response->print("],\"alarm_slots\":[");
         bool firstAlarmSlot = true;
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         {
             const AlarmService* alarmSvc = services_ ? services_->get<AlarmService>(ServiceId::Alarm) : nullptr;
-            sendFlowios3AlarmDashboardSlotsResponse_(*response, firstAlarmSlot, cfgStore_, alarmSvc);
+            sendWaveshareAlarmDashboardSlotsResponse_(*response, firstAlarmSlot, cfgStore_, alarmSvc);
         }
 #else
         (void)firstAlarmSlot;
@@ -5532,10 +7127,10 @@ void WebInterfaceModule::startServer_()
 
 #if defined(FLOW_PROFILE_MICRONOVA)
         sendMicronovaLocalRuntimeValuesResponse_(request, dataStore_, ids, idCount);
-#elif defined(FLOW_PROFILE_FLOWIOS3)
+#elif defined(FLOW_PROFILE_WAVESHARE)
         {
             const AlarmService* alarmSvc = services_ ? services_->get<AlarmService>(ServiceId::Alarm) : nullptr;
-            sendFlowios3LocalRuntimeValuesResponse_(request, dataStore_, cfgStore_, alarmSvc, ids, idCount);
+            sendWaveshareLocalRuntimeValuesResponse_(request, dataStore_, cfgStore_, alarmSvc, ids, idCount);
         }
 #else
         sendRuntimeUiValuesResponse_(request, flowCfgSvc_, ids, idCount);
@@ -5601,10 +7196,10 @@ void WebInterfaceModule::startServer_()
 
 #if defined(FLOW_PROFILE_MICRONOVA)
             sendMicronovaLocalRuntimeValuesResponse_(request, dataStore_, ids, idCount);
-#elif defined(FLOW_PROFILE_FLOWIOS3)
+#elif defined(FLOW_PROFILE_WAVESHARE)
             {
                 const AlarmService* alarmSvc = services_ ? services_->get<AlarmService>(ServiceId::Alarm) : nullptr;
-                sendFlowios3LocalRuntimeValuesResponse_(request, dataStore_, cfgStore_, alarmSvc, ids, idCount);
+                sendWaveshareLocalRuntimeValuesResponse_(request, dataStore_, cfgStore_, alarmSvc, ids, idCount);
             }
 #else
             sendRuntimeUiValuesResponse_(request, flowCfgSvc_, ids, idCount);
@@ -5647,7 +7242,7 @@ void WebInterfaceModule::startServer_()
                                  "/api/flowcfg/modules",
                                  kHttpLatencyFlowCfgInfoMs,
                                  kHttpLatencyFlowCfgWarnMs);
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         if (!cfgStore_) {
             request->send(503, "application/json",
                           "{\"ok\":false,\"err\":{\"code\":\"NotReady\",\"where\":\"flowcfg.modules\"}}");
@@ -5701,7 +7296,7 @@ void WebInterfaceModule::startServer_()
                                  "/api/flowcfg/children",
                                  kHttpLatencyFlowCfgInfoMs,
                                  kHttpLatencyFlowCfgWarnMs);
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         if (!cfgStore_) {
             request->send(503, "application/json",
                           "{\"ok\":false,\"err\":{\"code\":\"NotReady\",\"where\":\"flowcfg.children\"}}");
@@ -5799,7 +7394,7 @@ void WebInterfaceModule::startServer_()
                                  "/api/flowcfg/module",
                                  kHttpLatencyFlowCfgInfoMs,
                                  kHttpLatencyFlowCfgWarnMs);
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         if (!cfgStore_) {
             request->send(503, "application/json",
                           "{\"ok\":false,\"err\":{\"code\":\"NotReady\",\"where\":\"flowcfg.module\"}}");
@@ -5908,7 +7503,7 @@ void WebInterfaceModule::startServer_()
                                  "/api/flowcfg/apply",
                                  kHttpLatencyFlowCfgInfoMs,
                                  kHttpLatencyFlowCfgWarnMs);
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         if (!cfgStore_) {
             request->send(503, "application/json",
                           "{\"ok\":false,\"err\":{\"code\":\"NotReady\",\"where\":\"flowcfg.apply\"}}");
@@ -5931,6 +7526,7 @@ void WebInterfaceModule::startServer_()
                           "{\"ok\":false,\"err\":{\"code\":\"Failed\",\"where\":\"flowcfg.apply.exec\"}}");
             return;
         }
+        emitConfigPatchActivity_("Config flow.io", patchStr.data);
         request->send(200, "application/json", "{\"ok\":true}");
         return;
 #else
@@ -6137,6 +7733,7 @@ void WebInterfaceModule::startServer_()
                           "{\"ok\":false,\"err\":{\"code\":\"Failed\",\"where\":\"supervisorcfg.apply.exec\"}}");
             return;
         }
+        emitConfigPatchActivity_("Config locale", patchStr.data);
         request->send(200, "application/json", "{\"ok\":true}");
     });
 
@@ -6236,30 +7833,6 @@ void WebInterfaceModule::startServer_()
         request->send(200, "application/json", (reply[0] != '\0') ? reply : "{\"ok\":true}");
     });
 
-    server_.on("/api/flow/system/hardware-reboot", HTTP_POST, [this](AsyncWebServerRequest* request) {
-        HttpLatencyScope latency(request, "/api/flow/system/hardware-reboot");
-        if (!cmdSvc_ && services_) {
-            cmdSvc_ = services_->get<CommandService>(ServiceId::Command);
-        }
-        if (!cmdSvc_ || !cmdSvc_->execute) {
-            request->send(503, "application/json",
-                          "{\"ok\":false,\"err\":{\"code\":\"NotReady\",\"where\":\"fw.flowio.hw_reboot\"}}");
-            return;
-        }
-
-        char reply[220] = {0};
-        const bool ok = cmdSvc_->execute(cmdSvc_->ctx, "fw.flowio.hw_reboot", "{}", nullptr, reply, sizeof(reply));
-        if (!ok) {
-            request->send(500,
-                          "application/json",
-                          (reply[0] != '\0')
-                              ? reply
-                              : "{\"ok\":false,\"err\":{\"code\":\"Failed\",\"where\":\"fw.flowio.hw_reboot\"}}");
-            return;
-        }
-        request->send(200, "application/json", (reply[0] != '\0') ? reply : "{\"ok\":true}");
-    });
-
     server_.on("/api/flow/system/factory-reset", HTTP_POST, [this](AsyncWebServerRequest* request) {
         HttpLatencyScope latency(request, "/api/flow/system/factory-reset");
         if (!cmdSvc_ && services_) {
@@ -6284,14 +7857,9 @@ void WebInterfaceModule::startServer_()
         request->send(200, "application/json", (reply[0] != '\0') ? reply : "{\"ok\":true}");
     });
 
-    server_.on("/fwupdate/flowio", HTTP_POST, [this](AsyncWebServerRequest* request) {
-        HttpLatencyScope latency(request, "/fwupdate/flowio");
-        handleUpdateRequest_(request, FirmwareUpdateTarget::FlowIO);
-    });
-
-    server_.on("/fwupdate/supervisor", HTTP_POST, [this](AsyncWebServerRequest* request) {
-        HttpLatencyScope latency(request, "/fwupdate/supervisor");
-        handleUpdateRequest_(request, FirmwareUpdateTarget::Supervisor);
+    server_.on("/fwupdate/waveshare", HTTP_POST, [this](AsyncWebServerRequest* request) {
+        HttpLatencyScope latency(request, "/fwupdate/waveshare");
+        handleUpdateRequest_(request, FirmwareUpdateTarget::Waveshare);
     });
 
     server_.on("/fwupdate/nextion", HTTP_POST, [this](AsyncWebServerRequest* request) {
@@ -6300,10 +7868,6 @@ void WebInterfaceModule::startServer_()
     });
     server_.on("/fwupdate/spiffs", HTTP_POST, [this](AsyncWebServerRequest* request) {
         HttpLatencyScope latency(request, "/fwupdate/spiffs");
-        handleUpdateRequest_(request, FirmwareUpdateTarget::Spiffs);
-    });
-    server_.on("/fwupdate/cfgdocs", HTTP_POST, [this](AsyncWebServerRequest* request) {
-        HttpLatencyScope latency(request, "/fwupdate/cfgdocs");
         handleUpdateRequest_(request, FirmwareUpdateTarget::Spiffs);
     });
 
@@ -6451,4 +8015,17 @@ bool WebInterfaceModule::getNetworkIp_(char* out, size_t len, NetworkAccessMode*
     }
 
     return false;
+}
+
+const char* WebInterfaceModule::networkTransport_(NetworkAccessMode mode) const
+{
+    if (mode != NetworkAccessMode::Station) return "none";
+
+    const IPAddress ethIp = ETH.localIP();
+    if (ethIp[0] != 0 || ethIp[1] != 0 || ethIp[2] != 0 || ethIp[3] != 0) {
+        return "ethernet";
+    }
+
+    if (WiFi.isConnected()) return "wifi";
+    return "none";
 }

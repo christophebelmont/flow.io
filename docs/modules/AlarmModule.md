@@ -33,6 +33,7 @@ Type: module actif.
 
 - `eventbus` (émission événements)
 - `cmd` (commandes)
+- `activitylog` optionnel (journal utilisateur des transitions d'alarme)
 
 ## Config / NVS
 
@@ -99,6 +100,22 @@ Les transitions utiles sont publiées immédiatement sur l'EventBus:
 `minRepeatMs` ne sert plus à retarder ces transitions. Il ne sert qu'aux rappels
 périodiques `AlarmConditionChanged` tant qu'une alarme reste active avec
 `condition=true`.
+
+## Journal d'activité
+
+Pour les définitions dont `activityLogEnabled=true`, le module écrit directement
+dans `ActivityLogService` afin de conserver la sémantique exacte des transitions:
+
+- `AlarmRaised`: déclenchement effectif après le délai ON
+- `AlarmConditionOk`: condition redevenue fausse
+  - immédiatement pour une alarme latched devenue réarmable
+  - à la levée effective après le délai OFF pour une alarme non latched
+- `AlarmReset`: reset manuel accepté
+
+Les passages initiaux `Unknown -> False`, les défauts qui disparaissent avant le
+délai ON et les rappels `minRepeatMs` ne sont pas journalisés. Le `AlarmCleared`
+émis après un reset ne crée pas une seconde entrée. Le champ persistant/API
+`alarm_id` conserve l'identifiant stable de l'alarme.
 
 ## Alarmes définies actuellement
 

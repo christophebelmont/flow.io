@@ -4,6 +4,7 @@
  * @brief WiFi connectivity module.
  */
 #include "Board/BoardSpec.h"
+#include "Core/EventBus/EventBus.h"
 #include "Core/Module.h"
 #include "Core/RuntimeUi.h"
 #include "Core/ServiceBinding.h"
@@ -14,30 +15,21 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
 
+#ifndef ETH_TIMEOUT_MS
+#define ETH_TIMEOUT_MS 7000UL
+#endif
+
 /** @brief WiFi configuration values. */
 struct WifiConfig {
     bool enabled = true;
     // IEEE 802.11 SSID supports up to 32 bytes (+ '\0').
-#if defined(FLOW_PROFILE_MICRONOVA) || defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_MICRONOVA) || defined(FLOW_PROFILE_WAVESHARE)
     char ssid[33] = "";
 #else
     char ssid[33] = FLOW_WIRDEF_WIFI_SSID;
 #endif
     // WPA/WPA2 supports 8..63 chars passphrase or 64-char hex PSK (+ '\0').
     char pass[65] = FLOW_WIRDEF_WIFI_PASS;
-#if defined(FLOW_PROFILE_SUPERVISOR)
-    char mdns[33] = "flowio";
-#elif defined(FLOW_PROFILE_FLOWIO)
-    char mdns[33] = "flowio-core";
-#elif defined(FLOW_PROFILE_FLOWIOS3)
-    char mdns[33] = "flowio";
-#elif defined(FLOW_PROFILE_FLOW_CONNECT_DISPLAY)
-    char mdns[33] = "flow-connect-display";
-#elif defined(FLOW_PROFILE_MICRONOVA)
-    char mdns[33] = "micronova";
-#else
-    char mdns[33] = "flowio";
-#endif
 };
 
 /**
@@ -61,18 +53,19 @@ public:
     uint16_t taskStackSize() const override {
 #if defined(FLOW_PROFILE_SUPERVISOR) || defined(FLOW_PROFILE_MICRONOVA)
         return 4096;
-#elif defined(FLOW_PROFILE_FLOWIOS3)
+#elif defined(FLOW_PROFILE_WAVESHARE)
         return 3584;
 #else
         return 2816;
 #endif
     }
 
-    /** @brief Depends on log hub and datastore. */
-    uint8_t dependencyCount() const override { return 2; }
+    /** @brief Depends on log hub, datastore and event bus. */
+    uint8_t dependencyCount() const override { return 3; }
     ModuleId dependency(uint8_t i) const override {
         if (i == 0) return ModuleId::LogHub;
         if (i == 1) return ModuleId::DataStore;
+        if (i == 2) return ModuleId::EventBus;
         return ModuleId::Unknown;
     }
 
@@ -115,6 +108,9 @@ private:
     uint32_t stateTs = 0;
     const LogHubService* logHub = nullptr;
     DataStore* dataStore = nullptr;
+    ConfigStore* cfgStore_ = nullptr;
+    const NetworkAccessService* netAccessSvc_ = nullptr;
+    EventBus* eventBus_ = nullptr;
     bool gotIpSent = false;
     bool mdnsStarted = false;
     uint32_t connectAttempt_ = 0;
@@ -131,8 +127,9 @@ private:
     uint32_t lastEmptySsidLogMs = 0;
     uint32_t lastBeginMs_ = 0;
     uint32_t beginBackoffMs_ = 1500U;
-    char mdnsApplied[sizeof(cfgData.mdns)] = {0};
-    char boardMdnsHost_[sizeof(cfgData.mdns)] = {0};
+    char deviceName_[33] = "flowio";
+    char mdnsApplied[sizeof(deviceName_)] = {0};
+    volatile bool deviceNameDirty_ = false;
     volatile bool scanRequested_ = false;
     volatile bool scanRunning_ = false;
     bool scanHasResults_ = false;
@@ -176,14 +173,6 @@ private:
         sizeof(cfgData.pass)
     };
 
-    ConfigVariable<char,0> mdnsVar {
-        NVS_KEY(NvsKeys::Wifi::Mdns),"mdns","wifi",
-        ConfigType::CharArray,
-        cfgData.mdns,
-        ConfigPersistence::Persistent,
-        sizeof(cfgData.mdns)
-    };
-
     // service
     WifiState stateSvc_() const;
     bool isConnected_() const;
@@ -192,6 +181,8 @@ private:
     bool scanStatusJson_(char* out, size_t outLen);
     bool setStaRetryEnabled_(bool enabled);
     static bool cmdDumpCfg_(void* userCtx, const CommandRequest& req, char* reply, size_t replyLen);
+    static void onEventStatic_(const Event& e, void* user);
+    void onEvent_(const Event& e);
 
     void setState(WifiState s);
     static void onWifiEventSys_(arduino_event_t* event);
@@ -202,9 +193,9 @@ private:
     void startConnect();
     void stopMdns_();
     void syncMdns_();
-    void applyBoardDefaults_(const BoardSpec& board);
-    void applyBoardMdnsHost_();
+    void loadSystemDeviceName_();
     void refreshEthernetConfig_(ConfigStore& cfg);
+    bool preferredEthernetAvailable_() const;
     bool requestScan_(bool force);
     void processScan_();
     bool buildScanStatusJson_(char* out, size_t outLen);

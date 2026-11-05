@@ -28,7 +28,7 @@ Réponse:
 
 Payload patch config multi-modules:
 ```json
-{"poollogic/mode":{"auto_mode":true},"pdm/pd1":{"flow_l_h":1.4}}
+{"poollogic/modes":{"auto_mode":true},"pdm/pd1":{"flow_l_h":1.4}}
 ```
 Réponse:
 - `<base>/<device>/cfg/ack`
@@ -90,10 +90,9 @@ La publication config est pilotée par producteurs locaux (modules).
 Exemples:
 - `cfg/poollogic`
 - `cfg/poollogic/filtration`
-- `cfg/poollogic/pid`
-- `cfg/pdmrt`
-- `cfg/pdmrt/pd0`
-- `cfg/pdmrt/pd1`
+- `cfg/poollogic/chlorine`
+- `cfg/pdm`
+- `cfg/pdm/pd0`
 
 Règle topic:
 - suffixe vide -> base (`cfg/<module>`)

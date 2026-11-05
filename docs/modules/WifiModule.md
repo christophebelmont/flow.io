@@ -6,6 +6,7 @@ Gestion de la connectivité WiFi STA:
 - machine d'états (`Disabled`, `Idle`, `Connecting`, `Connected`, `ErrorWait`)
 - publication de l'état réseau dans `DataStore`
 - exposition d'un service WiFi minimal
+- annonce de `system/devicename` comme hostname DHCP et nom mDNS ; la valeur par défaut `flowio` devient `FlowIO-XXXXXX` en DHCP, avec un suffixe dérivé de l'adresse MAC
 
 Type: module actif.
 
@@ -13,6 +14,7 @@ Type: module actif.
 
 - `loghub`
 - `datastore`
+- `eventbus`
 
 ## Affinité / cadence
 
@@ -38,11 +40,6 @@ Module config: `wifi` (`moduleId = ConfigModuleId::Wifi`, branche locale `1`)
 - `enabled` (`wifi_en`)
 - `ssid` (`wifi_ssid`)
 - `pass` (`wifi_pass`)
-- `mdns` (`wifi_mdns`)
-
-Default mDNS:
-- `FlowIO`: `flowio-core`
-- `Supervisor`: `flowio`
 
 ## DataStore
 
@@ -52,6 +49,6 @@ Default mDNS:
 
 ## EventBus / MQTT
 
-- pas d'abonnement EventBus
+- abonnement `ConfigChanged` pour appliquer `system/devicename` au hostname réseau
 - pas de publication EventBus directe
 - impact indirect: `MQTTModule` et `TimeModule` surveillent `DataKeys::WifiReady`

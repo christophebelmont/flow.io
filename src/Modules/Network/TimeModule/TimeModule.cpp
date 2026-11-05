@@ -25,6 +25,14 @@
 #define LOG_MODULE_ID ((LogModuleId)LogModuleIdValue::TimeModule)
 #include "Core/ModuleLog.h"
 
+#ifndef FLOW_TIME_MIN_YEAR
+#define FLOW_TIME_MIN_YEAR 0
+#endif
+
+#ifndef TIME_LARGE_JUMP_SECONDS
+#define TIME_LARGE_JUMP_SECONDS 300
+#endif
+
 namespace {
 static constexpr uint8_t kTimeCfgProducerId = 43;
 static constexpr uint8_t kTimeCfgBranch = 1;
@@ -33,15 +41,23 @@ static constexpr MqttConfigRouteProducer::Route kTimeCfgRoutes[] = {
     {1, {(uint8_t)ConfigModuleId::Time, kTimeCfgBranch}, "time", "time", (uint8_t)MqttPublishPriority::Normal, nullptr},
     {2, {(uint8_t)ConfigModuleId::Time, kTimeSchedulerCfgBranch}, "time/scheduler", "time/scheduler", (uint8_t)MqttPublishPriority::Normal, nullptr},
 };
-static constexpr uint64_t kMinExternalRtcEpochSec = 1609459200ULL; // 2021-01-01
+static constexpr uint16_t kTimeMaxPlausibleYear = 2100;
+static constexpr uint64_t kTimeMaxPlausibleEpochSec = 4102444800ULL; // 2100-01-01T00:00:00Z
+static constexpr uint32_t kTimeLargeJumpSeconds = (uint32_t)TIME_LARGE_JUMP_SECONDS;
+static constexpr uint32_t kTimeMetaMagic = 0x54494D45UL; // "TIME"
+static constexpr uint16_t kTimeMetaVersion = 1U;
 static constexpr uint32_t kExternalRtcNtpRetryMs = 60000UL;
+static constexpr uint32_t kNextionRtcFallbackDelayMs = 30000U;
+static constexpr uint32_t kNextionRtcFallbackRetryMs = 10000U;
+static constexpr uint32_t kNextionRtcWriteRetryMs = 60000U;
+static constexpr uint16_t kNextionRtcReadTimeoutMs = 500U;
 #if FLOW_RTC_PCF85063
 static constexpr uint8_t kPcf85063Addr = 0x51;
 static constexpr uint8_t kPcf85063RegCtrl1 = 0x00;
 static constexpr uint8_t kPcf85063RegSeconds = 0x04;
 static constexpr uint8_t kPcf85063Ctrl1CapSel = 0x01;
 static constexpr int kPcf85063YearOffset = 1970;
-static constexpr uint32_t kInternalRtcFallbackDelayMs = 5000U;
+static constexpr uint32_t kInternalRtcFallbackDelayMs = 0U;
 static constexpr uint32_t kInternalRtcFallbackRetryMs = 10000U;
 static constexpr uint32_t kInternalRtcWriteRetryMs = 60000U;
 static constexpr uint32_t kInternalRtcDailyResyncMs = 24UL * 60UL * 60UL * 1000UL;
@@ -77,6 +93,124 @@ static uint8_t bcdToDec_(uint8_t val)
     return (uint8_t)(((val >> 4) * 10U) + (val & 0x0FU));
 }
 #endif
+
+static bool isLeapYearUtc_(uint16_t year)
+{
+    if ((year % 400U) == 0U) return true;
+    if ((year % 100U) == 0U) return false;
+    return (year % 4U) == 0U;
+}
+
+static uint8_t daysInMonthUtc_(uint16_t year, uint8_t month)
+{
+    static const uint8_t days[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    if (month < 1U || month > 12U) return 0U;
+    if (month == 2U && isLeapYearUtc_(year)) return 29U;
+    return days[month - 1U];
+}
+
+static uint16_t compileYear_()
+{
+#if FLOW_TIME_MIN_YEAR > 0
+    return (uint16_t)FLOW_TIME_MIN_YEAR;
+#else
+    const char* date = __DATE__;
+    if (!date || strlen(date) < 11U) return 2024U;
+    return (uint16_t)(((date[7] - '0') * 1000) +
+                      ((date[8] - '0') * 100) +
+                      ((date[9] - '0') * 10) +
+                      (date[10] - '0'));
+#endif
+}
+
+static uint64_t utcFieldsToEpochUnchecked_(uint16_t year, uint8_t month, uint8_t day,
+                                           uint8_t hour, uint8_t minute, uint8_t second)
+{
+    uint64_t days = 0ULL;
+    for (uint16_t y = 1970U; y < year; ++y) {
+        days += isLeapYearUtc_(y) ? 366ULL : 365ULL;
+    }
+    for (uint8_t m = 1U; m < month; ++m) {
+        days += (uint64_t)daysInMonthUtc_(year, m);
+    }
+    days += (uint64_t)(day - 1U);
+    return (days * 86400ULL) + ((uint64_t)hour * 3600ULL) + ((uint64_t)minute * 60ULL) + (uint64_t)second;
+}
+
+static uint64_t minPlausibleEpochSec_()
+{
+    static const uint64_t minEpoch = utcFieldsToEpochUnchecked_(compileYear_(), 1U, 1U, 0U, 0U, 0U);
+    return minEpoch;
+}
+
+static bool isValidRtcDate_(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute, uint8_t second)
+{
+    return year >= compileYear_() &&
+           year < kTimeMaxPlausibleYear &&
+           month >= 1U &&
+           month <= 12U &&
+           day >= 1U &&
+           day <= daysInMonthUtc_(year, month) &&
+           hour <= 23U &&
+           minute <= 59U &&
+           second <= 59U;
+}
+
+static bool utcFieldsToEpoch_(uint16_t year,
+                              uint8_t month,
+                              uint8_t day,
+                              uint8_t hour,
+                              uint8_t minute,
+                              uint8_t second,
+                              uint64_t& epoch)
+{
+    epoch = 0ULL;
+    if (!isValidRtcDate_(year, month, day, hour, minute, second)) return false;
+    epoch = utcFieldsToEpochUnchecked_(year, month, day, hour, minute, second);
+    return epoch >= minPlausibleEpochSec_() && epoch < kTimeMaxPlausibleEpochSec;
+}
+
+static bool localFieldsToEpoch_(uint16_t year,
+                                uint8_t month,
+                                uint8_t day,
+                                uint8_t hour,
+                                uint8_t minute,
+                                uint8_t second,
+                                uint64_t& epoch)
+{
+    epoch = 0ULL;
+    if (!isValidRtcDate_(year, month, day, hour, minute, second)) return false;
+
+    struct tm local{};
+    local.tm_year = (int)year - 1900;
+    local.tm_mon = (int)month - 1;
+    local.tm_mday = (int)day;
+    local.tm_hour = (int)hour;
+    local.tm_min = (int)minute;
+    local.tm_sec = (int)second;
+    local.tm_isdst = -1;
+    const time_t converted = mktime(&local);
+    if (converted < 0) return false;
+    if ((uint16_t)(local.tm_year + 1900) != year ||
+        (uint8_t)(local.tm_mon + 1) != month ||
+        (uint8_t)local.tm_mday != day ||
+        (uint8_t)local.tm_hour != hour ||
+        (uint8_t)local.tm_min != minute ||
+        (uint8_t)local.tm_sec != second) {
+        return false;
+    }
+
+    epoch = (uint64_t)converted;
+    return epoch >= minPlausibleEpochSec_() && epoch < kTimeMaxPlausibleEpochSec;
+}
+
+static uint32_t dayStampFromEpochLocal_(uint64_t epochSec)
+{
+    const time_t t = (time_t)epochSec;
+    struct tm local{};
+    if (!localtime_r(&t, &local)) return 0xFFFFFFFFUL;
+    return ((uint32_t)(local.tm_year + 1900) * 1000UL) + (uint32_t)local.tm_yday;
+}
 
 static bool parseCmdArgsObject_(const CommandRequest& req, JsonObjectConst& outObj)
 {
@@ -249,6 +383,222 @@ void TimeModule::setState(TimeSyncState s) {
     }
 }
 
+const char* TimeModule::sourceName_(TimeSource source)
+{
+    switch (source) {
+        case TimeSource::Ntp: return "ntp";
+        case TimeSource::InternalRtc: return "internal_rtc";
+        case TimeSource::NextionManual: return "manual";
+        case TimeSource::None:
+        default: return "none";
+    }
+}
+
+const char* TimeModule::qualityName_(TimeQuality quality)
+{
+    switch (quality) {
+        case TimeQuality::NtpSynced: return "ntp_synced";
+        case TimeQuality::RtcTrusted: return "rtc_trusted";
+        case TimeQuality::Manual: return "manual";
+        case TimeQuality::RtcUntrusted: return "rtc_untrusted";
+        case TimeQuality::Invalid:
+        default: return "invalid";
+    }
+}
+
+const char* TimeModule::shortStatusFr_(TimeQuality quality, TimeSource source)
+{
+    (void)source;
+    switch (quality) {
+        case TimeQuality::NtpSynced: return "NTP";
+        case TimeQuality::RtcTrusted: return "RTC";
+        case TimeQuality::Manual: return "manuel";
+        case TimeQuality::RtcUntrusted: return "RTC?";
+        case TimeQuality::Invalid:
+        default: return "non sync";
+    }
+}
+
+const char* TimeModule::shortStatusEn_(TimeQuality quality, TimeSource source)
+{
+    (void)source;
+    switch (quality) {
+        case TimeQuality::NtpSynced: return "NTP";
+        case TimeQuality::RtcTrusted: return "RTC";
+        case TimeQuality::Manual: return "manual";
+        case TimeQuality::RtcUntrusted: return "RTC?";
+        case TimeQuality::Invalid:
+        default: return "unsynced";
+    }
+}
+
+bool TimeModule::isTimePlausible_(uint64_t epochSec)
+{
+    if (epochSec == 0ULL) return false;
+    if (epochSec < minPlausibleEpochSec_()) return false;
+    if (epochSec >= kTimeMaxPlausibleEpochSec) return false;
+
+    const time_t t = (time_t)epochSec;
+    if ((uint64_t)t != epochSec) return false;
+    struct tm utc{};
+    if (!gmtime_r(&t, &utc)) return false;
+    const uint16_t year = (uint16_t)(utc.tm_year + 1900);
+    if (year < compileYear_() || year >= kTimeMaxPlausibleYear) return false;
+    uint64_t roundtrip = 0ULL;
+    if (!utcFieldsToEpoch_(year,
+                           (uint8_t)(utc.tm_mon + 1),
+                           (uint8_t)utc.tm_mday,
+                           (uint8_t)utc.tm_hour,
+                           (uint8_t)utc.tm_min,
+                           (uint8_t)utc.tm_sec,
+                           roundtrip)) {
+        return false;
+    }
+    return roundtrip == epochSec;
+}
+
+bool TimeModule::isTimePlausibleSvc_(uint64_t epochSec)
+{
+    return isTimePlausible_(epochSec);
+}
+
+void TimeModule::updateRuntimeStatus_()
+{
+    if (!dataStore) return;
+    setTimeStatus(*dataStore,
+                  activeSource_,
+                  sourceName_(activeSource_),
+                  activeQuality_,
+                  qualityName_(activeQuality_),
+                  timeState_.lastNtpSyncUtc,
+                  timeState_.lastRtcSyncUtc);
+}
+
+void TimeModule::setActiveSource_(TimeSource source, TimeQuality quality)
+{
+    if (activeSource_ == source && activeQuality_ == quality) {
+        updateRuntimeStatus_();
+        return;
+    }
+    activeSource_ = source;
+    activeQuality_ = quality;
+    updateRuntimeStatus_();
+    LOGI("Time source active: %s quality=%s", sourceName_(source), qualityName_(quality));
+}
+
+const char* TimeModule::activeSourceName_() const
+{
+    return sourceName_(activeSource_);
+}
+
+void TimeModule::logTimeJump_(uint64_t oldEpochSec, uint64_t newEpochSec, TimeSource source, TimeQuality quality)
+{
+    if (!isTimePlausible_(oldEpochSec) || !isTimePlausible_(newEpochSec)) return;
+    const int64_t delta = (int64_t)newEpochSec - (int64_t)oldEpochSec;
+    const uint64_t absDelta = (delta < 0) ? (uint64_t)(-delta) : (uint64_t)delta;
+    if (absDelta < (uint64_t)kTimeLargeJumpSeconds && delta >= 0) return;
+    if (delta < 0) {
+        LOGW("Time moved backwards source=%s quality=%s delta_s=%lld old=%llu new=%llu",
+             sourceName_(source),
+             qualityName_(quality),
+             (long long)delta,
+             (unsigned long long)oldEpochSec,
+             (unsigned long long)newEpochSec);
+    } else {
+        LOGW("Large time jump source=%s quality=%s delta_s=%lld old=%llu new=%llu",
+             sourceName_(source),
+             qualityName_(quality),
+             (long long)delta,
+             (unsigned long long)oldEpochSec,
+             (unsigned long long)newEpochSec);
+    }
+}
+
+void TimeModule::recordSource_(TimeSource source, bool available, bool valid, uint64_t epochSec, uint32_t sampledAtMs)
+{
+    SourceSnapshot* snapshot = nullptr;
+    switch (source) {
+        case TimeSource::Ntp: snapshot = &ntpSource_; break;
+        case TimeSource::InternalRtc: snapshot = &internalRtcSource_; break;
+        case TimeSource::NextionManual: snapshot = &nextionSource_; break;
+        case TimeSource::None:
+        default: break;
+    }
+    if (!snapshot) return;
+    snapshot->available = available;
+    snapshot->valid = valid;
+    snapshot->epochSec = valid ? epochSec : 0ULL;
+    snapshot->sampledAtMs = sampledAtMs;
+}
+
+void TimeModule::loadPersistentMeta_()
+{
+    persistentMetaLoaded_ = true;
+    persistentMeta_ = PersistentMeta{};
+    persistentMeta_.magic = kTimeMetaMagic;
+    persistentMeta_.version = kTimeMetaVersion;
+    lastPersistedMeta_ = persistentMeta_;
+    if (!cfgStore) return;
+
+    PersistentMeta stored{};
+    size_t actualLen = 0U;
+    if (!cfgStore->readRuntimeBlob(NvsKeys::Time::MetaBlob, &stored, sizeof(stored), &actualLen) ||
+        actualLen != sizeof(stored) ||
+        stored.magic != kTimeMetaMagic ||
+        stored.version != kTimeMetaVersion) {
+        LOGI("Time metadata absent or incompatible");
+        return;
+    }
+
+    persistentMeta_ = stored;
+    lastPersistedMeta_ = stored;
+    timeState_.lastNtpSyncUtc = stored.lastNtpSyncUtc;
+    LOGI("Time metadata loaded rtc_initialized=%u last_ntp=%lu last_source=%u last_good=%lu",
+         (unsigned)stored.rtcInitialized,
+         (unsigned long)stored.lastNtpSyncUtc,
+         (unsigned)stored.lastKnownGoodSource,
+         (unsigned long)stored.lastKnownGoodTimeUtc);
+}
+
+void TimeModule::persistMetaIfChanged_()
+{
+    if (!cfgStore || !persistentMetaLoaded_) return;
+    persistentMeta_.magic = kTimeMetaMagic;
+    persistentMeta_.version = kTimeMetaVersion;
+    if (memcmp(&persistentMeta_, &lastPersistedMeta_, sizeof(persistentMeta_)) == 0) return;
+    if (cfgStore->writeRuntimeBlob(NvsKeys::Time::MetaBlob, &persistentMeta_, sizeof(persistentMeta_))) {
+        lastPersistedMeta_ = persistentMeta_;
+        LOGI("Time metadata persisted rtc_initialized=%u last_ntp=%lu last_source=%u last_good=%lu",
+             (unsigned)persistentMeta_.rtcInitialized,
+             (unsigned long)persistentMeta_.lastNtpSyncUtc,
+             (unsigned)persistentMeta_.lastKnownGoodSource,
+             (unsigned long)persistentMeta_.lastKnownGoodTimeUtc);
+    } else {
+        LOGW("Time metadata persist failed");
+    }
+}
+
+void TimeModule::noteGoodTime_(TimeSource source, TimeQuality quality, uint64_t epochSec)
+{
+    if (!isTimePlausible_(epochSec)) return;
+    if (quality == TimeQuality::NtpSynced) {
+        timeState_.lastNtpSyncUtc = epochSec;
+        persistentMeta_.lastNtpSyncUtc = (uint32_t)epochSec;
+    }
+    if (source == TimeSource::InternalRtc) {
+        timeState_.lastRtcSyncUtc = epochSec;
+    }
+    if (quality == TimeQuality::NtpSynced || quality == TimeQuality::RtcTrusted || quality == TimeQuality::Manual) {
+        persistentMeta_.lastKnownGoodSource = (uint8_t)source;
+        persistentMeta_.lastKnownGoodTimeUtc = (uint32_t)epochSec;
+        if (source == TimeSource::InternalRtc) {
+            persistentMeta_.rtcInitialized = 1U;
+        }
+    }
+    persistMetaIfChanged_();
+    updateRuntimeStatus_();
+}
+
 TimeSyncState TimeModule::stateSvc_() const {
     return state;
 }
@@ -259,6 +609,33 @@ bool TimeModule::isSynced_() const {
 
 bool TimeModule::isExternalRtc_() const {
     return state == TimeSyncState::Synced && syncedFromExternalRtc_;
+}
+
+TimeSource TimeModule::sourceSvc_() const {
+    return activeSource_;
+}
+
+const char* TimeModule::sourceNameSvc_() const {
+    return activeSourceName_();
+}
+
+TimeQuality TimeModule::qualitySvc_() const {
+    return activeQuality_;
+}
+
+const char* TimeModule::qualityNameSvc_() const {
+    return qualityName_(activeQuality_);
+}
+
+bool TimeModule::currentStateSvc_(TimeState* out) const {
+    if (!out) return false;
+    *out = timeState_;
+    out->currentTimeUtc = (uint64_t)nowEpoch_();
+    return true;
+}
+
+bool TimeModule::weekStartMondaySvc_() const {
+    return cfgData.weekStartMonday;
 }
 
 uint64_t TimeModule::epoch_() const {
@@ -275,12 +652,22 @@ bool TimeModule::formatLocalTime_(char* out, size_t len) const {
     return true;
 }
 
-bool TimeModule::setRtcEpoch_(uint64_t epochSec, bool fromInternalRtc, const char* sourceTag)
+bool TimeModule::setRtcEpoch_(uint64_t epochSec, TimeSource source, TimeQuality quality, const char* sourceTag)
 {
-    if (epochSec < kMinExternalRtcEpochSec) return false;
+    if (!isTimePlausible_(epochSec)) {
+        LOGW("Time rejected from %s: implausible epoch=%llu min=%llu max=%llu",
+             sourceTag ? sourceTag : sourceName_(source),
+             (unsigned long long)epochSec,
+             (unsigned long long)minPlausibleEpochSec_(),
+             (unsigned long long)kTimeMaxPlausibleEpochSec);
+        return false;
+    }
 
     setenv("TZ", cfgData.tz, 1);
     tzset();
+
+    const uint64_t oldEpoch = (uint64_t)nowEpoch_();
+    logTimeJump_(oldEpoch, epochSec, source, quality);
 
     struct timeval tv{};
     tv.tv_sec = (time_t)epochSec;
@@ -291,17 +678,33 @@ bool TimeModule::setRtcEpoch_(uint64_t epochSec, bool fromInternalRtc, const cha
 
     _retryCount = 0;
     _retryDelayMs = 2000;
-    syncedFromExternalRtc_ = true;
-    syncedFromInternalRtc_ = fromInternalRtc;
+    syncedFromExternalRtc_ = (source != TimeSource::Ntp);
+    syncedFromInternalRtc_ = (source == TimeSource::InternalRtc);
+    recordSource_(source, true, true, epochSec, millis());
+    timeState_.valid = true;
+    timeState_.quality = quality;
+    timeState_.source = source;
+    timeState_.currentTimeUtc = epochSec;
+    timeState_.lastUpdateMonotonicMs = (int64_t)millis();
+    setActiveSource_(source, quality);
+    noteGoodTime_(source, quality, epochSec);
     setState(TimeSyncState::Synced);
 #if FLOW_RTC_PCF85063
-    if (fromInternalRtc) {
+    if (source == TimeSource::InternalRtc) {
         lastInternalRtcResyncMs_ = millis();
     }
+    if (source == TimeSource::Ntp || source == TimeSource::NextionManual) {
+        internalRtcWritePending_ = true;
+    }
 #endif
-    LOGI("Time set from %s RTC epoch=%llu",
-         sourceTag ? sourceTag : (fromInternalRtc ? "internal" : "external"),
-         (unsigned long long)epochSec);
+    if (source == TimeSource::InternalRtc || source == TimeSource::Ntp || source == TimeSource::NextionManual) {
+        nextionRtcWritePending_ = true;
+    }
+    LOGI("Time set from %s epoch=%llu source=%s quality=%s",
+         sourceTag ? sourceTag : sourceName_(source),
+         (unsigned long long)epochSec,
+         sourceName_(source),
+         qualityName_(quality));
     return true;
 }
 
@@ -315,18 +718,44 @@ bool TimeModule::setExternalEpoch_(uint64_t epochSec)
         return false;
     }
 #endif
-    return setRtcEpoch_(epochSec, false, "external");
+    return setRtcEpoch_(epochSec, TimeSource::NextionManual, TimeQuality::Manual, "external");
+}
+
+bool TimeModule::setManualEpoch_(uint64_t epochSec)
+{
+    return setManualTimeUtc(epochSec);
+}
+
+bool TimeModule::setManualTimeUtc(uint64_t epochSec)
+{
+    if (!isTimePlausible_(epochSec)) {
+        LOGW("Manual time rejected: implausible epoch=%llu", (unsigned long long)epochSec);
+        return false;
+    }
+    const bool applied = setRtcEpoch_(epochSec, TimeSource::NextionManual, TimeQuality::Manual, "manual");
+    if (!applied) return false;
+#if FLOW_RTC_PCF85063
+    if (ensureInternalRtcInit_()) {
+        if (internalRtcWriteEpoch_(epochSec)) {
+            recordSource_(TimeSource::InternalRtc, true, true, epochSec, millis());
+            persistentMeta_.rtcInitialized = 1U;
+            persistMetaIfChanged_();
+            LOGI("Internal RTC updated from manual time epoch=%llu", (unsigned long long)epochSec);
+        } else {
+            LOGW("Internal RTC update from manual time failed");
+        }
+    }
+#endif
+    if (nextionRtcWriteEpoch_(epochSec)) {
+        nextionRtcWritePending_ = false;
+    } else {
+        LOGW("Nextion RTC update from manual time failed");
+    }
+    LOGI("Manual time accepted epoch=%llu", (unsigned long long)epochSec);
+    return true;
 }
 
 #if FLOW_RTC_PCF85063
-uint32_t TimeModule::dayStampFromEpoch_(uint64_t epochSec)
-{
-    const time_t t = (time_t)epochSec;
-    struct tm local{};
-    if (!localtime_r(&t, &local)) return 0xFFFFFFFFUL;
-    return ((uint32_t)(local.tm_year + 1900) * 1000UL) + (uint32_t)local.tm_yday;
-}
-
 bool TimeModule::internalRtcReadRegs_(uint8_t reg, uint8_t* data, uint8_t len)
 {
     if (!data || len == 0) return false;
@@ -420,6 +849,10 @@ bool TimeModule::internalRtcReadEpoch_(uint64_t& epochSec)
 
     uint8_t buf[7] = {0};
     if (!internalRtcReadRegs_(kPcf85063RegSeconds, buf, sizeof(buf))) return false;
+    if ((buf[0] & 0x80U) != 0U) {
+        LOGW("PCF85063 RTC invalid: seconds OS bit set");
+        return false;
+    }
 
     const uint8_t second = bcdToDec_(buf[0] & 0x7FU);
     const uint8_t minute = bcdToDec_(buf[1] & 0x7FU);
@@ -428,59 +861,60 @@ bool TimeModule::internalRtcReadEpoch_(uint64_t& epochSec)
     const uint8_t month = bcdToDec_(buf[5] & 0x1FU);
     const uint16_t year = (uint16_t)bcdToDec_(buf[6]) + (uint16_t)kPcf85063YearOffset;
 
-    if (year < 2021U || year > 2069U || month < 1U || month > 12U || day < 1U || day > 31U ||
-        hour > 23U || minute > 59U || second > 59U) {
+    if (!utcFieldsToEpoch_(year, month, day, hour, minute, second, epochSec)) {
+        LOGW("PCF85063 RTC implausible UTC %u-%02u-%02u %02u:%02u:%02u",
+             (unsigned)year,
+             (unsigned)month,
+             (unsigned)day,
+             (unsigned)hour,
+             (unsigned)minute,
+             (unsigned)second);
         return false;
     }
-
-    struct tm local{};
-    local.tm_year = (int)year - 1900;
-    local.tm_mon = (int)month - 1;
-    local.tm_mday = (int)day;
-    local.tm_hour = (int)hour;
-    local.tm_min = (int)minute;
-    local.tm_sec = (int)second;
-    local.tm_isdst = -1;
-
-    const time_t converted = mktime(&local);
-    if (converted < (time_t)kMinExternalRtcEpochSec) return false;
-    epochSec = (uint64_t)converted;
     return true;
 }
 
 bool TimeModule::internalRtcWriteEpoch_(uint64_t epochSec)
 {
     if (!ensureInternalRtcInit_()) return false;
-    if (epochSec < (uint64_t)kMinExternalRtcEpochSec) return false;
+    if (!isTimePlausible_(epochSec)) return false;
 
     const time_t t = (time_t)epochSec;
-    struct tm local{};
-    if (!localtime_r(&t, &local)) return false;
+    struct tm utc{};
+    if (!gmtime_r(&t, &utc)) return false;
 
-    const uint16_t year = (uint16_t)(local.tm_year + 1900);
+    const uint16_t year = (uint16_t)(utc.tm_year + 1900);
     if (year < (uint16_t)kPcf85063YearOffset || year > (uint16_t)(kPcf85063YearOffset + 99)) return false;
 
     uint8_t payload[7] = {
-        decToBcd_((uint8_t)local.tm_sec),
-        decToBcd_((uint8_t)local.tm_min),
-        decToBcd_((uint8_t)local.tm_hour),
-        decToBcd_((uint8_t)local.tm_mday),
-        decToBcd_((uint8_t)local.tm_wday),
-        decToBcd_((uint8_t)(local.tm_mon + 1)),
+        decToBcd_((uint8_t)utc.tm_sec),
+        decToBcd_((uint8_t)utc.tm_min),
+        decToBcd_((uint8_t)utc.tm_hour),
+        decToBcd_((uint8_t)utc.tm_mday),
+        decToBcd_((uint8_t)utc.tm_wday),
+        decToBcd_((uint8_t)(utc.tm_mon + 1)),
         decToBcd_((uint8_t)(year - (uint16_t)kPcf85063YearOffset))
     };
     return internalRtcWriteRegs_(kPcf85063RegSeconds, payload, sizeof(payload));
 }
 
+bool TimeModule::internalRtcBatteryPresent_()
+{
+    // TODO hardware: wire this to a real board-specific VBAT/battery-present bit
+    // if the target exposes one. PCF85063 OS=0 only proves the clock did not
+    // report an oscillator stop; it is not a physical battery detector.
+    return true;
+}
+
 void TimeModule::serviceInternalRtcFallback_(uint32_t nowMs)
 {
     if (!ensureInternalRtcInit_()) return;
-    if (syncedFromInternalRtc_) return;
-    if (state == TimeSyncState::Synced && !syncedFromExternalRtc_) return;
+    if (activeSource_ == TimeSource::InternalRtc) return;
+    if (state == TimeSyncState::Synced && activeSource_ == TimeSource::Ntp) return;
 
     bool immediateFallback = false;
     if (state == TimeSyncState::Disabled) immediateFallback = true;
-    if (state == TimeSyncState::Synced && syncedFromExternalRtc_ && !syncedFromInternalRtc_) immediateFallback = true;
+    if (state == TimeSyncState::Synced && activeSource_ == TimeSource::NextionManual) immediateFallback = true;
 
     if (!immediateFallback && nowMs < kInternalRtcFallbackDelayMs) return;
     if (lastInternalRtcReadAttemptMs_ != 0U &&
@@ -490,8 +924,18 @@ void TimeModule::serviceInternalRtcFallback_(uint32_t nowMs)
     lastInternalRtcReadAttemptMs_ = nowMs;
 
     uint64_t rtcEpoch = 0ULL;
-    if (!internalRtcReadEpoch_(rtcEpoch)) return;
-    if (setRtcEpoch_(rtcEpoch, true, "internal")) {
+    if (!internalRtcReadEpoch_(rtcEpoch)) {
+        recordSource_(TimeSource::InternalRtc, internalRtcReady_, false, 0ULL, nowMs);
+        LOGW("Internal RTC read rejected: invalid or implausible");
+        return;
+    }
+    if (!internalRtcBatteryPresent_()) {
+        recordSource_(TimeSource::InternalRtc, true, false, rtcEpoch, nowMs);
+        LOGW("Internal RTC refused: battery/power-retention not present");
+        return;
+    }
+    recordSource_(TimeSource::InternalRtc, true, true, rtcEpoch, nowMs);
+    if (setRtcEpoch_(rtcEpoch, TimeSource::InternalRtc, TimeQuality::RtcTrusted, "internal")) {
         char localBuf[32] = {0};
         (void)formatLocalTime_(localBuf, sizeof(localBuf));
         LOGI("Internal RTC fallback applied at %s", localBuf);
@@ -501,10 +945,10 @@ void TimeModule::serviceInternalRtcFallback_(uint32_t nowMs)
 void TimeModule::serviceInternalRtcWriteBack_(uint32_t nowMs)
 {
     if (!ensureInternalRtcInit_()) return;
-    if (state != TimeSyncState::Synced || syncedFromInternalRtc_) return;
+    if (state != TimeSyncState::Synced || activeSource_ != TimeSource::Ntp) return;
 
     const uint64_t epoch = (uint64_t)nowEpoch_();
-    const uint32_t dayStamp = dayStampFromEpoch_(epoch);
+    const uint32_t dayStamp = dayStampFromEpochLocal_(epoch);
     if (dayStamp == 0xFFFFFFFFUL) return;
 
     const bool dayChanged = (dayStamp != lastInternalRtcWriteDayStamp_);
@@ -518,7 +962,14 @@ void TimeModule::serviceInternalRtcWriteBack_(uint32_t nowMs)
     if (internalRtcWriteEpoch_(epoch)) {
         lastInternalRtcWriteDayStamp_ = dayStamp;
         internalRtcWritePending_ = false;
+        recordSource_(TimeSource::InternalRtc, true, true, epoch, nowMs);
+        timeState_.lastRtcSyncUtc = epoch;
+        persistentMeta_.rtcInitialized = 1U;
+        persistMetaIfChanged_();
+        updateRuntimeStatus_();
         LOGI("Internal RTC updated from ESP epoch=%llu", (unsigned long long)epoch);
+    } else {
+        LOGW("Internal RTC update from ESP failed epoch=%llu", (unsigned long long)epoch);
     }
 }
 
@@ -533,11 +984,186 @@ void TimeModule::serviceInternalRtcDailyResync_(uint32_t nowMs)
     lastInternalRtcResyncMs_ = nowMs;
 
     uint64_t rtcEpoch = 0ULL;
-    if (!internalRtcReadEpoch_(rtcEpoch)) return;
-    (void)setRtcEpoch_(rtcEpoch, true, "internal");
+    if (!internalRtcReadEpoch_(rtcEpoch)) {
+        recordSource_(TimeSource::InternalRtc, internalRtcReady_, false, 0ULL, nowMs);
+        return;
+    }
+    if (!internalRtcBatteryPresent_()) {
+        recordSource_(TimeSource::InternalRtc, true, false, rtcEpoch, nowMs);
+        LOGW("Internal RTC daily re-sync refused: battery/power-retention not present");
+        return;
+    }
+    recordSource_(TimeSource::InternalRtc, true, true, rtcEpoch, nowMs);
+    (void)setRtcEpoch_(rtcEpoch, TimeSource::InternalRtc, TimeQuality::RtcTrusted, "internal");
     LOGI("Internal RTC daily re-sync applied epoch=%llu", (unsigned long long)rtcEpoch);
 }
 #endif
+
+bool TimeModule::ensureHmiService_()
+{
+    if (hmiSvc_ && hmiSvc_->readRtc && hmiSvc_->writeRtc) return true;
+    if (!services_) return false;
+    hmiSvc_ = services_->get<HmiService>(ServiceId::Hmi);
+    return hmiSvc_ && hmiSvc_->readRtc && hmiSvc_->writeRtc;
+}
+
+bool TimeModule::epochToHmiRtc_(uint64_t epochSec, HmiRtcDateTime& out)
+{
+    out = HmiRtcDateTime{};
+    if (!isTimePlausible_(epochSec)) return false;
+    const time_t t = (time_t)epochSec;
+    struct tm local{};
+    if (!localtime_r(&t, &local)) return false;
+    out.year = (uint16_t)(local.tm_year + 1900);
+    out.month = (uint8_t)(local.tm_mon + 1);
+    out.day = (uint8_t)local.tm_mday;
+    out.hour = (uint8_t)local.tm_hour;
+    out.minute = (uint8_t)local.tm_min;
+    out.second = (uint8_t)local.tm_sec;
+    return isValidRtcDate_(out.year, out.month, out.day, out.hour, out.minute, out.second);
+}
+
+bool TimeModule::nextionRtcReadEpoch_(uint64_t& epochSec)
+{
+    epochSec = 0ULL;
+    if (!ensureHmiService_() || !hmiSvc_->readRtc) return false;
+    if (hmiSvc_->isDisplaySleeping && hmiSvc_->isDisplaySleeping(hmiSvc_->ctx)) return false;
+
+    HmiRtcDateTime rtc{};
+    if (!hmiSvc_->readRtc(hmiSvc_->ctx, &rtc, kNextionRtcReadTimeoutMs)) return false;
+    if (!localFieldsToEpoch_(rtc.year, rtc.month, rtc.day, rtc.hour, rtc.minute, rtc.second, epochSec)) {
+        LOGW("Nextion manual RTC invalid %u-%02u-%02u %02u:%02u:%02u",
+             (unsigned)rtc.year,
+             (unsigned)rtc.month,
+             (unsigned)rtc.day,
+             (unsigned)rtc.hour,
+             (unsigned)rtc.minute,
+             (unsigned)rtc.second);
+        return false;
+    }
+    recordSource_(TimeSource::NextionManual, true, true, epochSec, millis());
+    return true;
+}
+
+bool TimeModule::nextionRtcWriteEpoch_(uint64_t epochSec)
+{
+    if (!ensureHmiService_() || !hmiSvc_->writeRtc) return false;
+    if (hmiSvc_->isDisplaySleeping && hmiSvc_->isDisplaySleeping(hmiSvc_->ctx)) return false;
+
+    HmiRtcDateTime rtc{};
+    if (!epochToHmiRtc_(epochSec, rtc)) return false;
+    if (!hmiSvc_->writeRtc(hmiSvc_->ctx, &rtc)) return false;
+    recordSource_(TimeSource::NextionManual, true, true, epochSec, millis());
+    LOGI("Nextion RTC updated %u-%02u-%02u %02u:%02u:%02u",
+         (unsigned)rtc.year,
+         (unsigned)rtc.month,
+         (unsigned)rtc.day,
+         (unsigned)rtc.hour,
+         (unsigned)rtc.minute,
+         (unsigned)rtc.second);
+    return true;
+}
+
+bool TimeModule::parseManualTime_(const char* text, uint64_t& epochSec)
+{
+    epochSec = 0ULL;
+    if (!text || text[0] == '\0') return false;
+
+    unsigned year = 0;
+    unsigned month = 0;
+    unsigned day = 0;
+    unsigned hour = 0;
+    unsigned minute = 0;
+    unsigned second = 0;
+    if (sscanf(text, "%u-%u-%u %u:%u:%u", &year, &month, &day, &hour, &minute, &second) != 6) {
+        if (sscanf(text, "%u-%u-%uT%u:%u:%u", &year, &month, &day, &hour, &minute, &second) != 6) {
+            return false;
+        }
+    }
+    if (year > 2099U || month > 255U || day > 255U || hour > 255U || minute > 255U || second > 255U) return false;
+    return localFieldsToEpoch_((uint16_t)year,
+                               (uint8_t)month,
+                               (uint8_t)day,
+                               (uint8_t)hour,
+                               (uint8_t)minute,
+                               (uint8_t)second,
+                               epochSec);
+}
+
+void TimeModule::serviceManualTimeConfig_(uint32_t nowMs)
+{
+    if (strncmp(manualTimeApplied_, cfgData.manualTime, sizeof(manualTimeApplied_)) == 0) return;
+    if (cfgData.manualTime[0] == '\0') {
+        manualTimeApplied_[0] = '\0';
+        return;
+    }
+    if (lastManualTimeAttemptMs_ != 0U &&
+        (uint32_t)(nowMs - lastManualTimeAttemptMs_) < kNextionRtcWriteRetryMs) {
+        return;
+    }
+    lastManualTimeAttemptMs_ = nowMs;
+
+    uint64_t epoch = 0ULL;
+    if (!parseManualTime_(cfgData.manualTime, epoch)) {
+        LOGW("manual_time invalid, expected YYYY-MM-DD HH:MM:SS value=%s", cfgData.manualTime);
+        return;
+    }
+    if (!setManualTimeUtc(epoch)) {
+        LOGW("manual_time rejected value=%s", cfgData.manualTime);
+        return;
+    }
+
+    snprintf(manualTimeApplied_, sizeof(manualTimeApplied_), "%s", cfgData.manualTime);
+}
+
+void TimeModule::serviceNextionFallback_(uint32_t nowMs)
+{
+    if (state == TimeSyncState::Synced &&
+        (activeSource_ == TimeSource::Ntp || activeSource_ == TimeSource::InternalRtc || activeSource_ == TimeSource::NextionManual)) {
+        return;
+    }
+
+    if (nowMs < kNextionRtcFallbackDelayMs) return;
+    if (lastNextionRtcReadAttemptMs_ != 0U &&
+        (uint32_t)(nowMs - lastNextionRtcReadAttemptMs_) < kNextionRtcFallbackRetryMs) {
+        return;
+    }
+    lastNextionRtcReadAttemptMs_ = nowMs;
+
+    uint64_t rtcEpoch = 0ULL;
+    if (!nextionRtcReadEpoch_(rtcEpoch)) {
+        recordSource_(TimeSource::NextionManual, hmiSvc_ != nullptr, false, 0ULL, nowMs);
+        return;
+    }
+    if (setRtcEpoch_(rtcEpoch, TimeSource::NextionManual, TimeQuality::Manual, "nextion-manual")) {
+        char localBuf[32] = {0};
+        (void)formatLocalTime_(localBuf, sizeof(localBuf));
+        LOGI("Nextion manual RTC fallback applied at %s", localBuf);
+    }
+}
+
+void TimeModule::serviceNextionWriteBack_(uint32_t nowMs)
+{
+    if (state != TimeSyncState::Synced) return;
+    if (activeSource_ != TimeSource::Ntp && activeSource_ != TimeSource::InternalRtc) return;
+
+    const uint64_t epoch = (uint64_t)nowEpoch_();
+    const uint32_t dayStamp = dayStampFromEpochLocal_(epoch);
+    if (dayStamp == 0xFFFFFFFFUL) return;
+
+    const bool dayChanged = (dayStamp != lastNextionRtcWriteDayStamp_);
+    if (!nextionRtcWritePending_ && !dayChanged) return;
+    if (lastNextionRtcWriteAttemptMs_ != 0U &&
+        (uint32_t)(nowMs - lastNextionRtcWriteAttemptMs_) < kNextionRtcWriteRetryMs) {
+        return;
+    }
+    lastNextionRtcWriteAttemptMs_ = nowMs;
+
+    if (nextionRtcWriteEpoch_(epoch)) {
+        lastNextionRtcWriteDayStamp_ = dayStamp;
+        nextionRtcWritePending_ = false;
+    }
+}
 
 bool TimeModule::setSlotSvc_(const TimeSchedulerSlot* slotDef)
 {
@@ -627,11 +1253,13 @@ void TimeModule::init(ConfigStore& cfg, ServiceRegistry& services) {
     constexpr uint8_t kCfgBranchId = kTimeCfgBranch;
     constexpr uint8_t kSchedCfgBranchId = kTimeSchedulerCfgBranch;
     cfgStore = &cfg;
+    services_ = &services;
 
     cfg.registerVar(server1Var, kCfgModuleId, kCfgBranchId);
     cfg.registerVar(server2Var, kCfgModuleId, kCfgBranchId);
     cfg.registerVar(tzVar, kCfgModuleId, kCfgBranchId);
     cfg.registerVar(enabledVar, kCfgModuleId, kCfgBranchId);
+    cfg.registerVar(manualTimeVar, kCfgModuleId, kCfgBranchId);
     cfg.registerVar(weekStartMondayVar, kCfgModuleId, kCfgBranchId);
     cfg.registerVar(scheduleBlobVar, kCfgModuleId, kSchedCfgBranchId);
 
@@ -674,6 +1302,23 @@ void TimeModule::init(ConfigStore& cfg, ServiceRegistry& services) {
     _retryDelayMs = 2000;
     syncedFromExternalRtc_ = false;
     syncedFromInternalRtc_ = false;
+    activeSource_ = TimeSource::None;
+    activeQuality_ = TimeQuality::Invalid;
+    timeState_ = TimeState{};
+    timeState_.lastUpdateMonotonicMs = (int64_t)millis();
+    persistentMetaLoaded_ = false;
+    loadPersistentMeta_();
+    ntpSource_ = SourceSnapshot{};
+    internalRtcSource_ = SourceSnapshot{};
+    nextionSource_ = SourceSnapshot{};
+    lastNextionRtcReadAttemptMs_ = 0;
+    lastNextionRtcWriteAttemptMs_ = 0;
+    lastNextionRtcWriteDayStamp_ = 0xFFFFFFFFUL;
+    nextionRtcWritePending_ = false;
+    manualTimeApplied_[0] = '\0';
+    lastManualTimeAttemptMs_ = 0;
+    updateRuntimeStatus_();
+    LOGI("Boot without valid time yet quality=%s", qualityName_(activeQuality_));
 #if FLOW_RTC_PCF85063
     internalRtcInitDone_ = false;
     internalRtcReady_ = false;
@@ -700,6 +1345,10 @@ void TimeModule::onConfigLoaded(ConfigStore&, ServiceRegistry& services)
 {
     setenv("TZ", cfgData.tz, 1);
     tzset();
+    snprintf(manualTimeApplied_, sizeof(manualTimeApplied_), "%s", cfgData.manualTime);
+    if (cfgData.manualTime[0] != '\0') {
+        LOGI("Persisted manual_time ignored at boot; waiting for a new manual update");
+    }
 
     if (!cfgMqttPub_) {
         cfgMqttPub_ = new (std::nothrow) MqttConfigRouteProducer();
@@ -739,6 +1388,19 @@ void TimeModule::loop() {
         if (state != TimeSyncState::Synced && state != TimeSyncState::Disabled) {
             setState(TimeSyncState::Disabled);
         }
+#if FLOW_RTC_PCF85063
+        {
+            const uint32_t rtcNowMs = millis();
+            serviceInternalRtcFallback_(rtcNowMs);
+            serviceInternalRtcDailyResync_(rtcNowMs);
+        }
+#endif
+        {
+            const uint32_t rtcNowMs = millis();
+            serviceManualTimeConfig_(rtcNowMs);
+            serviceNextionFallback_(rtcNowMs);
+            serviceNextionWriteBack_(rtcNowMs);
+        }
         tickScheduler_();
         vTaskDelay(pdMS_TO_TICKS(2000));
         return;
@@ -768,17 +1430,17 @@ void TimeModule::loop() {
             formatLocalTime_(buf, sizeof(buf));
             LOGI("Synced ok: %s", buf);
 
-            _retryCount = 0;
-            _retryDelayMs = 2000;
-            syncedFromExternalRtc_ = false;
-            syncedFromInternalRtc_ = false;
-#if FLOW_RTC_PCF85063
-            internalRtcWritePending_ = true;
-#endif
-
-            setState(TimeSyncState::Synced);
+            const uint64_t ntpEpoch = (uint64_t)nowEpoch_();
+            if (!setRtcEpoch_(ntpEpoch, TimeSource::Ntp, TimeQuality::NtpSynced, "ntp")) {
+                LOGW("NTP time rejected epoch=%llu", (unsigned long long)ntpEpoch);
+                recordSource_(TimeSource::Ntp, true, false, 0ULL, millis());
+                setState(syncedFromExternalRtc_ ? TimeSyncState::Synced : TimeSyncState::ErrorWait);
+            } else {
+                LOGI("NTP sync succeeded epoch=%llu", (unsigned long long)ntpEpoch);
+            }
         } else {
             LOGW("Sync failed -> retry in %lu ms", (unsigned long)_retryDelayMs);
+            recordSource_(TimeSource::Ntp, _netReady, false, 0ULL, millis());
             if (syncedFromExternalRtc_) {
                 LOGW("Keeping RTC time after NTP failure");
                 setState(TimeSyncState::Synced);
@@ -833,6 +1495,12 @@ void TimeModule::loop() {
     serviceInternalRtcWriteBack_(rtcNowMs);
     serviceInternalRtcDailyResync_(rtcNowMs);
 #endif
+    {
+        const uint32_t rtcNowMs = millis();
+        serviceManualTimeConfig_(rtcNowMs);
+        serviceNextionFallback_(rtcNowMs);
+        serviceNextionWriteBack_(rtcNowMs);
+    }
 
     tickScheduler_();
     vTaskDelay(pdMS_TO_TICKS(250));
@@ -908,13 +1576,14 @@ bool TimeModule::handleCmdSchedInfo_(const CommandRequest&, char* reply, size_t 
     const uint8_t used = usedCount_();
     snprintf(reply, replyLen,
              "{\"ok\":true,\"state\":%u,\"synced\":%s,\"used\":%u,\"active_mask\":%u,"
-             "\"active_mask_hex\":\"0x%04X\",\"week_start\":\"%s\",\"now\":\"%s\"}",
+             "\"active_mask_hex\":\"0x%04X\",\"week_start\":\"%s\",\"source\":\"%s\",\"now\":\"%s\"}",
              (unsigned)state,
              (state == TimeSyncState::Synced) ? "true" : "false",
              (unsigned)used,
              (unsigned)mask,
              (unsigned)mask,
              cfgData.weekStartMonday ? "monday" : "sunday",
+             activeSourceName_(),
              now);
     return true;
 }
@@ -1203,6 +1872,7 @@ void TimeModule::onEvent(const Event& e)
             if (p->localBranchId == kTimeCfgBranch) {
                 setenv("TZ", cfgData.tz, 1);
                 tzset();
+                lastManualTimeAttemptMs_ = 0;
             }
         }
         return;
@@ -1234,14 +1904,7 @@ time_t TimeModule::nowEpoch_() const
     const uint32_t secInMonth = (uint32_t)daysInMonthFastClock(year, month1) * 86400UL;
     const uint64_t secIntoMonth = (remMs * (uint64_t)secInMonth) / (uint64_t)FASTCLK_REAL_MS_PER_MONTH;
 
-    struct tm start{};
-    start.tm_year = year - 1900;
-    start.tm_mon = month1 - 1;
-    start.tm_mday = 1;
-    start.tm_hour = 0;
-    start.tm_min = 0;
-    start.tm_sec = 0;
-    time_t startEpoch = mktime(&start);
+    const time_t startEpoch = (time_t)utcFieldsToEpochUnchecked_((uint16_t)year, (uint8_t)month1, 1U, 0U, 0U, 0U);
     if (startEpoch <= 0) return FASTCLK_START_EPOCH_FALLBACK;
     return startEpoch + (time_t)secIntoMonth;
 #else
@@ -1581,8 +2244,7 @@ void TimeModule::tickScheduler_()
     if (state != TimeSyncState::Synced) return;
 
     time_t now = nowEpoch_();
-    static constexpr time_t SCHED_MIN_VALID_EPOCH = (time_t)1609459200; // 2021-01-01
-    if (now < SCHED_MIN_VALID_EPOCH) return;
+    if (!isTimePlausible_((uint64_t)now)) return;
 
     struct tm localNow;
     if (!localtime_r(&now, &localNow)) return;

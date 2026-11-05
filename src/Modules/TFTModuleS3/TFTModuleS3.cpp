@@ -25,7 +25,7 @@
 #include "Core/Services/IAlarm.h"
 #include "Core/SystemLimits.h"
 #include "Core/SystemStats.h"
-#include "Domain/Pool/PoolBindings.h"
+#include "Domain/Pool/PoolIds.h"
 #include "Modules/IOModule/IORuntime.h"
 #include "Modules/Network/MQTTModule/MQTTRuntime.h"
 #include "Modules/Network/WifiModule/WifiRuntime.h"
@@ -274,12 +274,12 @@ const SupervisorBoardSpec& fallbackBoardSpec_()
             1,
             0,
             0,
-            1,
             21,
             45,
-            2,
-            -1,
+            1,
             47,
+            -1,
+            2,
             48,
             false,
             true,
@@ -409,11 +409,6 @@ TFTModuleS3::TFTModuleS3(const BoardSpec& board)
     : displayCfg_(displaySpecFromBoard_(board)),
       display_(&spiBus_, displayCfg_.csPin, displayCfg_.dcPin, displayCfg_.rstPin)
 {
-    const SupervisorBoardSpec* sup = boardSupervisorConfig(board);
-    const SupervisorBoardSpec& cfg = sup ? *sup : fallbackBoardSpec_();
-    cfgData_.motionGpio = cfg.inputs.pirPin;
-    pirDebounceMs_ = cfg.inputs.pirDebounceMs;
-    pirActiveHigh_ = cfg.inputs.pirActiveHigh;
     lastMotionMs_ = millis();
 
     for (uint8_t i = 0; i < DashboardSlotCount; ++i) {
@@ -509,7 +504,7 @@ void TFTModuleS3::init(ConfigStore& cfg, ServiceRegistry& services)
     constexpr uint8_t module = (uint8_t)ConfigModuleId::TftS3;
     cfg.registerVar(enabledVar_, module, kCfgBranch);
     cfg.registerVar(autoOffVar_, module, kCfgBranch);
-    cfg.registerVar(motionGpioVar_, module, kCfgBranch);
+    cfg.registerVar(motionIoIdVar_, module, kCfgBranch);
 
     for (uint8_t i = 0; i < DashboardSlotCount; ++i) {
         const uint8_t branch = (uint8_t)(kCfgBranchSensorBase + i);
@@ -541,6 +536,7 @@ void TFTModuleS3::init(ConfigStore& cfg, ServiceRegistry& services)
 
 void TFTModuleS3::onConfigLoaded(ConfigStore&, ServiceRegistry& services)
 {
+    if (!ioSvc_) ioSvc_ = services.get<IOServiceV2>(ServiceId::Io);
     if (!cfgMqttPubConfigured_) {
         cfgMqttPub_.configure(this,
                               kCfgProducerId,
@@ -549,7 +545,7 @@ void TFTModuleS3::onConfigLoaded(ConfigStore&, ServiceRegistry& services)
                               services);
         cfgMqttPubConfigured_ = true;
     }
-    updateMotionInput_();
+    resetMotionInput_();
     redrawRequested_ = true;
 }
 
@@ -600,7 +596,7 @@ void TFTModuleS3::onEvent_(const Event& e)
     if (e.id == EventId::ConfigChanged && e.payload && e.len >= sizeof(ConfigChangedPayload)) {
         const ConfigChangedPayload* p = static_cast<const ConfigChangedPayload*>(e.payload);
         if (p->moduleId == (uint8_t)ConfigModuleId::TftS3) {
-            updateMotionInput_();
+            resetMotionInput_();
             invalidateRenderCache_();
             redrawRequested_ = true;
         }
@@ -658,40 +654,46 @@ void TFTModuleS3::applyBacklight_(bool on)
     }
 }
 
-void TFTModuleS3::updateMotionInput_()
+void TFTModuleS3::resetMotionInput_()
 {
-    int32_t pin = cfgData_.motionGpio;
-    if (pin < 0 || pin > 48) pin = -1;
-    if (motionInputConfigured_ && appliedMotionGpio_ == pin) return;
-
-    appliedMotionGpio_ = pin;
-    motionInputConfigured_ = (pin >= 0);
-    pirRawState_ = false;
-    pirStableState_ = false;
-    pirDebounceChangedAtMs_ = millis();
-    if (motionInputConfigured_) {
-        pinMode((uint8_t)appliedMotionGpio_, INPUT);
-        lastMotionMs_ = millis();
-    }
+    motionInputReady_ = false;
+    motionReadErrorLogged_ = false;
+    lastMotionMs_ = millis();
+    if (cfgData_.enabled && displayReady_) applyBacklight_(true);
 }
 
 void TFTModuleS3::updateBacklight_()
 {
-    if (!cfgData_.autoOff60s || !motionInputConfigured_) {
+    if (!cfgData_.autoOff60s) {
         applyBacklight_(true);
         return;
     }
 
     const uint32_t now = millis();
-    const bool rawActive = (digitalRead((uint8_t)appliedMotionGpio_) == (pirActiveHigh_ ? HIGH : LOW));
-    if (rawActive != pirRawState_) {
-        pirRawState_ = rawActive;
-        pirDebounceChangedAtMs_ = now;
+    uint8_t motionActive = 0U;
+    IoStatus status = IO_ERR_INVALID_ARG;
+    if (cfgData_.motionIoId >= IO_ID_DI_BASE && cfgData_.motionIoId < IO_ID_AI_BASE) {
+        status = (ioSvc_ && ioSvc_->readDigital)
+            ? ioSvc_->readDigital(ioSvc_->ctx, cfgData_.motionIoId, &motionActive, nullptr, nullptr)
+            : IO_ERR_NOT_READY;
     }
-    if ((now - pirDebounceChangedAtMs_) >= pirDebounceMs_ && pirStableState_ != pirRawState_) {
-        pirStableState_ = pirRawState_;
-        if (pirStableState_) lastMotionMs_ = now;
+    if (status != IO_OK) {
+        if (!motionReadErrorLogged_) {
+            LOGW("TFT motion input unavailable io_id=%u status=%u; backlight forced on",
+                 (unsigned)cfgData_.motionIoId,
+                 (unsigned)status);
+            motionReadErrorLogged_ = true;
+        }
+        motionInputReady_ = false;
+        lastMotionMs_ = now;
+        applyBacklight_(true);
+        return;
     }
+
+    if (!motionInputReady_) lastMotionMs_ = now;
+    motionInputReady_ = true;
+    motionReadErrorLogged_ = false;
+    if (motionActive != 0U) lastMotionMs_ = now;
     applyBacklight_((now - lastMotionMs_) < kBacklightTimeoutMs);
 }
 
@@ -1328,12 +1330,16 @@ bool TFTModuleS3::readRuntimeValue_(RuntimeUiId runtimeId, RuntimeValue& out) co
 
         case ModuleId::Io:
             switch (valueId) {
-                case 1: return readIoValue_(PoolBinding::kSensorBindings[PoolBinding::kSensorSlotWaterTemp].ioId, out);
-                case 2: return readIoValue_(PoolBinding::kSensorBindings[PoolBinding::kSensorSlotAirTemp].ioId, out);
-                case 3: return readIoValue_(PoolBinding::kSensorBindings[PoolBinding::kSensorSlotPh].ioId, out);
-                case 4: return readIoValue_(PoolBinding::kSensorBindings[PoolBinding::kSensorSlotOrp].ioId, out);
-                case 5: return readIoValue_(PoolBinding::kSensorBindings[PoolBinding::kSensorSlotWaterCounter].ioId, out);
-                case 6: return readIoValue_(PoolBinding::kSensorBindings[PoolBinding::kSensorSlotPsi].ioId, out);
+                case 1: return readIoValue_(ioIdFromSlot(analogInputSlot(4)), out);
+                case 2: return readIoValue_(ioIdFromSlot(analogInputSlot(5)), out);
+                case 3: return readIoValue_(ioIdFromSlot(analogInputSlot(1)), out);
+                case 4: return readIoValue_(ioIdFromSlot(analogInputSlot(0)), out);
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+                case 5: return readIoValue_(ioIdFromSlot(digitalInputSlot(12)), out);
+#else
+                case 5: return readIoValue_(ioIdFromSlot(digitalInputSlot(3)), out);
+#endif
+                case 6: return readIoValue_(ioIdFromSlot(analogInputSlot(2)), out);
                 case 7: return readIoBackendValue_(IO_BACKEND_BMP280, 0U, out);
                 case 8: return readIoBackendValue_(IO_BACKEND_BME680, 0U, out);
                 case 9: return readIoBackendValue_(IO_BACKEND_BMP280, 1U, out);
@@ -1431,10 +1437,10 @@ bool TFTModuleS3::readRuntimeValue_(RuntimeUiId runtimeId, RuntimeValue& out) co
         case ModuleId::PoolDevice: {
             if (!ds) return false;
             uint8_t deviceSlot = 0xFFU;
-            if (valueId == 1U) deviceSlot = PoolBinding::kDeviceSlotFiltrationPump;
-            else if (valueId == 2U) deviceSlot = PoolBinding::kDeviceSlotPhPump;
-            else if (valueId == 3U) deviceSlot = PoolBinding::kDeviceSlotChlorinePump;
-            else if (valueId == 4U) deviceSlot = PoolBinding::kDeviceSlotRobot;
+            if (valueId == 1U) deviceSlot = PoolIds::DeviceFiltrationPump;
+            else if (valueId == 2U) deviceSlot = PoolIds::DevicePhPump;
+            else if (valueId == 3U) deviceSlot = PoolIds::DeviceChlorinePump;
+            else if (valueId == 4U) deviceSlot = PoolIds::DeviceRobot;
             else return false;
 
             PoolDeviceRuntimeStateEntry state{};
@@ -1712,7 +1718,7 @@ bool TFTModuleS3::loadPoolModeFlags_(bool& autoMode,
 
     char moduleJson[320] = {0};
     bool truncated = false;
-    if (!cfgStore_->toJsonModule("poollogic/mode", moduleJson, sizeof(moduleJson), &truncated, true) || truncated) return false;
+    if (!cfgStore_->toJsonModule("poollogic/modes", moduleJson, sizeof(moduleJson), &truncated, true) || truncated) return false;
 
     StaticJsonDocument<384> doc;
     if (deserializeJson(doc, moduleJson)) return false;
@@ -1720,9 +1726,27 @@ bool TFTModuleS3::loadPoolModeFlags_(bool& autoMode,
     if (root.isNull()) return false;
     autoMode = root["auto_mode"] | false;
     winterMode = root["winter_mode"] | false;
-    phAutoMode = root["ph_auto_mode"] | false;
-    orpAutoMode = root["orp_auto_mode"] | false;
-    swgAutoMode = root["elec_mode"] | false;
+    swgAutoMode = ((root["disinfection_type"] | 0) == 1);
+
+    memset(moduleJson, 0, sizeof(moduleJson));
+    truncated = false;
+    if (cfgStore_->toJsonModule("poollogic/ph", moduleJson, sizeof(moduleJson), &truncated, true) && !truncated) {
+        StaticJsonDocument<128> phDoc;
+        if (!deserializeJson(phDoc, moduleJson)) {
+            JsonObjectConst phRoot = phDoc.as<JsonObjectConst>();
+            if (!phRoot.isNull()) phAutoMode = phRoot["ph_auto_mode"] | false;
+        }
+    }
+
+    memset(moduleJson, 0, sizeof(moduleJson));
+    truncated = false;
+    if (cfgStore_->toJsonModule("poollogic/chlorine", moduleJson, sizeof(moduleJson), &truncated, true) && !truncated) {
+        StaticJsonDocument<128> disDoc;
+        if (!deserializeJson(disDoc, moduleJson)) {
+            JsonObjectConst disRoot = disDoc.as<JsonObjectConst>();
+            if (!disRoot.isNull()) orpAutoMode = disRoot["dis_auto_mode"] | false;
+        }
+    }
     return true;
 }
 

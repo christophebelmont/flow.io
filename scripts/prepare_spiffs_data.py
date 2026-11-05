@@ -2,6 +2,7 @@ from pathlib import Path
 import gzip
 import shutil
 import os
+import re
 import subprocess
 
 Import("env")
@@ -25,6 +26,35 @@ except Exception:
     cfgdocs_profile = ""
 
 
+def _cpp_define_enabled(name):
+    for define in env.get("CPPDEFINES", []):
+        if isinstance(define, (tuple, list)) and define:
+            if str(define[0]) != name:
+                continue
+            value = define[1] if len(define) > 1 else 1
+            return str(value).strip().lower() not in ("", "0", "false", "off")
+        token = str(define).strip()
+        if token == name:
+            return True
+        if token.startswith(name + "="):
+            return token.split("=", 1)[1].strip().lower() not in ("", "0", "false", "off")
+
+    try:
+        raw_flags = env.GetProjectOption("build_flags")
+    except Exception:
+        raw_flags = ""
+    if isinstance(raw_flags, (tuple, list)):
+        raw_flags = " ".join(str(flag) for flag in raw_flags)
+    match = re.search(r"(?:^|\s)-D\s*" + re.escape(name) + r"(?:=([^\s]+))?", str(raw_flags))
+    if match:
+        value = match.group(1) if match.group(1) is not None else "1"
+        return value.strip().lower() not in ("", "0", "false", "off")
+    return False
+
+
+cfgdocs_tft_enabled = _cpp_define_enabled("FLOW_ENABLE_TFT_S3")
+
+
 def _run_step(cmd):
     print(f"[prepare_spiffs_data] run: {' '.join(cmd)}")
     step_env = os.environ.copy()
@@ -32,6 +62,7 @@ def _run_step(cmd):
         step_env["PIOENV"] = pio_env
     if cfgdocs_profile:
         step_env["FLOW_CFGDOC_PROFILE"] = cfgdocs_profile
+    step_env["FLOW_CFGDOC_TFT_ENABLED"] = "1" if cfgdocs_tft_enabled else "0"
     subprocess.run(cmd, cwd=str(project_dir), check=True, env=step_env)
 
 if src_dir.exists():

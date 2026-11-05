@@ -12,7 +12,8 @@
 #include "Core/EventBus/EventPayloads.h"
 #include "Core/AlarmIds.h"
 #include "Core/Generated/RuntimeUiAlarmText_Generated.h"
-#include "Domain/Pool/PoolBindings.h"
+#include "Core/SystemLimits.h"
+#include "Domain/Pool/PoolIds.h"
 #include "Domain/Pool/PoolDefaults.h"
 #include "Modules/IOModule/IORuntime.h"
 #include "Modules/Network/MQTTModule/MQTTRuntime.h"
@@ -35,26 +36,29 @@ namespace {
 #ifndef FLOW_TIME_PREFER_INTERNAL_RTC
 #define FLOW_TIME_PREFER_INTERNAL_RTC 0
 #endif
+#ifndef TFT_FIRMW
+#define TFT_FIRMW "0.0.0"
+#endif
 static constexpr bool kConfigMenuEnabled = (FLOW_HMI_CONFIG_MENU_ENABLED != 0);
 static constexpr const char* kHmiModulePrefix = "hmi/";
 static constexpr const char* kPoolLogicSensorsModule = "poollogic/sensors";
-static constexpr const char* kPoolLogicDeviceModule = "poollogic/device";
-static constexpr const char* kPoolLogicModeModule = "poollogic/mode";
-static constexpr const char* kPoolLogicPidModule = "poollogic/pid";
-static constexpr size_t kPoolLogicSensorsJsonBufSize = 320U;
+static constexpr const char* kPoolLogicDeviceModule = "poollogic/devices";
+static constexpr const char* kPoolLogicModesModule = "poollogic/modes";
+static constexpr const char* kPoolLogicPhModule = "poollogic/ph";
+static constexpr const char* kPoolLogicChlorineModule = "poollogic/chlorine";
+static constexpr size_t kPoolLogicSensorsJsonBufSize = 480U;
 static constexpr size_t kPoolLogicDeviceJsonBufSize = 192U;
 static constexpr size_t kPoolLogicModeJsonBufSize = 256U;
-static constexpr size_t kPoolLogicPidJsonBufSize = 512U;
-static constexpr uint8_t kLedBitMqttConnected = 0;
+static constexpr uint8_t kLedBitWifiConnected = 0;
 static constexpr uint8_t kLedBitPageSelect = 1;
 static constexpr uint8_t kLedBitModeA = 2;
 static constexpr uint8_t kLedBitModeB = 3;
-static constexpr uint8_t kLedBitAlarmA = 4;
-static constexpr uint8_t kLedBitAlarmB = 5;
-static constexpr uint8_t kLedBitAlarmC = 6;
-static constexpr uint8_t kLedBitAlarmD = 7;
+// Faceplate wiring: LED1..LED4=P0..P3, then LED5..LED8=P7..P4.
+static constexpr uint8_t kLedBitAlarmA = 7;
+static constexpr uint8_t kLedBitAlarmB = 6;
+static constexpr uint8_t kLedBitAlarmC = 5;
+static constexpr uint8_t kLedBitAlarmD = 4;
 static constexpr uint32_t kLedPageTogglePeriodMs = 2000U;
-static constexpr uint32_t kWifiBlinkPeriodMs = 125U;
 static constexpr uint8_t kInvalidRuntimeIndex = 0xFFU;
 static constexpr uint32_t kHomePublishWaterTemp = 1UL << 0;
 static constexpr uint32_t kHomePublishAirTemp = 1UL << 1;
@@ -85,6 +89,7 @@ static constexpr uint32_t kHomePeriodicRefreshPeriodMs = 10000U;
 static constexpr uint32_t kNextionPageProbeInitialPeriodMs = 1000U;
 static constexpr uint8_t kNextionPageProbeInitialAttempts = 10U;
 static constexpr uint32_t kNextionPageProbeSteadyPeriodMs = 30000U;
+static constexpr uint32_t kNextionMotionWakeRetryMs = 1000U;
 static constexpr uint32_t kDisplayVersionProbePeriodMs = 60000U;
 static constexpr uint32_t kInvalidClockStamp = 0xFFFFFFFFUL;
 static constexpr uint32_t kRtcFallbackDelayMs = 30000U;
@@ -92,8 +97,7 @@ static constexpr uint32_t kRtcFallbackRetryMs = 10000U;
 static constexpr uint32_t kRtcPushRetryMs = 60000U;
 static constexpr uint16_t kLocalNextionRtcReadTimeoutMs = 180U;
 static constexpr uint16_t kRemoteNextionRtcReadTimeoutMs = 2000U;
-static constexpr uint32_t kNextionDisplayVersionV1 = 1U;
-static constexpr uint32_t kNextionDisplayVersionLegacyV2 = 2U;
+static constexpr const char* kNextionDisplayVersionExpected = TFT_FIRMW;
 static constexpr uint8_t kNextionHomePagePrimary = 0U;
 static constexpr uint8_t kNextionHomePageAlias = 1U;
 static constexpr uint8_t kNextionConfigPagePrimary = 10U;
@@ -101,14 +105,9 @@ static constexpr uint8_t kNextionConfigPageAlias = 2U;
 static constexpr uint8_t kNextionAlarmPagePrimary = 11U;
 static constexpr uint8_t kNextionAlarmPageAlias = 3U;
 static constexpr const char* kNextionDegreeC = "\xC2\xB0""C";
-static constexpr bool kFrontLedsSupported =
-#if FLOW_BUILD_IS_FLOWIOS3
-    false;
-#else
-    true;
-#endif
+static constexpr bool kFrontLedsSupported = true;
 static constexpr bool kWs2812StatusLedDefaultEnabled =
-#if FLOW_BUILD_IS_FLOWIOS3
+#if FLOW_BUILD_IS_WAVESHARE
     true;
 #else
     false;
@@ -133,11 +132,11 @@ static constexpr uint16_t kWs2812NetFastBlinkOffMs = 150U;
 static constexpr uint16_t kWs2812NormalBreathePeriodMs = 900U;
 static constexpr uint16_t kWs2812ProvisioningBreathePeriodMs = 700U;
 static constexpr uint32_t kWs2812AlarmAlternationMs = 2000U;
+static constexpr uint32_t kHmiLedDebugPeriodMs = 5000U;
 
-static bool isSupportedNextionDisplayVersion_(uint32_t version)
+static bool isSupportedNextionDisplayVersion_(const char* version)
 {
-    return version == kNextionDisplayVersionV1 ||
-           version == kNextionDisplayVersionLegacyV2;
+    return version && strcmp(version, kNextionDisplayVersionExpected) == 0;
 }
 
 static const char* const kMonthNamesFr[] = {
@@ -342,6 +341,30 @@ static bool isNetworkConnected_(const DataStoreService* dsSvc)
     return hasValidNetworkIp_(networkIp(ds));
 }
 
+static bool formatSensorIoRef_(IoId ioId, char* out, size_t outLen)
+{
+    if (!out || outLen == 0U) return false;
+    out[0] = '\0';
+
+    if (ioId == IO_ID_INVALID) {
+        snprintf(out, outLen, "none");
+        return false;
+    }
+
+    if (ioId >= IO_ID_AI_BASE && ioId < (IoId)(IO_ID_AI_BASE + Limits::Io::MaxAnalogEndpoints)) {
+        snprintf(out, outLen, "a%02u", (unsigned)(ioId - IO_ID_AI_BASE));
+        return true;
+    }
+
+    if (ioId >= IO_ID_DI_BASE && ioId < (IoId)(IO_ID_DI_BASE + Limits::Io::MaxDigitalInputs)) {
+        snprintf(out, outLen, "i%02u", (unsigned)(ioId - IO_ID_DI_BASE));
+        return true;
+    }
+
+    snprintf(out, outLen, "unknown");
+    return false;
+}
+
 static bool findJsonUInt16_(const char* json, const char* key, uint16_t& out)
 {
     if (!json || !key || key[0] == '\0') return false;
@@ -410,8 +433,8 @@ static bool extractJsonStringField_(const char* json, const char* key, char* out
 static const ConfigMenuHint kHints[] = {
     {"poollogic/filtration", "filtr_start_min", {ConfigMenuWidget::Slider, true, 0.0f, 23.0f, 1.0f, nullptr}},
     {"poollogic/filtration", "filtr_stop_max", {ConfigMenuWidget::Slider, true, 0.0f, 23.0f, 1.0f, nullptr}},
-    {"poollogic/pid", "ph_setpoint", {ConfigMenuWidget::Slider, true, 6.6f, 7.8f, 0.1f, nullptr}},
-    {"poollogic/pid", "orp_setpoint", {ConfigMenuWidget::Slider, true, 450.0f, 950.0f, 10.0f, nullptr}},
+    {"poollogic/ph", "ph_setpoint", {ConfigMenuWidget::Slider, true, 6.6f, 7.8f, 0.1f, nullptr}},
+    {"poollogic/chlorine", "dis_setpoint", {ConfigMenuWidget::Slider, true, 450.0f, 950.0f, 10.0f, nullptr}},
     {"time", "tz", {ConfigMenuWidget::Select, true, 0.0f, 0.0f, 1.0f,
                     "CET-1CEST,M3.5.0/2,M10.5.0/3|UTC0|EST5EDT,M3.2.0/2,M11.1.0/2"}}
 };
@@ -450,9 +473,7 @@ void HMIModule::applyOutputConfig_()
         (cfgData_.veniceTxGpio >= 0 && cfgData_.veniceTxGpio <= 127) ? (int8_t)cfgData_.veniceTxGpio : (int8_t)-1;
     venice_.setConfig(veniceCfg);
 
-    if (!kFrontLedsSupported || !cfgData_.ledsEnabled) {
-        wifiBlinkOn_ = false;
-    }
+    (void)ws2812StatusLed_.setEnabled(cfgData_.waveshareLedEnabled);
     ledMaskValid_ = false;
 }
 
@@ -562,15 +583,49 @@ bool HMIModule::isStatusLedAutoWifiMode_() const
     return ws2812AutoWifiMode_;
 }
 
-bool HMIModule::getDisplayVersion_(uint32_t* out) const
+bool HMIModule::setLedCondition_(HmiLedCondition condition, bool active)
 {
-    if (!out || !nextionVersionDetected_) return false;
-    *out = nextionVersion_;
+    ws2812AutoWifiMode_ = true;
+    ws2812StatusLed_.setCondition(condition, active);
+    return true;
+}
+
+void HMIModule::clearLedConditions_()
+{
+    ws2812StatusLed_.clearAllConditions();
+}
+
+void HMIModule::setBootComplete_()
+{
+    ws2812StatusLed_.setBootComplete();
+}
+
+bool HMIModule::setLedEnabled_(bool enabled)
+{
+    return ws2812StatusLed_.setEnabled(enabled);
+}
+
+bool HMIModule::setLedBrightness_(uint8_t brightness)
+{
+    return ws2812StatusLed_.setBrightness(brightness);
+}
+
+bool HMIModule::getDisplayVersion_(char* out, size_t outLen) const
+{
+    if (!out || outLen == 0U || !nextionVersionDetected_) return false;
+    strncpy(out, nextionVersion_, outLen - 1U);
+    out[outLen - 1U] = '\0';
     return true;
 }
 
 HMIModule::HMIModule(const BoardSpec& board)
 {
+    const I2cBusSpec* ioBus = boardFindI2cBus(board, "io");
+    if (ioBus) {
+        frontLedI2cSda_ = ioBus->sdaPin;
+        frontLedI2cScl_ = ioBus->sclPin;
+        frontLedI2cFrequencyHz_ = ioBus->frequencyHz;
+    }
     const IoPointSpec* tx433 = boardFindIoPoint(board, BoardSignal::Tx433);
     if (tx433) {
         cfgData_.veniceTxGpio = tx433->pin;
@@ -581,7 +636,9 @@ void HMIModule::init(ConfigStore& cfg, ServiceRegistry& services)
 {
     services_ = &services;
     cfg.registerVar(ledsEnabledVar_);
+    cfg.registerVar(waveshareLedEnabledVar_);
     cfg.registerVar(nextionEnabledVar_);
+    cfg.registerVar(nextionMotionIoIdVar_);
     cfg.registerVar(remoteUdpEnabledVar_);
     cfg.registerVar(veniceEnabledVar_);
     cfg.registerVar(veniceTxGpioVar_);
@@ -591,11 +648,13 @@ void HMIModule::init(ConfigStore& cfg, ServiceRegistry& services)
     dsSvc_ = services.get<DataStoreService>(ServiceId::DataStore);
     alarmSvc_ = services.get<AlarmService>(ServiceId::Alarm);
     ioSvc_ = services.get<IOServiceV2>(ServiceId::Io);
+    domainStatusSvc_ = services.get<DomainStatusService>(ServiceId::DomainStatus);
     cmdSvc_ = services.get<CommandService>(ServiceId::Command);
     timeSvc_ = services.get<TimeService>(ServiceId::Time);
     wifiSvc_ = services.get<WifiService>(ServiceId::Wifi);
     localeSvc_ = services.get<LocaleService>(ServiceId::Locale);
-    statusLedsSvc_ = services.get<StatusLedsService>(ServiceId::StatusLeds);
+    const I2cBusService* i2cBusSvc = services.get<I2cBusService>(ServiceId::I2cBus);
+    i2cBus_ = i2cBusSvc ? i2cBusSvc->bus : nullptr;
     netAccessSvc_ = services.get<NetworkAccessService>(ServiceId::NetworkAccess);
     auto* ebSvc = services.get<EventBusService>(ServiceId::EventBus);
     eventBus_ = ebSvc ? ebSvc->bus : nullptr;
@@ -644,6 +703,7 @@ void HMIModule::init(ConfigStore& cfg, ServiceRegistry& services)
     wsCfg.gpio = kWs2812StatusLedGpio;
     ws2812StatusLed_.setConfig(wsCfg);
     const bool ws2812Ready = ws2812StatusLed_.begin();
+    (void)ws2812StatusLed_.setEnabled(cfgData_.waveshareLedEnabled);
     driverReady_ = false;
     nextionDisabledByVersion_ = false;
     homePageVisible_ = false;
@@ -654,6 +714,7 @@ void HMIModule::init(ConfigStore& cfg, ServiceRegistry& services)
     configMenuActive_ = false;
     viewDirty_ = true;
     lastRenderMs_ = 0;
+    lastHmiLedDebugMs_ = 0;
     ledPage_ = 1U;
     ledMaskValid_ = false;
     ws2812AutoWifiMode_ = true;
@@ -666,9 +727,9 @@ void HMIModule::init(ConfigStore& cfg, ServiceRegistry& services)
     ws2812AutoWifiAlarmRedPhaseLast_ = false;
     lastLedApplyTryMs_ = 0;
     lastLedPageToggleMs_ = millis();
-    lastWifiBlinkToggleMs_ = millis();
     lastClockCheckMs_ = 0;
     lastHomePeriodicRefreshMs_ = 0;
+    lastNextionMotionWakeAttemptMs_ = 0;
     lastDisplayVersionProbeMs_ = 0;
     lastClockMinuteStamp_ = kInvalidClockStamp;
     lastClockDayStamp_ = kInvalidClockStamp;
@@ -678,7 +739,10 @@ void HMIModule::init(ConfigStore& cfg, ServiceRegistry& services)
     rtcFallbackCompleted_ = false;
     rtcPushPending_ = false;
     nextionVersionDetected_ = false;
-    nextionVersion_ = 0U;
+    nextionMotionInputReady_ = false;
+    nextionMotionActiveLast_ = false;
+    nextionMotionReadErrorLogged_ = false;
+    nextionVersion_[0] = '\0';
     activeConfigContextToken_ = 0U;
     nextConfigContextToken_ = 1U;
     alarmPageIndex_ = 0U;
@@ -691,35 +755,59 @@ void HMIModule::init(ConfigStore& cfg, ServiceRegistry& services)
     snprintf(localeLang_, sizeof(localeLang_), "fr");
     localeGenerationSeen_ = 0U;
     refreshLocale_();
-    phIoId_ = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotPh].ioId;
-    orpIoId_ = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotOrp].ioId;
-    psiIoId_ = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotPsi].ioId;
-    airTempIoId_ = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotAirTemp].ioId;
-    poolLevelIoId_ = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotPoolLevel].ioId;
-    waterTempIoId_ = PoolBinding::kSensorBindings[PoolBinding::kSensorSlotWaterTemp].ioId;
+    phIoId_ = ioIdFromSlot(analogInputSlot(1));
+    orpIoId_ = ioIdFromSlot(analogInputSlot(0));
+    psiIoId_ = ioIdFromSlot(analogInputSlot(2));
+    airTempIoId_ = ioIdFromSlot(analogInputSlot(5));
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+    poolLevelIoId_ = ioIdFromSlot(digitalInputSlot(11));
+    phLevelIoId_ = ioIdFromSlot(digitalInputSlot(9));
+    chlorineLevelIoId_ = ioIdFromSlot(digitalInputSlot(10));
+#else
+    poolLevelIoId_ = ioIdFromSlot(digitalInputSlot(0));
+    phLevelIoId_ = ioIdFromSlot(digitalInputSlot(1));
+    chlorineLevelIoId_ = ioIdFromSlot(digitalInputSlot(2));
+#endif
+    waterTempIoId_ = ioIdFromSlot(analogInputSlot(4));
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+    waterCounterIoId_ = ioIdFromSlot(digitalInputSlot(12));
+#else
+    waterCounterIoId_ = ioIdFromSlot(digitalInputSlot(3));
+#endif
     phRuntimeIndex_ = kInvalidRuntimeIndex;
     orpRuntimeIndex_ = kInvalidRuntimeIndex;
     psiRuntimeIndex_ = kInvalidRuntimeIndex;
     waterTempRuntimeIndex_ = kInvalidRuntimeIndex;
     airTempRuntimeIndex_ = kInvalidRuntimeIndex;
     poolLevelRuntimeIndex_ = kInvalidRuntimeIndex;
+    phLevelRuntimeIndex_ = kInvalidRuntimeIndex;
+    chlorineLevelRuntimeIndex_ = kInvalidRuntimeIndex;
+    waterCounterRuntimeIndex_ = kInvalidRuntimeIndex;
+    refreshNetworkExpectations_();
     homeErrorMessage_[0] = '\0';
     applyWs2812AutoWifiProfile_();
     if (wsCfg.enabled && !ws2812Ready) {
         LOGW("WS2812 status LED init failed on gpio=%d", (int)wsCfg.gpio);
     }
 
-    LOGI("HMI service registered with driver=%s led_panel=%s ws2812=%s",
+    LOGI("HMI service registered with driver=%s led_panel_i2c=%s ws2812=%s",
          driver_ ? driver_->driverId() : "none",
-         statusLedsSvc_ ? "on" : "off",
+         i2cBus_ ? "available" : "unavailable",
          ws2812Ready ? "on" : "off");
 }
 
-void HMIModule::onConfigLoaded(ConfigStore&, ServiceRegistry&)
+void HMIModule::onConfigLoaded(ConfigStore&, ServiceRegistry& services)
 {
-    refreshMqttConfig_();
+    if (!ioSvc_) ioSvc_ = services.get<IOServiceV2>(ServiceId::Io);
+    nextionMotionInputReady_ = false;
+    nextionMotionActiveLast_ = false;
+    nextionMotionReadErrorLogged_ = false;
+    lastNextionMotionWakeAttemptMs_ = 0U;
+    domainStatusSvc_ = services.get<DomainStatusService>(ServiceId::DomainStatus);
+    refreshNetworkExpectations_();
     refreshLocale_();
     applyOutputConfig_();
+    applyFrontLedPanelConfig_();
     refreshHomeBindings_();
     queueHomePublish_(kHomePublishAll);
     applyLedMask_(true);
@@ -727,20 +815,22 @@ void HMIModule::onConfigLoaded(ConfigStore&, ServiceRegistry&)
     applyWs2812AutoWifiProfile_();
 }
 
-void HMIModule::refreshMqttConfig_()
+void HMIModule::refreshNetworkExpectations_()
 {
-    bool enabled =
-#if FLOW_BUILD_IS_FLOWIOS3
-        false;
-#else
-        true;
-#endif
-    char mqttJson[160] = {0};
-    if (cfgSvc_ && cfgSvc_->toJsonModule &&
-        cfgSvc_->toJsonModule(cfgSvc_->ctx, "mqtt", mqttJson, sizeof(mqttJson), nullptr)) {
-        (void)findJsonBool_(mqttJson, "enabled", enabled);
+    wifiNetworkExpected_ = true;
+    ethernetNetworkExpected_ = false;
+
+    if (!cfgSvc_ || !cfgSvc_->toJsonModule) return;
+
+    char jsonBuf[160] = {0};
+    if (cfgSvc_->toJsonModule(cfgSvc_->ctx, "wifi", jsonBuf, sizeof(jsonBuf), nullptr)) {
+        (void)findJsonBool_(jsonBuf, "enabled", wifiNetworkExpected_);
     }
-    mqttEnabled_ = enabled;
+
+    memset(jsonBuf, 0, sizeof(jsonBuf));
+    if (cfgSvc_->toJsonModule(cfgSvc_->ctx, "ethernet", jsonBuf, sizeof(jsonBuf), nullptr)) {
+        (void)findJsonBool_(jsonBuf, "enabled", ethernetNetworkExpected_);
+    }
 }
 
 void HMIModule::onEventStatic_(const Event& e, void* user)
@@ -754,11 +844,6 @@ bool HMIModule::resolveIoRuntimeIndex_(IoId ioId, uint8_t& outIndex) const
     outIndex = kInvalidRuntimeIndex;
 
     if (ioId == IO_ID_INVALID) return false;
-
-    if (const PoolSensorBinding* binding = PoolBinding::sensorBindingByIoId(ioId)) {
-        outIndex = binding->runtimeIndex;
-        return true;
-    }
 
     if (!ioSvc_ || !ioSvc_->count || !ioSvc_->idAt) return false;
 
@@ -785,6 +870,9 @@ void HMIModule::refreshHomeBindings_()
         bool foundPsi = false;
         bool foundWaterTemp = false;
         bool foundAirTemp = false;
+        bool foundPhLevel = false;
+        bool foundChlorineLevel = false;
+        bool foundWaterCounter = false;
         bool foundFiltrationSlot = false;
         bool foundPhPumpSlot = false;
         bool foundOrpPumpSlot = false;
@@ -808,7 +896,7 @@ void HMIModule::refreshHomeBindings_()
                 phIoId_ = (IoId)ioId;
             }
             ioId = (uint16_t)orpIoId_;
-            foundOrp = findJsonUInt16_(jsonBuf, "orp_io_id", ioId);
+            foundOrp = findJsonUInt16_(jsonBuf, "dis_io_id", ioId);
             if (foundOrp) {
                 orpIoId_ = (IoId)ioId;
             }
@@ -826,6 +914,21 @@ void HMIModule::refreshHomeBindings_()
             foundAirTemp = findJsonUInt16_(jsonBuf, "air_temp_io_id", ioId);
             if (foundAirTemp) {
                 airTempIoId_ = (IoId)ioId;
+            }
+            ioId = (uint16_t)phLevelIoId_;
+            foundPhLevel = findJsonUInt16_(jsonBuf, "ph_lvl_io_id", ioId);
+            if (foundPhLevel) {
+                phLevelIoId_ = (IoId)ioId;
+            }
+            ioId = (uint16_t)chlorineLevelIoId_;
+            foundChlorineLevel = findJsonUInt16_(jsonBuf, "chl_lvl_io_id", ioId);
+            if (foundChlorineLevel) {
+                chlorineLevelIoId_ = (IoId)ioId;
+            }
+            ioId = (uint16_t)waterCounterIoId_;
+            foundWaterCounter = findJsonUInt16_(jsonBuf, "water_counter_io_id", ioId);
+            if (foundWaterCounter) {
+                waterCounterIoId_ = (IoId)ioId;
             }
         } else {
             LOGW("HMI poollogic sensors export failed");
@@ -849,7 +952,7 @@ void HMIModule::refreshHomeBindings_()
                 phPumpDeviceSlot_ = (uint8_t)slot;
             }
             slot = orpPumpDeviceSlot_;
-            foundOrpPumpSlot = findJsonUInt16_(jsonBuf, "orp_pump_slot", slot);
+            foundOrpPumpSlot = findJsonUInt16_(jsonBuf, "dis_pump_slot", slot);
             if (foundOrpPumpSlot) {
                 orpPumpDeviceSlot_ = (uint8_t)slot;
             }
@@ -864,7 +967,7 @@ void HMIModule::refreshHomeBindings_()
                 fillingDeviceSlot_ = (uint8_t)slot;
             }
 
-            LOGD("HMI poollogic cfg sensors_trunc=%u device_trunc=%u keys lvl=%u ph=%u orp=%u psi=%u wat=%u air=%u filtr=%u php=%u orpp=%u robot=%u fill=%u",
+            LOGD("HMI poollogic cfg sensors_trunc=%u device_trunc=%u keys lvl=%u ph=%u orp=%u psi=%u wat=%u air=%u phlvl=%u chllvl=%u wc=%u filtr=%u php=%u orpp=%u robot=%u fill=%u",
                  sensorsTruncated ? 1U : 0U,
                  truncated ? 1U : 0U,
                  foundPoolLevel ? 1U : 0U,
@@ -873,6 +976,9 @@ void HMIModule::refreshHomeBindings_()
                  foundPsi ? 1U : 0U,
                  foundWaterTemp ? 1U : 0U,
                  foundAirTemp ? 1U : 0U,
+                 foundPhLevel ? 1U : 0U,
+                 foundChlorineLevel ? 1U : 0U,
+                 foundWaterCounter ? 1U : 0U,
                  foundFiltrationSlot ? 1U : 0U,
                  foundPhPumpSlot ? 1U : 0U,
                  foundOrpPumpSlot ? 1U : 0U,
@@ -889,6 +995,9 @@ void HMIModule::refreshHomeBindings_()
     (void)resolveIoRuntimeIndex_(waterTempIoId_, waterTempRuntimeIndex_);
     (void)resolveIoRuntimeIndex_(airTempIoId_, airTempRuntimeIndex_);
     (void)resolveIoRuntimeIndex_(poolLevelIoId_, poolLevelRuntimeIndex_);
+    (void)resolveIoRuntimeIndex_(phLevelIoId_, phLevelRuntimeIndex_);
+    (void)resolveIoRuntimeIndex_(chlorineLevelIoId_, chlorineLevelRuntimeIndex_);
+    (void)resolveIoRuntimeIndex_(waterCounterIoId_, waterCounterRuntimeIndex_);
 
     LOGD("HMI home bindings ph=%u(rt=%u) orp=%u(rt=%u) psi=%u(rt=%u) wat=%u(rt=%u) air=%u(rt=%u) lvl=%u(rt=%u)",
          (unsigned)phIoId_,
@@ -919,7 +1028,7 @@ bool HMIModule::readPoolLogicModeFlags_(bool& autoMode,
     char jsonBuf[kPoolLogicModeJsonBufSize]{};
     bool truncated = false;
     if (!cfgSvc_->toJsonModule(cfgSvc_->ctx,
-                               kPoolLogicModeModule,
+                               kPoolLogicModesModule,
                                jsonBuf,
                                sizeof(jsonBuf),
                                &truncated)) {
@@ -929,8 +1038,26 @@ bool HMIModule::readPoolLogicModeFlags_(bool& autoMode,
     bool v = false;
     if (findJsonBool_(jsonBuf, "auto_mode", v)) autoMode = v;
     if (findJsonBool_(jsonBuf, "winter_mode", v)) winterMode = v;
-    if (findJsonBool_(jsonBuf, "ph_auto_mode", v)) phAutoMode = v;
-    if (findJsonBool_(jsonBuf, "orp_auto_mode", v)) orpAutoMode = v;
+
+    memset(jsonBuf, 0, sizeof(jsonBuf));
+    truncated = false;
+    if (cfgSvc_->toJsonModule(cfgSvc_->ctx,
+                              kPoolLogicPhModule,
+                              jsonBuf,
+                              sizeof(jsonBuf),
+                              &truncated)) {
+        if (findJsonBool_(jsonBuf, "ph_auto_mode", v)) phAutoMode = v;
+    }
+
+    memset(jsonBuf, 0, sizeof(jsonBuf));
+    truncated = false;
+    if (cfgSvc_->toJsonModule(cfgSvc_->ctx,
+                              kPoolLogicChlorineModule,
+                              jsonBuf,
+                              sizeof(jsonBuf),
+                              &truncated)) {
+        if (findJsonBool_(jsonBuf, "dis_auto_mode", v)) orpAutoMode = v;
+    }
     return true;
 }
 
@@ -940,10 +1067,10 @@ bool HMIModule::readPidSetpoints_(float& phSetpoint, float& orpSetpoint) const
     orpSetpoint = 0.0f;
     if (!cfgSvc_ || !cfgSvc_->toJsonModule) return false;
 
-    char jsonBuf[kPoolLogicPidJsonBufSize]{};
+    char jsonBuf[kPoolLogicModeJsonBufSize]{};
     bool truncated = false;
     if (!cfgSvc_->toJsonModule(cfgSvc_->ctx,
-                               kPoolLogicPidModule,
+                               kPoolLogicPhModule,
                                jsonBuf,
                                sizeof(jsonBuf),
                                &truncated)) {
@@ -956,7 +1083,15 @@ bool HMIModule::readPidSetpoints_(float& phSetpoint, float& orpSetpoint) const
         phSetpoint = value;
         found = true;
     }
-    if (findJsonFloat_(jsonBuf, "orp_setpoint", value)) {
+
+    memset(jsonBuf, 0, sizeof(jsonBuf));
+    truncated = false;
+    if (cfgSvc_->toJsonModule(cfgSvc_->ctx,
+                              kPoolLogicChlorineModule,
+                              jsonBuf,
+                              sizeof(jsonBuf),
+                              &truncated) &&
+        findJsonFloat_(jsonBuf, "dis_setpoint", value)) {
         orpSetpoint = value;
         found = true;
     }
@@ -1047,16 +1182,19 @@ bool HMIModule::publishHomeText_(HmiHomeTextField field)
 {
     if (!driver_) return false;
 
+    IoId ioId = IO_ID_INVALID;
     uint8_t runtimeIndex = kInvalidRuntimeIndex;
     char value[32]{};
     if (field == HmiHomeTextField::ErrorMessage) {
         snprintf(value, sizeof(value), "%s", homeErrorMessage_);
         return driver_->publishHomeText(field, value);
     }
-    if (field == HmiHomeTextField::Time || field == HmiHomeTextField::Date) {
+    if (field == HmiHomeTextField::Date) {
         return true;
     }
-    if (field == HmiHomeTextField::DayText || field == HmiHomeTextField::MonthText) {
+    if (field == HmiHomeTextField::Time ||
+        field == HmiHomeTextField::DayText ||
+        field == HmiHomeTextField::MonthText) {
         struct tm local{};
         bool hasTime = timeSvc_ &&
                        timeSvc_->isSynced &&
@@ -1067,7 +1205,13 @@ bool HMIModule::publishHomeText_(HmiHomeTextField field)
             hasTime = localtime_r(&epoch, &local) != nullptr;
         }
 
-        if (field == HmiHomeTextField::DayText) {
+        if (field == HmiHomeTextField::Time) {
+            if (hasTime) {
+                snprintf(value, sizeof(value), "%02d:%02d", local.tm_hour, local.tm_min);
+            } else {
+                snprintf(value, sizeof(value), "--:--");
+            }
+        } else if (field == HmiHomeTextField::DayText) {
             if (hasTime && local.tm_wday >= 0 && local.tm_wday < 7) {
                 snprintf(value, sizeof(value), "%s", kDayNamesFr[local.tm_wday]);
             } else {
@@ -1085,15 +1229,19 @@ bool HMIModule::publishHomeText_(HmiHomeTextField field)
 
     switch (field) {
         case HmiHomeTextField::WaterTemp:
+            ioId = waterTempIoId_;
             runtimeIndex = waterTempRuntimeIndex_;
             break;
         case HmiHomeTextField::AirTemp:
+            ioId = airTempIoId_;
             runtimeIndex = airTempRuntimeIndex_;
             break;
         case HmiHomeTextField::Ph:
+            ioId = phIoId_;
             runtimeIndex = phRuntimeIndex_;
             break;
         case HmiHomeTextField::Orp:
+            ioId = orpIoId_;
             runtimeIndex = orpRuntimeIndex_;
             break;
         default:
@@ -1102,7 +1250,10 @@ bool HMIModule::publishHomeText_(HmiHomeTextField field)
 
     bool hasValue = false;
     float rawValue = 0.0f;
-    if (dsSvc_ && dsSvc_->store && runtimeIndex != kInvalidRuntimeIndex) {
+    if (ioSvc_ && ioSvc_->readAnalog && ioId != IO_ID_INVALID) {
+        hasValue = (ioSvc_->readAnalog(ioSvc_->ctx, ioId, &rawValue, nullptr, nullptr) == IO_OK);
+    }
+    if (!hasValue && dsSvc_ && dsSvc_->store && runtimeIndex != kInvalidRuntimeIndex) {
         hasValue = ioEndpointFloat(*dsSvc_->store, runtimeIndex, rawValue);
     }
 
@@ -1134,6 +1285,7 @@ bool HMIModule::publishHomeGaugePercent_(HmiHomeGaugeField field)
 {
     if (!driver_) return false;
 
+    IoId ioId = IO_ID_INVALID;
     uint8_t runtimeIndex = kInvalidRuntimeIndex;
     float setpoint = 0.0f;
     float phSetpoint = 0.0f;
@@ -1142,10 +1294,12 @@ bool HMIModule::publishHomeGaugePercent_(HmiHomeGaugeField field)
 
     switch (field) {
         case HmiHomeGaugeField::PhPercent:
+            ioId = phIoId_;
             runtimeIndex = phRuntimeIndex_;
             setpoint = phSetpoint;
             break;
         case HmiHomeGaugeField::OrpPercent:
+            ioId = orpIoId_;
             runtimeIndex = orpRuntimeIndex_;
             setpoint = orpSetpoint;
             break;
@@ -1155,7 +1309,10 @@ bool HMIModule::publishHomeGaugePercent_(HmiHomeGaugeField field)
 
     bool hasValue = false;
     float rawValue = 0.0f;
-    if (dsSvc_ && dsSvc_->store && runtimeIndex != kInvalidRuntimeIndex) {
+    if (ioSvc_ && ioSvc_->readAnalog && ioId != IO_ID_INVALID) {
+        hasValue = (ioSvc_->readAnalog(ioSvc_->ctx, ioId, &rawValue, nullptr, nullptr) == IO_OK);
+    }
+    if (!hasValue && dsSvc_ && dsSvc_->store && runtimeIndex != kInvalidRuntimeIndex) {
         hasValue = ioEndpointFloat(*dsSvc_->store, runtimeIndex, rawValue);
     }
 
@@ -1184,22 +1341,22 @@ bool HMIModule::validateDriverDisplayVersion_(bool requireDetection)
         return false;
     }
 
-    const uint32_t version = driver_->displayVersion();
-    if (nextionVersionDetected_ && nextionVersion_ == version) {
+    const char* version = driver_->displayVersion();
+    if (nextionVersionDetected_ && strcmp(nextionVersion_, version ? version : "") == 0) {
         return isSupportedNextionDisplayVersion_(version);
     }
 
     nextionVersionDetected_ = true;
-    nextionVersion_ = version;
-    LOGI("Ecran Nextion version %04lu detecte driver=%s.",
-         (unsigned long)nextionVersion_,
+    strncpy(nextionVersion_, version ? version : "", sizeof(nextionVersion_) - 1U);
+    nextionVersion_[sizeof(nextionVersion_) - 1U] = '\0';
+    LOGI("Ecran Nextion version %s detecte driver=%s.",
+         nextionVersion_,
          driver_->driverId());
 
     if (!isSupportedNextionDisplayVersion_(nextionVersion_)) {
-        LOGW("Ecran Nextion version %04lu non supportee (supportees %04lu,%04lu). Affichage Nextion desactive.",
-             (unsigned long)nextionVersion_,
-             (unsigned long)kNextionDisplayVersionV1,
-             (unsigned long)kNextionDisplayVersionLegacyV2);
+        LOGW("Ecran Nextion version %s non supportee (supportee %s). Affichage Nextion desactive.",
+             nextionVersion_,
+             kNextionDisplayVersionExpected);
         nextionDisabledByVersion_ = true;
         applyOutputConfig_();
         return false;
@@ -1277,6 +1434,18 @@ bool HMIModule::pushEspTimeToNextionRtc_()
     return true;
 }
 
+bool HMIModule::readRtcSvc_(HmiRtcDateTime* out, uint16_t timeoutMs)
+{
+    if (!out || !driver_ || !driverReady_) return false;
+    return driver_->readRtc(*out, timeoutMs);
+}
+
+bool HMIModule::writeRtcSvc_(const HmiRtcDateTime* value)
+{
+    if (!value || !driver_ || !driverReady_) return false;
+    return driver_->writeRtc(*value);
+}
+
 void HMIModule::resetClockPublishStamps_()
 {
     lastClockMinuteStamp_ = kInvalidClockStamp;
@@ -1285,68 +1454,7 @@ void HMIModule::resetClockPublishStamps_()
 
 void HMIModule::serviceRtcBridge_(uint32_t nowMs)
 {
-    if (!driver_ || !driverReady_ || !timeSvc_) return;
-
-    const bool timeSynced = timeSvc_->isSynced && timeSvc_->isSynced(timeSvc_->ctx);
-    const bool fromExternalRtc = timeSynced &&
-                                 timeSvc_->isExternalRtc &&
-                                 timeSvc_->isExternalRtc(timeSvc_->ctx);
-
-#if FLOW_TIME_PREFER_INTERNAL_RTC
-    if (timeSynced && fromExternalRtc) {
-        rtcFallbackCompleted_ = true;
-        return;
-    }
-#endif
-
-    if (timeSynced && !fromExternalRtc) {
-        rtcFallbackCompleted_ = true;
-        if (!timeSvc_->epoch) return;
-        if (driver_ == static_cast<IHmiDriver*>(&remoteUdp_) &&
-            remoteUdpServer_ &&
-            remoteUdpServer_->isDisplaySleeping()) {
-            return;
-        }
-
-        const uint64_t epoch = timeSvc_->epoch(timeSvc_->ctx);
-        const uint32_t dayStamp = rtcDayStamp_(epoch);
-        if (dayStamp == kInvalidClockStamp) return;
-        const bool dayChanged = dayStamp != lastRtcPushDayStamp_;
-        if (!rtcPushPending_ && !dayChanged) return;
-        if (lastRtcPushAttemptMs_ != 0U &&
-            (uint32_t)(nowMs - lastRtcPushAttemptMs_) < kRtcPushRetryMs) {
-            return;
-        }
-
-        lastRtcPushAttemptMs_ = nowMs;
-        if (pushEspTimeToNextionRtc_()) {
-            lastRtcPushDayStamp_ = dayStamp;
-            rtcPushPending_ = false;
-        }
-        return;
-    }
-
-    if (rtcFallbackCompleted_) return;
-
-    bool immediateFallback = false;
-    if (timeSvc_->state && timeSvc_->state(timeSvc_->ctx) == TimeSyncState::Disabled) {
-        immediateFallback = true;
-    }
-    if (wifiSvc_ && wifiSvc_->state && wifiSvc_->state(wifiSvc_->ctx) == WifiState::Disabled) {
-        immediateFallback = true;
-    }
-
-    if (!immediateFallback && nowMs < kRtcFallbackDelayMs) return;
-    if (lastRtcFallbackAttemptMs_ != 0U &&
-        (uint32_t)(nowMs - lastRtcFallbackAttemptMs_) < kRtcFallbackRetryMs) {
-        return;
-    }
-
-    lastRtcFallbackAttemptMs_ = nowMs;
-    if (readNextionRtcAndSetTime_()) {
-        rtcFallbackCompleted_ = true;
-        queueHomePublish_(kHomePublishTime | kHomePublishDate);
-    }
+    (void)nowMs;
 }
 
 void HMIModule::queueHomePublish_(uint32_t mask)
@@ -1503,105 +1611,134 @@ void HMIModule::flushHomePublish_()
 
 void HMIModule::applyWs2812AutoWifiProfile_()
 {
+    updateHmiLedConditions_();
+}
+
+void HMIModule::updateHmiLedConditions_()
+{
     if (!ws2812AutoWifiMode_) return;
 
-    if (!netAccessSvc_ && services_) {
-        netAccessSvc_ = services_->get<NetworkAccessService>(ServiceId::NetworkAccess);
-    }
-
-    bool networkConnected = false;
-    bool mqttConnected = false;
-    networkConnected = isNetworkConnected_(dsSvc_);
-    if (dsSvc_ && dsSvc_->store) mqttConnected = mqttReady(*dsSvc_->store);
-    const bool apMode = netAccessSvc_ && netAccessSvc_->mode &&
-                        netAccessSvc_->mode(netAccessSvc_->ctx) == NetworkAccessMode::AccessPoint;
-    const bool normalRun = networkConnected && (!mqttEnabled_ || mqttConnected) &&
-                           (driverReady_ || driver_ == nullptr);
     bool alarmActive = false;
     if (alarmSvc_ && alarmSvc_->activeCount) {
         alarmActive = (alarmSvc_->activeCount(alarmSvc_->ctx) > 0U);
     }
 
-    const uint32_t nowMs = millis();
-    const bool alarmRedPhase = alarmActive && (((nowMs / kWs2812AlarmAlternationMs) & 1UL) != 0UL);
-    if (ws2812AutoWifiApplied_ &&
-        ws2812AutoWifiConnectedLast_ == networkConnected &&
-        ws2812AutoWifiMqttLast_ == mqttConnected &&
-        ws2812AutoWifiApModeLast_ == apMode &&
-        ws2812AutoWifiNormalLast_ == normalRun &&
-        ws2812AutoWifiAlarmActiveLast_ == alarmActive &&
-        ws2812AutoWifiAlarmRedPhaseLast_ == alarmRedPhase) {
+    const bool networkExpected = wifiNetworkExpected_ || ethernetNetworkExpected_;
+    const bool networkLost = networkExpected && !isNetworkConnected_(dsSvc_);
+    const bool domainSlotError = hasDomainSlotError_();
+
+    ws2812StatusLed_.setCondition(HmiLedCondition::AlarmActive, alarmActive);
+    ws2812StatusLed_.setCondition(HmiLedCondition::DomainSlotError, domainSlotError);
+    ws2812StatusLed_.setCondition(HmiLedCondition::NetworkLost, networkLost);
+    ws2812AutoWifiApplied_ = true;
+}
+
+bool HMIModule::hasDomainSlotError_() const
+{
+    return domainStatusSvc_ &&
+           domainStatusSvc_->hasDomainSlotError &&
+           domainStatusSvc_->hasDomainSlotError(domainStatusSvc_->ctx);
+}
+
+bool HMIModule::firstDomainSlotError_(DomainSlotStatus& outStatus) const
+{
+    outStatus = DomainSlotStatus{};
+    return domainStatusSvc_ &&
+           domainStatusSvc_->firstError &&
+           domainStatusSvc_->firstError(domainStatusSvc_->ctx, &outStatus);
+}
+
+const char* HMIModule::hmiLedDisplayStateName_(HmiLedDisplayState state)
+{
+    switch (state) {
+        case HmiLedDisplayState::AlarmActive: return "AlarmActive";
+        case HmiLedDisplayState::DomainSlotError: return "DomainSlotError";
+        case HmiLedDisplayState::CaptivePortalActive: return "CaptivePortalActive";
+        case HmiLedDisplayState::OtaInProgress: return "OtaInProgress";
+        case HmiLedDisplayState::NetworkLost: return "NetworkLost";
+        case HmiLedDisplayState::Booting: return "Booting";
+        case HmiLedDisplayState::Normal: return "Normal";
+        default: return "Unknown";
+    }
+}
+
+void HMIModule::logHmiLedDebug_(uint32_t nowMs)
+{
+    if ((uint32_t)(nowMs - lastHmiLedDebugMs_) < kHmiLedDebugPeriodMs) return;
+    lastHmiLedDebugMs_ = nowMs;
+
+    const HmiLedDisplayState current = ws2812StatusLed_.currentDisplayState();
+    const HmiLedDisplayState target = ws2812StatusLed_.targetDisplayState();
+    DomainSlotStatus domainError{};
+    const bool hasDomainError = firstDomainSlotError_(domainError);
+    char ioRef[12]{};
+    if (hasDomainError && domainError.ioId != IO_ID_INVALID) {
+        (void)formatSensorIoRef_(domainError.ioId, ioRef, sizeof(ioRef));
+    } else {
+        snprintf(ioRef, sizeof(ioRef), "none");
+    }
+    LOGD("Waveshare HMI LED enabled=%u ready=%u state=%s target=%s transition=%u domain_slot=%u io=%s error=%s block=%u",
+         ws2812StatusLed_.isEnabled() ? 1U : 0U,
+         ws2812StatusLed_.isReady() ? 1U : 0U,
+         hmiLedDisplayStateName_(current),
+         hmiLedDisplayStateName_(target),
+         ws2812StatusLed_.isTransitionActive() ? 1U : 0U,
+         hasDomainError ? (unsigned)domainError.domainSlot : (unsigned)DOMAIN_SLOT_INVALID,
+         ioRef,
+         hasDomainError ? domainSlotStatusReasonName(domainError.reason) : "",
+         hasDomainError && domainError.hasPoolDevice ? (unsigned)domainError.poolMeta.blockReason : 0U);
+}
+
+bool HMIModule::ensureFrontLedPanelReady_()
+{
+    if (!kFrontLedsSupported) return false;
+    if (frontLedPanel_.isReady()) return true;
+    if (!i2cBus_) return false;
+
+    if (!i2cBus_->beginOk()) {
+        i2cBus_->begin(frontLedI2cSda_, frontLedI2cScl_, frontLedI2cFrequencyHz_);
+    }
+    if (!i2cBus_->beginOk()) return false;
+    if (!frontLedPanel_.begin(*i2cBus_)) return false;
+
+    ledMaskValid_ = false;
+    LOGI("PCF8574A LED panel ready addr=0x%02X active_low=true",
+         (unsigned)Pcf8574LedPanelDriver::Address);
+    return true;
+}
+
+void HMIModule::applyFrontLedPanelConfig_()
+{
+    if (!kFrontLedsSupported) return;
+    if (!ensureFrontLedPanelReady_()) {
+        ledMaskValid_ = false;
+        LOGW("PCF8574A LED panel unavailable addr=0x%02X",
+             (unsigned)Pcf8574LedPanelDriver::Address);
         return;
     }
-
-    Ws2812StatusLedState state{};
-    state.enabled = true;
-    if (apMode) {
-        state.blinkEnabled = false;
-        state.breatheEnabled = true;
-        state.red = kWs2812ProvisioningRed;
-        state.green = kWs2812ProvisioningGreen;
-        state.blue = kWs2812ProvisioningBlue;
-        state.brightness = kWs2812ProvisioningBrightness;
-        state.breathePeriodMs = kWs2812ProvisioningBreathePeriodMs;
-    } else if (alarmRedPhase) {
-        state.blinkEnabled = false;
-        state.breatheEnabled = false;
-        state.red = kWs2812AlarmRedRed;
-        state.green = kWs2812AlarmRedGreen;
-        state.blue = kWs2812AlarmRedBlue;
-        state.brightness = kWs2812AlarmRedBrightness;
-        state.blinkOnMs = kWs2812NetFastBlinkOnMs;
-        state.blinkOffMs = kWs2812NetFastBlinkOffMs;
-    } else {
-        state.red = kWs2812T0BlueRed;
-        state.green = kWs2812T0BlueGreen;
-        state.blue = kWs2812T0BlueBlue;
-        state.brightness = kWs2812T0BlueBrightness;
-        if (normalRun) {
-            state.blinkEnabled = false;
-            state.breatheEnabled = true;
-            state.breathePeriodMs = kWs2812NormalBreathePeriodMs;
-            state.blinkOnMs = kWs2812NetFastBlinkOnMs;
-            state.blinkOffMs = kWs2812NetFastBlinkOffMs;
-        } else if (networkConnected && mqttConnected) {
-            state.blinkEnabled = false;
-            state.breatheEnabled = false;
-            state.blinkOnMs = kWs2812NetFastBlinkOnMs;
-            state.blinkOffMs = kWs2812NetFastBlinkOffMs;
-        } else if (networkConnected) {
-            state.blinkEnabled = true;
-            state.breatheEnabled = false;
-            state.blinkOnMs = kWs2812NetFastBlinkOnMs;
-            state.blinkOffMs = kWs2812NetFastBlinkOffMs;
-        } else {
-            state.blinkEnabled = true;
-            state.breatheEnabled = false;
-            state.blinkOnMs = kWs2812NetSlowBlinkOnMs;
-            state.blinkOffMs = kWs2812NetSlowBlinkOffMs;
-        }
+    if (!frontLedPanel_.setEnabled(cfgData_.ledsEnabled)) {
+        ledMaskValid_ = false;
+        LOGW("PCF8574A LED panel enable update failed");
+        return;
     }
-    (void)ws2812StatusLed_.setState(state);
-    ws2812AutoWifiConnectedLast_ = networkConnected;
-    ws2812AutoWifiMqttLast_ = mqttConnected;
-    ws2812AutoWifiApModeLast_ = apMode;
-    ws2812AutoWifiNormalLast_ = normalRun;
-    ws2812AutoWifiAlarmActiveLast_ = alarmActive;
-    ws2812AutoWifiAlarmRedPhaseLast_ = alarmRedPhase;
-    ws2812AutoWifiApplied_ = true;
+    ledMaskValid_ = false;
 }
 
 void HMIModule::applyLedMask_(bool force)
 {
     if (!kFrontLedsSupported) return;
-    if (!cfgData_.ledsEnabled) return;
-    if (!statusLedsSvc_ || !statusLedsSvc_->setMask) return;
+    if (!cfgData_.ledsEnabled) {
+        if (frontLedPanel_.isReady()) (void)frontLedPanel_.setEnabled(false);
+        ledMaskValid_ = false;
+        return;
+    }
+    if (!ensureFrontLedPanelReady_()) return;
+    if (!frontLedPanel_.isEnabled() && !frontLedPanel_.setEnabled(true)) return;
 
     PoolLogicModeFlags modes{};
-    bool networkConnected = false;
-    bool mqttConnected = false;
-    networkConnected = isNetworkConnected_(dsSvc_);
-    if (dsSvc_ && dsSvc_->store) mqttConnected = mqttReady(*dsSvc_->store);
+    const bool wifiConnected = wifiSvc_ &&
+                               wifiSvc_->isConnected &&
+                               wifiSvc_->isConnected(wifiSvc_->ctx);
     (void)readPoolLogicModeFlags_(modes.autoMode, modes.winterMode, modes.phAutoMode, modes.orpAutoMode);
     const bool waterLevelLow = isWaterLevelLow_();
     const bool psiAlarm = isAlarmActive_(AlarmId::PoolPsiLow) || isAlarmActive_(AlarmId::PoolPsiHigh);
@@ -1611,8 +1748,8 @@ void HMIModule::applyLedMask_(bool force)
     const bool chlorinePumpRuntimeAlarm = isAlarmActive_(AlarmId::PoolChlorinePumpMaxUptime);
 
     uint8_t mask = 0U;
-    if (networkConnected && (!mqttEnabled_ || mqttConnected || wifiBlinkOn_)) {
-        mask |= (uint8_t)(1U << kLedBitMqttConnected);
+    if (wifiConnected) {
+        mask |= (uint8_t)(1U << kLedBitWifiConnected);
     }
 
     // Direct mapping: ledPage_=1 drives page 1, ledPage_=2 drives page 2.
@@ -1621,25 +1758,26 @@ void HMIModule::applyLedMask_(bool force)
 
     if (!page2) {
         // Page 1:
-        // p2=mode auto, p3=winter, p4/p5 unused, p6=niveau eau bas, p7=PSI error.
-        if (modes.autoMode) mask |= (uint8_t)(1U << kLedBitModeA);
-        if (modes.winterMode) mask |= (uint8_t)(1U << kLedBitModeB);
-        if (waterLevelLow) mask |= (uint8_t)(1U << kLedBitAlarmC);
-        if (psiAlarm) mask |= (uint8_t)(1U << kLedBitAlarmD);
-    } else {
-        // Page 2:
-        // p2=mode pH auto, p3=mode ORP auto, p4=bidon pH bas, p5=bidon chlore bas,
-        // p6=pompe pH uptime max, p7=pompe chlore uptime max.
+        // LED3=pH auto, LED4=chlorine auto, LED5=chlorine pump uptime,
+        // LED6=pH pump uptime, LED7=chlorine level, LED8=pH level.
         if (modes.phAutoMode) mask |= (uint8_t)(1U << kLedBitModeA);
         if (modes.orpAutoMode) mask |= (uint8_t)(1U << kLedBitModeB);
-        if (phTankLowAlarm) mask |= (uint8_t)(1U << kLedBitAlarmA);
-        if (chlorineTankLowAlarm) mask |= (uint8_t)(1U << kLedBitAlarmB);
-        if (phPumpRuntimeAlarm) mask |= (uint8_t)(1U << kLedBitAlarmC);
-        if (chlorinePumpRuntimeAlarm) mask |= (uint8_t)(1U << kLedBitAlarmD);
+        if (chlorinePumpRuntimeAlarm) mask |= (uint8_t)(1U << kLedBitAlarmA);
+        if (phPumpRuntimeAlarm) mask |= (uint8_t)(1U << kLedBitAlarmB);
+        if (chlorineTankLowAlarm) mask |= (uint8_t)(1U << kLedBitAlarmC);
+        if (phTankLowAlarm) mask |= (uint8_t)(1U << kLedBitAlarmD);
+    } else {
+        // Page 2:
+        // LED3=automatic regulation, LED4=winter mode, LED5=PSI alarm,
+        // LED6=water level alarm, LED7/LED8 unused.
+        if (modes.autoMode) mask |= (uint8_t)(1U << kLedBitModeA);
+        if (modes.winterMode) mask |= (uint8_t)(1U << kLedBitModeB);
+        if (psiAlarm) mask |= (uint8_t)(1U << kLedBitAlarmA);
+        if (waterLevelLow) mask |= (uint8_t)(1U << kLedBitAlarmB);
     }
 
     if (!force && ledMaskValid_ && ledMaskLast_ == mask) return;
-    if (statusLedsSvc_->setMask(statusLedsSvc_->ctx, mask, millis())) {
+    if (frontLedPanel_.writeLogicalMask(mask)) {
         ledMaskLast_ = mask;
         ledMaskValid_ = true;
     }
@@ -1716,7 +1854,14 @@ void HMIModule::onEvent_(const Event& e)
             homePublishMask |= kHomePublishAll;
         }
         if (p->module[0] && strncmp(p->module, kHmiModulePrefix, strlen(kHmiModulePrefix)) == 0) {
+            if (strcmp(p->nvsKey, NvsKeys::Hmi::NextionMotionIoId) == 0) {
+                nextionMotionInputReady_ = false;
+                nextionMotionActiveLast_ = false;
+                nextionMotionReadErrorLogged_ = false;
+                lastNextionMotionWakeAttemptMs_ = 0U;
+            }
             applyOutputConfig_();
+            applyFrontLedPanelConfig_();
             ledDirty = cfgData_.ledsEnabled;
             if (cfgData_.nextionEnabled || cfgData_.remoteUdpEnabled) {
                 homePublishMask |= kHomePublishAll;
@@ -1724,9 +1869,10 @@ void HMIModule::onEvent_(const Event& e)
         }
         if ((p->module[0] && strcmp(p->module, "mqtt") == 0) ||
             strcmp(p->nvsKey, NvsKeys::Mqtt::Enabled) == 0) {
-            mqttConfigRefreshPending_ = true;
-            ledDirty = true;
             homePublishMask |= kHomePublishStateBits;
+        }
+        if ((p->module[0] && (strcmp(p->module, "wifi") == 0 || strcmp(p->module, "ethernet") == 0))) {
+            refreshNetworkExpectations_();
         }
         if ((p->moduleId == (uint8_t)ConfigModuleId::System &&
              strcmp(p->nvsKey, NvsKeys::System::Language) == 0) ||
@@ -1744,25 +1890,17 @@ void HMIModule::onEvent_(const Event& e)
             homePublishMask |= kHomePublishTime | kHomePublishDate;
             rtcPushPending_ = true;
             lastRtcPushAttemptMs_ = 0;
-        } else if (poolLevelRuntimeIndex_ != kInvalidRuntimeIndex &&
-                   p->id == (DataKey)(DATAKEY_IO_BASE + poolLevelRuntimeIndex_)) {
+        } else if (p->id >= DATAKEY_IO_BASE &&
+                   p->id < (DataKey)(DATAKEY_IO_BASE + IO_MAX_ENDPOINTS)) {
             ledDirty = true;
-            homePublishMask |= kHomePublishAlarmBits;
-        } else if (waterTempRuntimeIndex_ != kInvalidRuntimeIndex &&
-                   p->id == (DataKey)(DATAKEY_IO_BASE + waterTempRuntimeIndex_)) {
-            homePublishMask |= kHomePublishWaterTemp;
-        } else if (airTempRuntimeIndex_ != kInvalidRuntimeIndex &&
-                   p->id == (DataKey)(DATAKEY_IO_BASE + airTempRuntimeIndex_)) {
-            homePublishMask |= kHomePublishAirTemp;
-        } else if (phRuntimeIndex_ != kInvalidRuntimeIndex &&
-                   p->id == (DataKey)(DATAKEY_IO_BASE + phRuntimeIndex_)) {
-            homePublishMask |= kHomePublishPh | kHomePublishPhGauge;
-        } else if (orpRuntimeIndex_ != kInvalidRuntimeIndex &&
-                   p->id == (DataKey)(DATAKEY_IO_BASE + orpRuntimeIndex_)) {
-            homePublishMask |= kHomePublishOrp | kHomePublishOrpGauge;
-        } else if (psiRuntimeIndex_ != kInvalidRuntimeIndex &&
-                   p->id == (DataKey)(DATAKEY_IO_BASE + psiRuntimeIndex_)) {
-            homePublishMask |= kHomePublishPsi;
+            homePublishMask |= kHomePublishWaterTemp |
+                               kHomePublishAirTemp |
+                               kHomePublishPh |
+                               kHomePublishOrp |
+                               kHomePublishPhGauge |
+                               kHomePublishOrpGauge |
+                               kHomePublishPsi |
+                               kHomePublishAlarmBits;
         } else if (p->id == (DataKey)(DATAKEY_POOL_DEVICE_STATE_BASE + filtrationDeviceSlot_) ||
                    p->id == (DataKey)(DATAKEY_POOL_DEVICE_STATE_BASE + phPumpDeviceSlot_) ||
                    p->id == (DataKey)(DATAKEY_POOL_DEVICE_STATE_BASE + orpPumpDeviceSlot_) ||
@@ -2185,7 +2323,7 @@ bool HMIModule::executeHmiCommand_(HmiCommandId command, uint8_t value)
             return executeCommandBool_("poollogic.ph_pump.write", value != 0U);
 
         case HmiCommandId::HomeOrpPumpSet:
-            return executeCommandBool_("poollogic.orp_pump.write", value != 0U);
+            return executeCommandBool_("poollogic.dis_pump.write", value != 0U);
 
         case HmiCommandId::HomePhPumpToggle:
             if (!readPoolDeviceActualOn_(phPumpDeviceSlot_, current)) {
@@ -2199,7 +2337,7 @@ bool HMIModule::executeHmiCommand_(HmiCommandId command, uint8_t value)
                 setHomeErrorMessage_("ReadStateFailed", true);
                 return false;
             }
-            return executeCommandBool_("poollogic.orp_pump.write", !current);
+            return executeCommandBool_("poollogic.dis_pump.write", !current);
 
         case HmiCommandId::HomeFiltrationToggle:
             if (!readPoolDeviceActualOn_(filtrationDeviceSlot_, current)) {
@@ -2214,7 +2352,7 @@ bool HMIModule::executeHmiCommand_(HmiCommandId command, uint8_t value)
 
         case HmiCommandId::HomeOrpAutoModeToggle:
             (void)readPoolLogicModeFlags_(modes.autoMode, modes.winterMode, modes.phAutoMode, modes.orpAutoMode);
-            return executePoolLogicModePatch_("orp_auto_mode", !modes.orpAutoMode);
+            return executePoolLogicModePatch_("dis_auto_mode", !modes.orpAutoMode);
 
         case HmiCommandId::HomePhAutoModeToggle:
             (void)readPoolLogicModeFlags_(modes.autoMode, modes.winterMode, modes.phAutoMode, modes.orpAutoMode);
@@ -2313,7 +2451,13 @@ bool HMIModule::executePoolLogicModePatch_(const char* key, bool value)
     }
 
     char json[96]{};
-    snprintf(json, sizeof(json), "{\"poollogic/mode\":{\"%s\":%s}}", key, value ? "true" : "false");
+    const char* moduleName = "poollogic/modes";
+    if (strcmp(key, "ph_auto_mode") == 0) {
+        moduleName = "poollogic/ph";
+    } else if (strcmp(key, "dis_auto_mode") == 0) {
+        moduleName = "poollogic/chlorine";
+    }
+    snprintf(json, sizeof(json), "{\"%s\":{\"%s\":%s}}", moduleName, key, value ? "true" : "false");
     const bool ok = cfgSvc_->applyJson(cfgSvc_->ctx, json);
     if (!ok) {
         LOGW("HMI config patch failed json=%s", json);
@@ -2577,6 +2721,61 @@ bool HMIModule::isDisplaySleeping_() const
     return false;
 }
 
+void HMIModule::updateNextionMotionWake_(uint32_t nowMs)
+{
+    if (!driverReady_ || driver_ != static_cast<IHmiDriver*>(&nextion_)) return;
+
+    // IO_ID_INVALID is the non-Waveshare default and disables motion wake.
+    if (cfgData_.nextionMotionIoId == IO_ID_INVALID) return;
+
+    uint8_t motionActive = 0U;
+    IoStatus status = IO_ERR_INVALID_ARG;
+    if (cfgData_.nextionMotionIoId >= IO_ID_DI_BASE && cfgData_.nextionMotionIoId < IO_ID_AI_BASE) {
+        status = (ioSvc_ && ioSvc_->readDigital)
+            ? ioSvc_->readDigital(ioSvc_->ctx, cfgData_.nextionMotionIoId, &motionActive, nullptr, nullptr)
+            : IO_ERR_NOT_READY;
+    }
+
+    if (status != IO_OK) {
+        if (!nextionMotionReadErrorLogged_) {
+            LOGW("HMI Nextion motion input unavailable io_id=%u status=%u; motion wake disabled",
+                 (unsigned)cfgData_.nextionMotionIoId,
+                 (unsigned)status);
+            nextionMotionReadErrorLogged_ = true;
+        }
+        nextionMotionInputReady_ = false;
+        nextionMotionActiveLast_ = false;
+        return;
+    }
+
+    const bool active = motionActive != 0U;
+    const bool activated = active && (!nextionMotionInputReady_ || !nextionMotionActiveLast_);
+    nextionMotionInputReady_ = true;
+    nextionMotionActiveLast_ = active;
+    nextionMotionReadErrorLogged_ = false;
+
+    // Wake on a new motion edge even if the sleep notification was missed. If
+    // the panel sleeps while the PIR remains active, wake it again immediately.
+    if (!active || (!activated && !nextion_.isSleeping())) return;
+    if (lastNextionMotionWakeAttemptMs_ != 0U &&
+        (uint32_t)(nowMs - lastNextionMotionWakeAttemptMs_) < kNextionMotionWakeRetryMs) {
+        return;
+    }
+
+    lastNextionMotionWakeAttemptMs_ = nowMs;
+    const bool woke = nextion_.wakeFromSleep();
+    if (!woke) {
+        LOGW("HMI Nextion motion wake failed io_id=%u", (unsigned)cfgData_.nextionMotionIoId);
+        return;
+    }
+
+    LOGI("HMI Nextion woke by motion io_id=%u", (unsigned)cfgData_.nextionMotionIoId);
+    resetClockPublishStamps_();
+    queueHomePublish_(kHomePublishAll);
+    lastHomePeriodicRefreshMs_ = nowMs;
+    viewDirty_ = true;
+}
+
 bool HMIModule::render_()
 {
     if (!driver_) return false;
@@ -2723,6 +2922,7 @@ void HMIModule::loop()
     const uint32_t wsLedNow = millis();
     applyWs2812AutoWifiProfile_();
     ws2812StatusLed_.tick(wsLedNow);
+    logHmiLedDebug_(wsLedNow);
 
     if (driver_) {
         if (!driverReady_) {
@@ -2774,13 +2974,10 @@ void HMIModule::loop()
     }
 
     const uint32_t now = millis();
+    updateNextionMotionWake_(now);
     if (homeBindingsRefreshPending_) {
         homeBindingsRefreshPending_ = false;
         refreshHomeBindings_();
-    }
-    if (mqttConfigRefreshPending_) {
-        mqttConfigRefreshPending_ = false;
-        refreshMqttConfig_();
     }
     const bool displaySleeping = isDisplaySleeping_();
     if (driverReady_ &&
@@ -2822,36 +3019,24 @@ void HMIModule::loop()
         (uint32_t)(now - lastDisplayVersionProbeMs_) >= kDisplayVersionProbePeriodMs) {
         lastDisplayVersionProbeMs_ = now;
         const bool hadVersion = nextion_.hasDisplayVersion();
-        const uint32_t previousVersion = nextion_.displayVersion();
+        char previousVersion[HMI_DISPLAY_VERSION_TEXT_MAX]{};
+        if (hadVersion) {
+            strncpy(previousVersion, nextion_.displayVersion(), sizeof(previousVersion) - 1U);
+            previousVersion[sizeof(previousVersion) - 1U] = '\0';
+        }
         if (nextion_.detectDisplayVersion(0U, true)) {
-            const uint32_t currentVersion = nextion_.displayVersion();
-            if (!hadVersion || currentVersion != previousVersion) {
-                LOGI("Ecran Nextion version relue: %lu -> %lu",
-                     (unsigned long)(hadVersion ? previousVersion : 0U),
-                     (unsigned long)currentVersion);
+            const char* currentVersion = nextion_.displayVersion();
+            if (!hadVersion || strcmp(currentVersion, previousVersion) != 0) {
+                LOGI("Ecran Nextion version relue: %s -> %s",
+                     hadVersion ? previousVersion : "",
+                     currentVersion);
             }
             (void)validateDriverDisplayVersion_(false);
         }
     }
     if (kFrontLedsSupported && cfgData_.ledsEnabled) {
-        bool networkConnected = false;
-        bool mqttConnected = false;
-        networkConnected = isNetworkConnected_(dsSvc_);
-        if (dsSvc_ && dsSvc_->store) mqttConnected = mqttReady(*dsSvc_->store);
-
-        if (networkConnected && mqttEnabled_ && !mqttConnected) {
-            if ((uint32_t)(now - lastWifiBlinkToggleMs_) >= kWifiBlinkPeriodMs) {
-                lastWifiBlinkToggleMs_ = now;
-                wifiBlinkOn_ = !wifiBlinkOn_;
-                applyLedMask_(true);
-            }
-        } else if (wifiBlinkOn_) {
-            wifiBlinkOn_ = false;
-            lastWifiBlinkToggleMs_ = now;
-            applyLedMask_(true);
-        }
-
-        if (statusLedsSvc_ && (uint32_t)(now - lastLedPageToggleMs_) >= kLedPageTogglePeriodMs) {
+        if (frontLedPanel_.isReady() &&
+            (uint32_t)(now - lastLedPageToggleMs_) >= kLedPageTogglePeriodMs) {
             lastLedPageToggleMs_ = now;
             const uint8_t nextPage = (ledPage_ == 1U) ? 2U : 1U;
             ledPage_ = nextPage;
@@ -2861,6 +3046,12 @@ void HMIModule::loop()
             applyLedMask_();
             lastLedApplyTryMs_ = now;
         }
+    } else if (kFrontLedsSupported &&
+               frontLedPanel_.isReady() &&
+               frontLedPanel_.isEnabled() &&
+               (uint32_t)(now - lastLedApplyTryMs_) >= 1000U) {
+        (void)frontLedPanel_.setEnabled(false);
+        lastLedApplyTryMs_ = now;
     }
     serviceRtcBridge_(now);
     queueClockPublishIfDue_(now);

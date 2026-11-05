@@ -11,7 +11,7 @@ inline constexpr MqttCapacitySpec kSupervisorBoardRev1MqttCapacity{5712, 8, 8, 4
 inline constexpr MqttBufferSpec kSupervisorBoardRev1MqttBuffers{
     64, 32, 32, 15, 15, 70, 160, 128, 384, 1536, 1024, 1536, 1536, 64, 320, 32
 };
-inline constexpr HaCapacitySpec kSupervisorBoardRev1HaCapacity{40, 6, 14, 14, 24, 9};
+inline constexpr HaCapacitySpec kSupervisorBoardRev1HaCapacity{48, 6, 14, 22, 24, 6};
 
 inline constexpr UartSpec kSupervisorBoardRev1Uarts[] = {
     // {name, uartIndex, rxPin, txPin, baud, primary, enableRxPin}

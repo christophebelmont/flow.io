@@ -75,8 +75,7 @@ public:
 protected:
     /** @brief Helper for classic "loop() in one task" modules. */
     const ModuleTaskSpec* singleLoopTaskSpec() const {
-        static ModuleTaskSpec spec;
-        spec = {
+        singleLoopTaskSpecCache_ = {
             taskName(),
             (uint32_t)taskStackSize(),
             taskPriority(),
@@ -84,7 +83,7 @@ protected:
             &Module::taskEntry,
             const_cast<Module*>(this)
         };
-        return &spec;
+        return &singleLoopTaskSpecCache_;
     }
 
 private:
@@ -92,6 +91,10 @@ private:
 
     static void taskEntry(void* arg) {
         Module* self = static_cast<Module*>(arg);
+        if (!self) {
+            vTaskDelete(nullptr);
+            return;
+        }
         while (true) {
             self->loop();
             vTaskDelay(pdMS_TO_TICKS(Limits::Core::Timing::LoopDelayMs));
@@ -104,4 +107,5 @@ private:
     }
 
     TaskHandle_t primaryTaskHandle_ = nullptr;
+    mutable ModuleTaskSpec singleLoopTaskSpecCache_{};
 };

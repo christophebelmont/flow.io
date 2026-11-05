@@ -32,13 +32,6 @@
 #include "Core/EventBus/EventBus.h"
 #include "Core/EventBus/EventPayloads.h"
 
-/** @brief Defines a configuration migration step between versions. */
-struct MigrationStep {
-    uint32_t fromVersion;
-    uint32_t toVersion;
-    bool (*apply)(Preferences& prefs, bool clearOnFail);
-};
-
 /**
  * @brief Holds config variables, persistence, and JSON import/export.
  */
@@ -108,9 +101,6 @@ public:
     /** @brief Apply JSON patch to registered config variables. */
     bool applyJson(const char* json);
 
-    /** @brief Run config migrations using a version key in NVS. */
-    bool runMigrations(uint32_t currentVersion, const MigrationStep* steps, size_t count,
-                       const char* versionKey = NvsKeys::ConfigVersion, bool clearOnFail = true);
     /** @brief Log NVS write summary when the configured period elapsed. */
     void logNvsWriteSummaryIfDue(uint32_t nowMs, uint32_t periodMs = 60000U);
 
@@ -132,7 +122,6 @@ private:
     bool putFloat_(const char* key, float value);
     bool putBytes_(const char* key, const void* value, size_t len);
     bool putString_(const char* key, const char* value);
-    bool putUInt_(const char* key, uint32_t value);
     void ensureMutex_();
     bool lockPrefs_();
     void unlockPrefs_();

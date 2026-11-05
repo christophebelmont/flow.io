@@ -6,9 +6,10 @@
 
 #include <stdint.h>
 #include <string.h>
+#include "Modules/IOModule/IOModuleDataModel.h"
 #include "Modules/IOModule/IOEndpoints/IOEndpoint.h"
 
-constexpr uint8_t IO_REGISTRY_MAX_ENDPOINTS = 32;
+constexpr uint8_t IO_REGISTRY_MAX_ENDPOINTS = IO_MAX_ENDPOINTS;
 
 class IORegistry {
 public:

@@ -10,14 +10,10 @@ namespace NvsKeys {
 constexpr char StorageNamespace[] = "flowio"; // Preferences namespace name used at boot to open the firmware NVS partition.
 /** @brief Preferences namespace for the Flow Connect Display firmware. */
 constexpr char FlowConnectDisplayStorageNamespace[] = "flowconnectdisp";
-/** @brief Config schema version key read/written by `ConfigStore::runMigrations`. */
-constexpr char ConfigVersion[] = "cfg_ver"; // Persistent schema-version marker used to select and run config migrations.
-
 namespace Wifi {
 constexpr char Enabled[] = "wifi_en"; // WiFi module persisted key for field `wifi_en`.
 constexpr char Ssid[] = "wifi_ssid"; // WiFi module persisted key for field `wifi_ssid`.
 constexpr char Pass[] = "wifi_pass"; // WiFi module persisted key for field `wifi_pass`.
-constexpr char Mdns[] = "wifi_mdns"; // WiFi module persisted key for field `wifi_mdns`.
 }  // namespace Wifi
 
 namespace Ethernet {
@@ -50,12 +46,15 @@ constexpr char Server1[] = "ntp_s1"; // Time module persisted key for field `ntp
 constexpr char Server2[] = "ntp_s2"; // Time module persisted key for field `ntp_s2`.
 constexpr char Tz[] = "ntp_tz"; // Time module persisted key for field `ntp_tz`.
 constexpr char Enabled[] = "ntp_en"; // Time module persisted key for field `ntp_en`.
+constexpr char ManualTime[] = "tm_manual"; // Time module persisted key for field `manual_time`.
 constexpr char WeekStartMonday[] = "tm_wkmon"; // Time module persisted key for field `tm_wkmon`.
 constexpr char ScheduleBlob[] = "tm_sched"; // Time module persisted key for field `tm_sched`.
+constexpr char MetaBlob[] = "tm_meta"; // Time module internal diagnostic metadata blob.
 }  // namespace Time
 
 namespace System {
 constexpr char Language[] = "sys_lang"; // System module persisted key for field `sys_lang`.
+constexpr char DeviceName[] = "sys_dname"; // System module persisted key for field `sys_dname`.
 }  // namespace System
 
 namespace SystemMonitor {
@@ -141,6 +140,21 @@ FLOW_IO_ANALOG_NVS_KEYS("13", IO_A13NM, IO_A13BP, IO_A130, IO_A131, IO_A13P)
 FLOW_IO_ANALOG_NVS_KEYS("14", IO_A14NM, IO_A14BP, IO_A140, IO_A141, IO_A14P)
 FLOW_IO_ANALOG_NVS_KEYS("15", IO_A15NM, IO_A15BP, IO_A150, IO_A151, IO_A15P)
 FLOW_IO_ANALOG_NVS_KEYS("16", IO_A16NM, IO_A16BP, IO_A160, IO_A161, IO_A16P)
+FLOW_IO_ANALOG_NVS_KEYS("17", IO_A17NM, IO_A17BP, IO_A170, IO_A171, IO_A17P)
+FLOW_IO_ANALOG_NVS_KEYS("18", IO_A18NM, IO_A18BP, IO_A180, IO_A181, IO_A18P)
+FLOW_IO_ANALOG_NVS_KEYS("19", IO_A19NM, IO_A19BP, IO_A190, IO_A191, IO_A19P)
+FLOW_IO_ANALOG_NVS_KEYS("20", IO_A20NM, IO_A20BP, IO_A200, IO_A201, IO_A20P)
+FLOW_IO_ANALOG_NVS_KEYS("21", IO_A21NM, IO_A21BP, IO_A210, IO_A211, IO_A21P)
+FLOW_IO_ANALOG_NVS_KEYS("22", IO_A22NM, IO_A22BP, IO_A220, IO_A221, IO_A22P)
+FLOW_IO_ANALOG_NVS_KEYS("23", IO_A23NM, IO_A23BP, IO_A230, IO_A231, IO_A23P)
+FLOW_IO_ANALOG_NVS_KEYS("24", IO_A24NM, IO_A24BP, IO_A240, IO_A241, IO_A24P)
+FLOW_IO_ANALOG_NVS_KEYS("25", IO_A25NM, IO_A25BP, IO_A250, IO_A251, IO_A25P)
+FLOW_IO_ANALOG_NVS_KEYS("26", IO_A26NM, IO_A26BP, IO_A260, IO_A261, IO_A26P)
+FLOW_IO_ANALOG_NVS_KEYS("27", IO_A27NM, IO_A27BP, IO_A270, IO_A271, IO_A27P)
+FLOW_IO_ANALOG_NVS_KEYS("28", IO_A28NM, IO_A28BP, IO_A280, IO_A281, IO_A28P)
+FLOW_IO_ANALOG_NVS_KEYS("29", IO_A29NM, IO_A29BP, IO_A290, IO_A291, IO_A29P)
+FLOW_IO_ANALOG_NVS_KEYS("30", IO_A30NM, IO_A30BP, IO_A300, IO_A301, IO_A30P)
+FLOW_IO_ANALOG_NVS_KEYS("31", IO_A31NM, IO_A31BP, IO_A310, IO_A311, IO_A31P)
 #undef FLOW_IO_ANALOG_NVS_KEYS
 constexpr char IO_ADS[] = "io_ads"; // IO module persisted key for field `io_ads`.
 constexpr char IO_AEAD[] = "io_aead"; // IO module persisted key for field `io_aead`.
@@ -151,6 +165,7 @@ constexpr char IO_I0AH[] = "io_i00ah"; // IO module persisted key for field `io_
 constexpr char IO_I0BP[] = "io_i00bp"; // IO module persisted key for field `io_i00bp`.
 constexpr char IO_I0C0[] = "io_i00c0"; // IO module persisted key for field `io_i00c0`.
 constexpr char IO_I0CT[] = "io_i00ct"; // IO module persisted key for field `io_i00ct`.
+constexpr char IO_I0DB[] = "io_i00db"; // IO module persisted key for field `io_i00db`.
 constexpr char IO_I0ED[] = "io_i00ed"; // IO module persisted key for field `io_i00ed`.
 constexpr char IO_I0MD[] = "io_i00md"; // IO module persisted key for field `io_i00md`.
 constexpr char IO_I0NM[] = "io_i00nm"; // IO module persisted key for field `io_i00nm`.
@@ -161,6 +176,7 @@ constexpr char IO_I1AH[] = "io_i01ah"; // IO module persisted key for field `io_
 constexpr char IO_I1BP[] = "io_i01bp"; // IO module persisted key for field `io_i01bp`.
 constexpr char IO_I1C0[] = "io_i01c0"; // IO module persisted key for field `io_i01c0`.
 constexpr char IO_I1CT[] = "io_i01ct"; // IO module persisted key for field `io_i01ct`.
+constexpr char IO_I1DB[] = "io_i01db"; // IO module persisted key for field `io_i01db`.
 constexpr char IO_I1ED[] = "io_i01ed"; // IO module persisted key for field `io_i01ed`.
 constexpr char IO_I1MD[] = "io_i01md"; // IO module persisted key for field `io_i01md`.
 constexpr char IO_I1NM[] = "io_i01nm"; // IO module persisted key for field `io_i01nm`.
@@ -171,6 +187,7 @@ constexpr char IO_I2AH[] = "io_i02ah"; // IO module persisted key for field `io_
 constexpr char IO_I2BP[] = "io_i02bp"; // IO module persisted key for field `io_i02bp`.
 constexpr char IO_I2C0[] = "io_i02c0"; // IO module persisted key for field `io_i02c0`.
 constexpr char IO_I2CT[] = "io_i02ct"; // IO module persisted key for field `io_i02ct`.
+constexpr char IO_I2DB[] = "io_i02db"; // IO module persisted key for field `io_i02db`.
 constexpr char IO_I2ED[] = "io_i02ed"; // IO module persisted key for field `io_i02ed`.
 constexpr char IO_I2MD[] = "io_i02md"; // IO module persisted key for field `io_i02md`.
 constexpr char IO_I2NM[] = "io_i02nm"; // IO module persisted key for field `io_i02nm`.
@@ -181,6 +198,7 @@ constexpr char IO_I3AH[] = "io_i03ah"; // IO module persisted key for field `io_
 constexpr char IO_I3BP[] = "io_i03bp"; // IO module persisted key for field `io_i03bp`.
 constexpr char IO_I3C0[] = "io_i03c0"; // IO module persisted key for field `io_i03c0`.
 constexpr char IO_I3CT[] = "io_i03ct"; // IO module persisted key for field `io_i03ct`.
+constexpr char IO_I3DB[] = "io_i03db"; // IO module persisted key for field `io_i03db`.
 constexpr char IO_I3ED[] = "io_i03ed"; // IO module persisted key for field `io_i03ed`.
 constexpr char IO_I3MD[] = "io_i03md"; // IO module persisted key for field `io_i03md`.
 constexpr char IO_I3NM[] = "io_i03nm"; // IO module persisted key for field `io_i03nm`.
@@ -191,6 +209,7 @@ constexpr char IO_I4AH[] = "io_i04ah"; // IO module persisted key for field `io_
 constexpr char IO_I4BP[] = "io_i04bp"; // IO module persisted key for field `io_i04bp`.
 constexpr char IO_I4C0[] = "io_i04c0"; // IO module persisted key for field `io_i04c0`.
 constexpr char IO_I4CT[] = "io_i04ct"; // IO module persisted key for field `io_i04ct`.
+constexpr char IO_I4DB[] = "io_i04db"; // IO module persisted key for field `io_i04db`.
 constexpr char IO_I4ED[] = "io_i04ed"; // IO module persisted key for field `io_i04ed`.
 constexpr char IO_I4MD[] = "io_i04md"; // IO module persisted key for field `io_i04md`.
 constexpr char IO_I4NM[] = "io_i04nm"; // IO module persisted key for field `io_i04nm`.
@@ -201,6 +220,7 @@ constexpr char IO_I5AH[] = "io_i05ah"; // IO module persisted key for field `io_
 constexpr char IO_I5BP[] = "io_i05bp"; // IO module persisted key for field `io_i05bp`.
 constexpr char IO_I5C0[] = "io_i05c0"; // IO module persisted key for field `io_i05c0`.
 constexpr char IO_I5CT[] = "io_i05ct"; // IO module persisted key for field `io_i05ct`.
+constexpr char IO_I5DB[] = "io_i05db"; // IO module persisted key for field `io_i05db`.
 constexpr char IO_I5ED[] = "io_i05ed"; // IO module persisted key for field `io_i05ed`.
 constexpr char IO_I5MD[] = "io_i05md"; // IO module persisted key for field `io_i05md`.
 constexpr char IO_I5NM[] = "io_i05nm"; // IO module persisted key for field `io_i05nm`.
@@ -211,6 +231,7 @@ constexpr char IO_I6AH[] = "io_i06ah"; // IO module persisted key for field `io_
 constexpr char IO_I6BP[] = "io_i06bp"; // IO module persisted key for field `io_i06bp`.
 constexpr char IO_I6C0[] = "io_i06c0"; // IO module persisted key for field `io_i06c0`.
 constexpr char IO_I6CT[] = "io_i06ct"; // IO module persisted key for field `io_i06ct`.
+constexpr char IO_I6DB[] = "io_i06db"; // IO module persisted key for field `io_i06db`.
 constexpr char IO_I6ED[] = "io_i06ed"; // IO module persisted key for field `io_i06ed`.
 constexpr char IO_I6MD[] = "io_i06md"; // IO module persisted key for field `io_i06md`.
 constexpr char IO_I6NM[] = "io_i06nm"; // IO module persisted key for field `io_i06nm`.
@@ -221,12 +242,33 @@ constexpr char IO_I7AH[] = "io_i07ah"; // IO module persisted key for field `io_
 constexpr char IO_I7BP[] = "io_i07bp"; // IO module persisted key for field `io_i07bp`.
 constexpr char IO_I7C0[] = "io_i07c0"; // IO module persisted key for field `io_i07c0`.
 constexpr char IO_I7CT[] = "io_i07ct"; // IO module persisted key for field `io_i07ct`.
+constexpr char IO_I7DB[] = "io_i07db"; // IO module persisted key for field `io_i07db`.
 constexpr char IO_I7ED[] = "io_i07ed"; // IO module persisted key for field `io_i07ed`.
 constexpr char IO_I7MD[] = "io_i07md"; // IO module persisted key for field `io_i07md`.
 constexpr char IO_I7NM[] = "io_i07nm"; // IO module persisted key for field `io_i07nm`.
 constexpr char IO_I7P[] = "io_i07p"; // IO module persisted key for field `io_i07p`.
 constexpr char IO_I7PN[] = "io_i07pn"; // IO module persisted key for field `io_i07pn`.
 constexpr char IO_I7PU[] = "io_i07pu"; // IO module persisted key for field `io_i07pu`.
+#define FLOW_IO_DIGITAL_INPUT_NVS_KEYS(SLOT, IDX) \
+constexpr char IO_I##IDX##AH[] = "io_i" SLOT "ah"; \
+constexpr char IO_I##IDX##BP[] = "io_i" SLOT "bp"; \
+constexpr char IO_I##IDX##C0[] = "io_i" SLOT "c0"; \
+constexpr char IO_I##IDX##CT[] = "io_i" SLOT "ct"; \
+constexpr char IO_I##IDX##DB[] = "io_i" SLOT "db"; \
+constexpr char IO_I##IDX##ED[] = "io_i" SLOT "ed"; \
+constexpr char IO_I##IDX##MD[] = "io_i" SLOT "md"; \
+constexpr char IO_I##IDX##NM[] = "io_i" SLOT "nm"; \
+constexpr char IO_I##IDX##P[] = "io_i" SLOT "p"; \
+constexpr char IO_I##IDX##PU[] = "io_i" SLOT "pu";
+FLOW_IO_DIGITAL_INPUT_NVS_KEYS("08", 8)
+FLOW_IO_DIGITAL_INPUT_NVS_KEYS("09", 9)
+FLOW_IO_DIGITAL_INPUT_NVS_KEYS("10", 10)
+FLOW_IO_DIGITAL_INPUT_NVS_KEYS("11", 11)
+FLOW_IO_DIGITAL_INPUT_NVS_KEYS("12", 12)
+FLOW_IO_DIGITAL_INPUT_NVS_KEYS("13", 13)
+FLOW_IO_DIGITAL_INPUT_NVS_KEYS("14", 14)
+FLOW_IO_DIGITAL_INPUT_NVS_KEYS("15", 15)
+#undef FLOW_IO_DIGITAL_INPUT_NVS_KEYS
 constexpr char IO_D0AH[] = "io_d00ah"; // IO module persisted key for field `io_d00ah`.
 constexpr char IO_D0BP[] = "io_d00bp"; // IO module persisted key for field `io_d00bp`.
 constexpr char IO_D0IN[] = "io_d00in"; // IO module persisted key for field `io_d00in`.
@@ -291,6 +333,23 @@ constexpr char IO_D7NM[] = "io_d07nm"; // IO module persisted key for field `io_
 constexpr char IO_D7PM[] = "io_d07pm"; // IO module persisted key for field `io_d07pm`.
 constexpr char IO_D7PN[] = "io_d07pn"; // IO module persisted key for field `io_d07pn`.
 constexpr char IO_D7RT[] = "io_d07rt"; // IO module persisted key for field `io_d07rt`.
+#define FLOW_IO_DIGITAL_OUTPUT_NVS_KEYS(SLOT_STR, KEYNM, KEYBP, KEYAH, KEYIN, KEYRT, KEYMO, KEYPM) \
+constexpr char KEYAH[] = "io_d" SLOT_STR "ah"; /* IO module persisted key for field `io_d" SLOT_STR "ah`. */ \
+constexpr char KEYBP[] = "io_d" SLOT_STR "bp"; /* IO module persisted key for field `io_d" SLOT_STR "bp`. */ \
+constexpr char KEYIN[] = "io_d" SLOT_STR "in"; /* IO module persisted key for field `io_d" SLOT_STR "in`. */ \
+constexpr char KEYMO[] = "io_d" SLOT_STR "mo"; /* IO module persisted key for field `io_d" SLOT_STR "mo`. */ \
+constexpr char KEYNM[] = "io_d" SLOT_STR "nm"; /* IO module persisted key for field `io_d" SLOT_STR "nm`. */ \
+constexpr char KEYPM[] = "io_d" SLOT_STR "pm"; /* IO module persisted key for field `io_d" SLOT_STR "pm`. */ \
+constexpr char KEYRT[] = "io_d" SLOT_STR "rt"; /* IO module persisted key for field `io_d" SLOT_STR "rt`. */
+FLOW_IO_DIGITAL_OUTPUT_NVS_KEYS("08", IO_D8NM, IO_D8BP, IO_D8AH, IO_D8IN, IO_D8RT, IO_D8MO, IO_D8PM)
+FLOW_IO_DIGITAL_OUTPUT_NVS_KEYS("09", IO_D9NM, IO_D9BP, IO_D9AH, IO_D9IN, IO_D9RT, IO_D9MO, IO_D9PM)
+FLOW_IO_DIGITAL_OUTPUT_NVS_KEYS("10", IO_D10NM, IO_D10BP, IO_D10AH, IO_D10IN, IO_D10RT, IO_D10MO, IO_D10PM)
+FLOW_IO_DIGITAL_OUTPUT_NVS_KEYS("11", IO_D11NM, IO_D11BP, IO_D11AH, IO_D11IN, IO_D11RT, IO_D11MO, IO_D11PM)
+FLOW_IO_DIGITAL_OUTPUT_NVS_KEYS("12", IO_D12NM, IO_D12BP, IO_D12AH, IO_D12IN, IO_D12RT, IO_D12MO, IO_D12PM)
+FLOW_IO_DIGITAL_OUTPUT_NVS_KEYS("13", IO_D13NM, IO_D13BP, IO_D13AH, IO_D13IN, IO_D13RT, IO_D13MO, IO_D13PM)
+FLOW_IO_DIGITAL_OUTPUT_NVS_KEYS("14", IO_D14NM, IO_D14BP, IO_D14AH, IO_D14IN, IO_D14RT, IO_D14MO, IO_D14PM)
+FLOW_IO_DIGITAL_OUTPUT_NVS_KEYS("15", IO_D15NM, IO_D15BP, IO_D15AH, IO_D15IN, IO_D15RT, IO_D15MO, IO_D15PM)
+#undef FLOW_IO_DIGITAL_OUTPUT_NVS_KEYS
 constexpr char IO_DIN[] = "io_din"; // IO module persisted key for field `io_din`.
 constexpr char IO_DS[] = "io_ds"; // IO module persisted key for field `io_ds`.
 constexpr char IO_EN[] = "io_en"; // IO module persisted key for field `io_en`.
@@ -307,10 +366,18 @@ constexpr char IO_INAEN[] = "io_inaen"; // IO module persisted key for field `io
 constexpr char IO_INAAD[] = "io_inaad"; // IO module persisted key for field `io_ina226_address`.
 constexpr char IO_INAPL[] = "io_inapl"; // IO module persisted key for field `io_ina226_poll_ms`.
 constexpr char IO_INASH[] = "io_inash"; // IO module persisted key for field `io_ina226_shunt_ohms`.
-constexpr char IO_PCFAD[] = "io_pcfad"; // IO module persisted key for field `io_pcfad`.
-constexpr char IO_PCFAL[] = "io_pcfal"; // IO module persisted key for field `io_pcfal`.
-constexpr char IO_PCFEN[] = "io_pcfen"; // IO module persisted key for field `io_pcfen`.
-constexpr char IO_PCFMK[] = "io_pcfmk"; // IO module persisted key for field `io_pcfmk`.
+constexpr char IO_X0EN[] = "io_x0en"; // IO expander 0 enabled.
+constexpr char IO_X0AD[] = "io_x0ad"; // IO expander 0 I2C address.
+constexpr char IO_X0MK[] = "io_x0mk"; // IO expander 0 default mask.
+constexpr char IO_X1EN[] = "io_x1en"; // IO expander 1 enabled.
+constexpr char IO_X1AD[] = "io_x1ad"; // IO expander 1 I2C address.
+constexpr char IO_X1MK[] = "io_x1mk"; // IO expander 1 default mask.
+constexpr char IO_X2EN[] = "io_x2en"; // IO expander 2 enabled.
+constexpr char IO_X2AD[] = "io_x2ad"; // IO expander 2 I2C address.
+constexpr char IO_X2MK[] = "io_x2mk"; // IO expander 2 default mask.
+constexpr char IO_X3EN[] = "io_x3en"; // IO expander 3 enabled.
+constexpr char IO_X3AD[] = "io_x3ad"; // IO expander 3 I2C address.
+constexpr char IO_X3MK[] = "io_x3mk"; // IO expander 3 default mask.
 constexpr char IO_SCL[] = "io_scl"; // IO module persisted key for field `io_scl`.
 constexpr char IO_SDA[] = "io_sda"; // IO module persisted key for field `io_sda`.
 constexpr char IO_SCL_S3[] = "io_scl3"; // IO module persisted key for S3 field `io_scl`.
@@ -349,8 +416,19 @@ constexpr char PhAutoMode[] = "pl_pha"; // Pool logic module persisted key for f
 constexpr char OrpAutoMode[] = "pl_orpa"; // Pool logic module persisted key for field `pl_orpa`.
 constexpr char HeaterAutoMode[] = "pl_hta"; // Pool logic module persisted key for field `pl_hta`.
 constexpr char PhDosePlus[] = "pl_phpl"; // Pool logic module persisted key for field `pl_phpl`.
-constexpr char ElectrolyseMode[] = "pl_elec"; // Pool logic module persisted key for field `pl_elec`.
-constexpr char ElectroRunMode[] = "pl_erun"; // Pool logic module persisted key for field `pl_erun`.
+constexpr char DisinfectionType[] = "pl_dtype"; // Pool logic module persisted key for field `disinfection_type`.
+constexpr char SwgControlMode[] = "pl_swgm"; // Pool logic module persisted key for field `swg_control_mode`.
+constexpr char O2PoolVolumeM3[] = "pl_o2vol"; // Pool logic O2 pool volume in m3.
+constexpr char O2DoseMlPer10M3Week[] = "pl_o2dose"; // Pool logic O2 weekly dose in ml/10m3.
+constexpr char O2MainHour[] = "pl_o2hr"; // Pool logic O2 main dosing hour.
+constexpr char O2SplitCount[] = "pl_o2spl"; // Pool logic O2 weekly split count.
+constexpr char O2TempComp[] = "pl_o2tc"; // Pool logic O2 temperature compensation enable.
+constexpr char O2LoadFactor[] = "pl_o2load"; // Pool logic O2 manual load factor.
+constexpr char O2MinFilterRunMin[] = "pl_o2mfr"; // Pool logic O2 minimum filtration runtime before dosing.
+constexpr char O2ProtocolState[] = "pl_o2st"; // Pool logic O2 persisted protocol state.
+constexpr char O2LastDoseDay[] = "pl_o2day"; // Pool logic O2 last dose day key.
+constexpr char O2WeeklyDoneMl[] = "pl_o2done"; // Pool logic O2 weekly injected volume.
+constexpr char O2PendingMl[] = "pl_o2pend"; // Pool logic O2 pending volume after reboot.
 constexpr char TempLow[] = "pl_tlow"; // Pool logic module persisted key for field `pl_tlow`.
 constexpr char TempSetpoint[] = "pl_tset"; // Pool logic module persisted key for field `pl_tset`.
 constexpr char FiltrationStartMin[] = "pl_smin"; // Pool logic module persisted key for field `pl_smin`.
@@ -422,13 +500,16 @@ constexpr char EvalPeriodMs[] = "al_epms"; // Alarm module persisted key for fie
 
 namespace Hmi {
 constexpr char LedsEnabled[] = "hmi_leds"; // HMI module persisted key for logical LED-panel writes enable.
+constexpr char WaveshareLedEnabled[] = "hmi_wsled"; // HMI module persisted key for Waveshare WS2812 status LED enable.
 constexpr char NextionEnabled[] = "hmi_nxen"; // HMI module persisted key for Nextion output enable.
+constexpr char NextionMotionIoId[] = "hmi_nxio"; // Logical digital input used to wake the local Nextion display.
 constexpr char FlowConnectUdpEnabled[] = "hmi_fcden"; // HMI module persisted key for Flow Connect Display UDP driver enable.
 constexpr char FlowConnectUdpToken[] = "hmi_fcdtk"; // Shared token for Flow Connect Display UDP pairing.
 constexpr char RemoteUdpEnabledLegacy[] = "hmi_udpen"; // Legacy remote UDP display driver enable key.
 constexpr char RemoteUdpTokenLegacy[] = "hmi_udptk"; // Legacy remote UDP display pairing token key.
 constexpr char VeniceEnabled[] = "hmi_vcen"; // HMI module persisted key for Venice RF433 output enable.
 constexpr char VeniceTxGpio[] = "hmi_vcgp"; // HMI module persisted key for Venice RF433 TX GPIO.
+constexpr char BuzzerEnable[] = "hmi_bz_en"; // HMI buzzer module persisted key for config-ack beep enable.
 }  // namespace Hmi
 
 namespace FlowConnectDisplay {

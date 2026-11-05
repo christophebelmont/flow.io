@@ -8,7 +8,7 @@ WebSocket ni JSON côté `FlowIO`.
 ## Profils
 
 - `FlowIO` garde le `NextionDriver` local par défaut.
-- `FlowIO` peut utiliser le driver distant avec `hmi/fcd_udp/enabled=true`
+- `FlowIO` peut utiliser le driver distant avec `hmi/nextion_udp/enabled=true`
   ou le define `FLOW_HMI_REMOTE_UDP=1`.
 - `FlowConnectDisplay` contient seulement Wi-Fi, logs série, config minimale,
   `NextionDriver` et `FlowConnectDisplayUdpClientModule`.
@@ -45,16 +45,18 @@ terminal. Cela permet d'éditer les champs texte du menu config sans troncature
 en mode Flow Connect Display (UDP), avec la même limite pratique qu'en mode
 Nextion UART direct.
 
-`FlowConnectDisplay` lit `globals.vaVersion.val` dans son Nextion local au démarrage.
+`FlowConnectDisplay` lit `globals.vaVersion.txt` dans son Nextion local au démarrage.
+Cette variable doit contenir une version texte au format `M.m.p` avec 1 à 2
+chiffres par segment, par exemple `6.0.0` ou `12.34.56` (8 caractères max).
 Quand la lecture réussit, `Hello` transporte cette version et le flag
 `HMI_UDP_HELLO_FLAG_NEXTION_VERSION_VALID`. `FlowIO` applique alors la même
-validation que pour un Nextion directement attaché et adapte le rendu Home au
-contrat V1/V2 courant.
+validation que pour un Nextion directement attaché, en comparant cette chaîne
+à la version TFT attendue par le firmware.
 
 Quand le lien est établi, `FlowConnectDisplay` relit cette version toutes les
 60 secondes hors rendu de menu/configuration, puis renvoie un `Hello` unicast à
 `FlowIO`. Si la version annoncée change, `FlowIO` force un rafraîchissement Home
-complet et `HMIModule` adapte dynamiquement le mode V1/V2.
+complet et `HMIModule` relance la validation de compatibilité.
 
 `HmiEvent` et `HomeStateBits` sont envoyés avec `ACK_REQUIRED`. `FlowIO`
 répond `Ack` aux événements; `FlowConnectDisplay` répond `Ack` au bitmap d'état. Les
@@ -78,7 +80,7 @@ Quand `Welcome.accepted=1` est reçu, `FlowConnectDisplay` affiche `tFConnectSta
 
 ## Token
 
-Le token partagé optionnel côté `FlowIO` est configuré dans `hmi/fcd_udp/token`.
+Le token partagé optionnel côté `FlowIO` est configuré dans `hmi/nextion_udp/token`.
 Côté `FlowConnectDisplay`, il est configuré dans `fcd/udp/token`. Il n'est
 jamais envoyé en clair: `FlowConnectDisplay` place seulement `tokenCrc` dans
 `Hello`. Si le token `FlowIO` est vide, tout Flow Connect Display est accepté;

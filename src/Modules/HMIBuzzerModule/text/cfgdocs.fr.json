@@ -1,0 +1,14 @@
+{
+  "_meta": {
+    "generated": true,
+    "locale": "fr",
+    "version": 1
+  },
+  "docs": {
+    "hmi/buzzer/enable": {
+      "type": "Bool",
+      "label_t": "cfgdocs.hmi.buzzer.enable.label",
+      "help_t": "cfgdocs.hmi.buzzer.enable.help"
+    }
+  }
+}

@@ -8,6 +8,9 @@
 #include "Modules/PoolDeviceModule/PoolDeviceRuntime.h"
 
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
 
 #define LOG_MODULE_ID ((LogModuleId)LogModuleIdValue::PoolLogicModule)
 #include "Core/ModuleLog.h"
@@ -18,9 +21,18 @@ constexpr uint32_t kHeaterTempFreshMaxMs = 10UL * 60UL * 1000UL;
 constexpr uint16_t kHeatAssistProbeRunSec = 5U * 60U;
 constexpr uint16_t kHeatAssistIdleSlowSec = 30U * 60U;
 constexpr uint16_t kHeatAssistIdleFastSec = 20U * 60U;
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+constexpr uint16_t kHeatAssistAdaptiveFallbackMin = 30U;
+constexpr uint16_t kHeatAssistAdaptiveMinIntervalMin = 20U;
+constexpr uint16_t kHeatAssistAdaptiveMaxIntervalMin = 60U;
+constexpr float kHeatAssistAdaptiveLowDeltaC = 10.0f;
+constexpr float kHeatAssistAdaptiveHighDeltaC = 20.0f;
+#endif
 constexpr uint8_t kHeatAssistFlagProbeRunning = (1U << 0);
 constexpr uint8_t kHeatAssistFlagHeatingActive = (1U << 1);
 constexpr uint8_t kHeatAssistFlagFastCycle = (1U << 2);
+constexpr uint32_t kO2PersistPeriodMs = 30000UL;
+constexpr float kO2DoseEpsilonMl = 0.5f;
 
 const char* poolDeviceSvcStatusStr_(PoolDeviceSvcStatus st)
 {
@@ -46,10 +58,513 @@ const char* poolDeviceBlockReasonStr_(uint8_t reason)
         case POOL_DEVICE_BLOCK_INTERLOCK: return "interlock";
         case POOL_DEVICE_BLOCK_IO_ERROR: return "io_error";
         case POOL_DEVICE_BLOCK_MAX_UPTIME: return "max_uptime";
+        case POOL_DEVICE_BLOCK_IO_DISABLED: return "io_disabled";
         default: return "unknown";
     }
 }
+
+uint16_t o2WeekKeyFromDayKey_(uint16_t dayKey)
+{
+    return (uint16_t)(dayKey / 7U);
+}
 }  // namespace
+
+bool PoolLogicModule::isDisinfectionType_(DisinfectionType type) const
+{
+    return disinfectionType_ == (uint8_t)type;
+}
+
+const char* PoolLogicModule::disinfectionTypeStr_(uint8_t type)
+{
+    switch (type) {
+        case DisinfectionChlorineBromine: return "chlorine_bromine";
+        case DisinfectionSwg: return "swg";
+        case DisinfectionActiveOxygen: return "active_oxygen";
+        case DisinfectionDisabled: return "disabled";
+        default: return "unknown";
+    }
+}
+
+const char* PoolLogicModule::swgControlModeStr_(uint8_t mode)
+{
+    switch (mode) {
+        case SwgControlOrp: return "orp";
+        case SwgControlContinuous: return "continuous";
+        default: return "unknown";
+    }
+}
+
+const char* PoolLogicModule::o2ProtocolStateStr_(uint8_t state)
+{
+    switch (state) {
+        case O2ProtocolIdle: return "idle";
+        case O2ProtocolPending: return "pending";
+        case O2ProtocolDosing: return "dosing";
+        case O2ProtocolBlocked: return "blocked";
+        default: return "unknown";
+    }
+}
+
+const char* PoolLogicModule::o2BlockReasonStr_(uint8_t reason)
+{
+    switch (reason) {
+        case O2BlockNone: return "none";
+        case O2BlockInactive: return "inactive";
+        case O2BlockTimeUnsynced: return "time_unsynced";
+        case O2BlockPsi: return "psi";
+        case O2BlockTankLow: return "tank_low";
+        case O2BlockFlowInvalid: return "flow_invalid";
+        case O2BlockFiltrationWait: return "filtration_wait";
+        case O2BlockPumpService: return "pump_service";
+        case O2BlockPumpBlocked: return "pump_blocked";
+        case O2BlockConfig: return "config";
+        default: return "unknown";
+    }
+}
+
+ActivityRole PoolLogicModule::activityRoleForDeviceSlot_(uint8_t deviceSlot) const
+{
+    if (deviceSlot == filtrationDeviceSlot_) return ActivityRole::Filtration;
+    if (deviceSlot == swgDeviceSlot_) return ActivityRole::Swg;
+    if (deviceSlot == robotDeviceSlot_) return ActivityRole::Robot;
+    if (deviceSlot == fillingDeviceSlot_) return ActivityRole::Filling;
+    if (deviceSlot == phPumpDeviceSlot_) return ActivityRole::Ph;
+    if (deviceSlot == orpPumpDeviceSlot_) return ActivityRole::Disinfection;
+    if (deviceSlot == heaterDeviceSlot_) return ActivityRole::Heater;
+    return ActivityRole::None;
+}
+
+const char* PoolLogicModule::activityRoleLabel_(ActivityRole role) const
+{
+    switch (role) {
+        case ActivityRole::Filtration: return "Filtration";
+        case ActivityRole::Swg: return "Électrolyseur";
+        case ActivityRole::Robot: return "Robot";
+        case ActivityRole::Filling: return "Remplissage";
+        case ActivityRole::Ph: return "Pompe pH";
+        case ActivityRole::Disinfection: return "Désinfection";
+        case ActivityRole::Heater: return "Chauffage";
+        case ActivityRole::None:
+        default: return "Équipement";
+    }
+}
+
+void PoolLogicModule::emitActivity_(ActivityCode code,
+                                    ActivitySource source,
+                                    ActivitySeverity severity,
+                                    ActivityRole role,
+                                    ActivityState state,
+                                    ActivityReason reason,
+                                    uint8_t deviceSlot,
+                                    const char* title,
+                                    const char* detail,
+                                    const char* icon) const
+{
+    if (!activityLogSvc_ || !activityLogSvc_->emit) return;
+    ActivityEvent event{};
+    event.code = (uint16_t)code;
+    event.domain = (uint8_t)ActivityDomain::PoolLogic;
+    event.source = (uint8_t)source;
+    event.severity = (uint8_t)severity;
+    event.role = (uint8_t)role;
+    event.state = (uint8_t)state;
+    event.reason = (uint8_t)reason;
+    event.targetSlot = deviceSlot;
+    snprintf(event.title, sizeof(event.title), "%s", title ? title : "PoolLogic");
+    snprintf(event.detail, sizeof(event.detail), "%s", detail ? detail : "");
+    snprintf(event.icon, sizeof(event.icon), "%s", icon ? icon : "pool");
+    (void)activityLogSvc_->emit(activityLogSvc_->ctx, &event);
+}
+
+void PoolLogicModule::emitDeviceActivity_(bool requested,
+                                          bool on,
+                                          uint8_t deviceSlot,
+                                          const char* label,
+                                          ActivityReason reason) const
+{
+    const ActivityRole role = activityRoleForDeviceSlot_(deviceSlot);
+    const char* roleLabel = activityRoleLabel_(role);
+    const char* deviceLabel = (label && label[0] != '\0') ? label : roleLabel;
+    char title[48] = {0};
+    char detail[128] = {0};
+    const char* icon = "power_settings_new";
+    if (role == ActivityRole::Filtration) icon = "pool";
+    else if (role == ActivityRole::Robot) icon = "cleaning_services";
+    else if (role == ActivityRole::Ph || role == ActivityRole::Disinfection) icon = "science";
+    else if (role == ActivityRole::Heater) icon = "heat_pump";
+    else if (role == ActivityRole::Filling) icon = "water_drop";
+    else if (role == ActivityRole::Swg) icon = "bolt";
+
+    if (requested) {
+        snprintf(title,
+                 sizeof(title),
+                 "%s %s demandé",
+                 deviceLabel,
+                 on ? "ON" : "OFF");
+        snprintf(detail,
+                 sizeof(detail),
+                 "PoolLogic demande %s pour %s (slot %u).",
+                 on ? "le démarrage" : "l'arrêt",
+                 roleLabel,
+                 (unsigned)deviceSlot);
+        emitActivity_(on ? ActivityCode::PoolLogicDeviceStartRequested
+                         : ActivityCode::PoolLogicDeviceStopRequested,
+                      ActivitySource::Auto,
+                      ActivitySeverity::Info,
+                      role,
+                      on ? ActivityState::RequestedOn : ActivityState::RequestedOff,
+                      reason,
+                      deviceSlot,
+                      title,
+                      detail,
+                      icon);
+        return;
+    }
+
+    snprintf(title,
+             sizeof(title),
+             "%s %s",
+             deviceLabel,
+             on ? "a démarré" : "s'est arrêté");
+    snprintf(detail,
+             sizeof(detail),
+             "État réel observé pour %s (slot %u).",
+             roleLabel,
+             (unsigned)deviceSlot);
+    emitActivity_(on ? ActivityCode::PoolLogicDeviceStarted : ActivityCode::PoolLogicDeviceStopped,
+                  ActivitySource::Auto,
+                  on ? ActivitySeverity::Success : ActivitySeverity::Info,
+                  role,
+                  on ? ActivityState::On : ActivityState::Off,
+                  ActivityReason::None,
+                  deviceSlot,
+                  title,
+                  detail,
+                  icon);
+}
+
+void PoolLogicModule::emitAutoModeDisabledByManualActivity_(ActivityRole role,
+                                                            uint8_t deviceSlot,
+                                                            const char* autoLabel) const
+{
+    const char* roleLabel = activityRoleLabel_(role);
+    const char* label = (autoLabel && autoLabel[0] != '\0') ? autoLabel : roleLabel;
+    const char* icon = "settings";
+    if (role == ActivityRole::Filtration) icon = "pool";
+    else if (role == ActivityRole::Ph || role == ActivityRole::Disinfection) icon = "science";
+
+    char title[48] = {0};
+    char detail[128] = {0};
+    snprintf(title, sizeof(title), "Mode auto %s désactivé", label);
+    snprintf(detail,
+             sizeof(detail),
+             "Commande manuelle sur %s: l'automatisme a été désactivé.",
+             roleLabel);
+    emitActivity_(ActivityCode::SystemConfigChanged,
+                  ActivitySource::Manual,
+                  ActivitySeverity::Info,
+                  role,
+                  ActivityState::None,
+                  ActivityReason::Manual,
+                  deviceSlot,
+                  title,
+                  detail,
+                  icon);
+}
+
+bool PoolLogicModule::readPoolDeviceFlowLh_(uint8_t deviceSlot, float& flowLhOut) const
+{
+    flowLhOut = 0.0f;
+    if (!cfgStore_ || deviceSlot >= POOL_DEVICE_MAX) return false;
+
+    char moduleName[16] = {0};
+    snprintf(moduleName, sizeof(moduleName), "pdm/pd%u", (unsigned)deviceSlot);
+
+    bool truncated = false;
+    if (!cfgStore_->toJsonModule(moduleName,
+                                 o2PoolDeviceJsonBuf_,
+                                 sizeof(o2PoolDeviceJsonBuf_),
+                                 &truncated) ||
+        truncated) {
+        return false;
+    }
+
+    const char* key = strstr(o2PoolDeviceJsonBuf_, "\"flow_l_h\":");
+    if (!key) return false;
+    key += 11;
+    char* end = nullptr;
+    const float flow = strtof(key, &end);
+    if (end == key) return false;
+    if (!std::isfinite(flow) || flow <= 0.0f) return false;
+    flowLhOut = flow;
+    return true;
+}
+
+bool PoolLogicModule::currentO2LocalTime_(uint16_t& dayKeyOut,
+                                          uint16_t& weekKeyOut,
+                                          uint8_t& weekDayMon0Out,
+                                          uint8_t& hourOut) const
+{
+    dayKeyOut = 0;
+    weekKeyOut = 0;
+    weekDayMon0Out = 0;
+    hourOut = 0;
+    if (!timeSvc_ || !timeSvc_->isSynced || !timeSvc_->epoch || !timeSvc_->isSynced(timeSvc_->ctx)) {
+        return false;
+    }
+
+    const uint64_t epoch = timeSvc_->epoch(timeSvc_->ctx);
+    if (epoch < 1609459200ULL) return false;
+    const time_t now = (time_t)epoch;
+    tm localNow{};
+    if (!localtime_r(&now, &localNow)) return false;
+
+    const uint64_t epochDay = epoch / 86400ULL;
+    dayKeyOut = (uint16_t)(epochDay & 0xFFFFU);
+    weekKeyOut = (uint16_t)((epochDay / 7ULL) & 0xFFFFU);
+    weekDayMon0Out = (uint8_t)((localNow.tm_wday + 6) % 7);
+    hourOut = (uint8_t)localNow.tm_hour;
+    return true;
+}
+
+bool PoolLogicModule::isO2DoseDay_(uint8_t weekDayMon0) const
+{
+    if (o2SplitCount_ <= 1U) return weekDayMon0 == 0U;
+    if (o2SplitCount_ == 2U) return weekDayMon0 == 0U || weekDayMon0 == 3U;
+    return weekDayMon0 == 0U || weekDayMon0 == 2U || weekDayMon0 == 4U;
+}
+
+float PoolLogicModule::o2TemperatureFactor_(bool haveWaterTemp, float waterTemp) const
+{
+    if (!o2TempComp_ || !haveWaterTemp || !std::isfinite(waterTemp)) return 1.0f;
+    if (waterTemp <= 18.0f) {
+        const float factor = 1.0f - ((18.0f - waterTemp) * 0.02f);
+        return (factor < 0.75f) ? 0.75f : factor;
+    }
+    if (waterTemp >= 24.0f) {
+        const float factor = 1.0f + ((waterTemp - 24.0f) * 0.03f);
+        return (factor > 1.50f) ? 1.50f : factor;
+    }
+    return 1.0f;
+}
+
+float PoolLogicModule::computeO2WeeklyDoseMl_(bool haveWaterTemp, float waterTemp) const
+{
+    if (!std::isfinite(o2PoolVolumeM3_) || o2PoolVolumeM3_ <= 0.0f ||
+        !std::isfinite(o2DoseMlPer10M3Week_) || o2DoseMlPer10M3Week_ <= 0.0f ||
+        !std::isfinite(o2LoadFactor_) || o2LoadFactor_ <= 0.0f) {
+        return 0.0f;
+    }
+
+    const float base = (o2PoolVolumeM3_ / 10.0f) * o2DoseMlPer10M3Week_;
+    const float dose = base * o2LoadFactor_ * o2TemperatureFactor_(haveWaterTemp, waterTemp);
+    if (!std::isfinite(dose) || dose <= 0.0f) return 0.0f;
+    return dose;
+}
+
+void PoolLogicModule::setO2ProtocolState_(uint8_t state, uint8_t blockReason, uint32_t nowMs)
+{
+    if (state > O2ProtocolBlocked) state = O2ProtocolIdle;
+    if (o2ProtocolState_ != state || o2BlockReason_ != blockReason) {
+        o2ProtocolState_ = state;
+        o2BlockReason_ = blockReason;
+        o2LastPersistMs_ = 0;
+        LOGI("O2 protocol state=%s block=%s pending=%.1f done=%.1f",
+             o2ProtocolStateStr_(o2ProtocolState_),
+             o2BlockReasonStr_(o2BlockReason_),
+             (double)o2PendingMl_,
+             (double)o2WeeklyDoneMl_);
+        char detail[128] = {0};
+        snprintf(detail,
+                 sizeof(detail),
+                 "État=%s, blocage=%s, restant=%.1f ml, semaine=%.1f ml.",
+                 o2ProtocolStateStr_(o2ProtocolState_),
+                 o2BlockReasonStr_(o2BlockReason_),
+                 (double)o2PendingMl_,
+                 (double)o2WeeklyDoneMl_);
+        if (isDisinfectionType_(DisinfectionActiveOxygen)) {
+            emitActivity_(ActivityCode::PoolLogicO2StateChanged,
+                          (blockReason == O2BlockNone) ? ActivitySource::Auto : ActivitySource::Safety,
+                          (blockReason == O2BlockNone) ? ActivitySeverity::Info : ActivitySeverity::Warning,
+                          ActivityRole::Disinfection,
+                          ActivityState::None,
+                          ActivityReason::O2,
+                          orpPumpDeviceSlot_,
+                          "Protocole oxygène actif mis à jour",
+                          detail,
+                          "science");
+        }
+    }
+    persistO2Protocol_(nowMs, false);
+}
+
+void PoolLogicModule::persistO2Protocol_(uint32_t nowMs, bool force)
+{
+    if (!cfgStore_) return;
+    if (!force && o2LastPersistMs_ != 0U && (uint32_t)(nowMs - o2LastPersistMs_) < kO2PersistPeriodMs) {
+        return;
+    }
+
+    (void)cfgStore_->set(o2ProtocolStateVar_, o2ProtocolState_);
+    (void)cfgStore_->set(o2LastDoseDayVar_, o2LastDoseDay_);
+    (void)cfgStore_->set(o2WeeklyDoneVar_, o2WeeklyDoneMl_);
+    (void)cfgStore_->set(o2PendingVar_, o2PendingMl_);
+    o2LastPersistMs_ = nowMs ? nowMs : 1U;
+}
+
+bool PoolLogicModule::stepO2Protocol_(bool filtrationDesired,
+                                      bool filtrationOn,
+                                      uint32_t filtrationRunMin,
+                                      bool haveWaterTemp,
+                                      float waterTemp,
+                                      bool psiError,
+                                      bool tankLow,
+                                      uint32_t nowMs,
+                                      bool& requestFiltrationOut,
+                                      bool& pumpDesiredOut)
+{
+    requestFiltrationOut = false;
+    pumpDesiredOut = false;
+
+    if (!isDisinfectionType_(DisinfectionActiveOxygen) || !autoMode_) {
+        o2LastProgressMs_ = 0;
+        if (o2PendingMl_ <= kO2DoseEpsilonMl) {
+            o2PendingMl_ = 0.0f;
+            setO2ProtocolState_(O2ProtocolIdle, O2BlockInactive, nowMs);
+        } else {
+            setO2ProtocolState_(O2ProtocolPending, O2BlockInactive, nowMs);
+        }
+        return false;
+    }
+
+    uint16_t dayKey = 0;
+    uint16_t weekKey = 0;
+    uint8_t weekDayMon0 = 0;
+    uint8_t hour = 0;
+    if (!currentO2LocalTime_(dayKey, weekKey, weekDayMon0, hour)) {
+        o2LastProgressMs_ = 0;
+        if (o2PendingMl_ > kO2DoseEpsilonMl) requestFiltrationOut = true;
+        setO2ProtocolState_(o2PendingMl_ > kO2DoseEpsilonMl ? O2ProtocolBlocked : O2ProtocolIdle,
+                            O2BlockTimeUnsynced,
+                            nowMs);
+        return false;
+    }
+
+    if (o2LastDoseDay_ != 0U && o2WeekKeyFromDayKey_(o2LastDoseDay_) != weekKey && o2WeeklyDoneMl_ > 0.0f) {
+        o2WeeklyDoneMl_ = 0.0f;
+        persistO2Protocol_(nowMs, true);
+    }
+
+    const float weeklyDoseMl = computeO2WeeklyDoseMl_(haveWaterTemp, waterTemp);
+    const uint8_t split = (o2SplitCount_ == 0U) ? 1U : ((o2SplitCount_ > 3U) ? 3U : o2SplitCount_);
+    const float doseMl = (split > 0U) ? (weeklyDoseMl / (float)split) : weeklyDoseMl;
+    o2LastPlannedDoseMl_ = doseMl;
+
+    if (o2PendingMl_ <= kO2DoseEpsilonMl) {
+        o2PendingMl_ = 0.0f;
+        if (weeklyDoseMl <= kO2DoseEpsilonMl || doseMl <= kO2DoseEpsilonMl) {
+            setO2ProtocolState_(O2ProtocolBlocked, O2BlockConfig, nowMs);
+            return false;
+        }
+        const bool dueToday =
+            isO2DoseDay_(weekDayMon0) &&
+            hour >= o2MainHour_ &&
+            o2LastDoseDay_ != dayKey &&
+            o2WeeklyDoneMl_ < (weeklyDoseMl - kO2DoseEpsilonMl);
+        if (dueToday) {
+            const float remainingWeekMl = weeklyDoseMl - o2WeeklyDoneMl_;
+            o2PendingMl_ = (remainingWeekMl < doseMl) ? remainingWeekMl : doseMl;
+            if (o2PendingMl_ < 0.0f) o2PendingMl_ = 0.0f;
+            o2LastProgressMs_ = 0;
+            setO2ProtocolState_(O2ProtocolPending, O2BlockNone, nowMs);
+            persistO2Protocol_(nowMs, true);
+        }
+    }
+
+    if (o2PendingMl_ <= kO2DoseEpsilonMl) {
+        o2PendingMl_ = 0.0f;
+        setO2ProtocolState_(O2ProtocolIdle, O2BlockNone, nowMs);
+        return false;
+    }
+
+    requestFiltrationOut = true;
+    if (psiError) {
+        o2LastProgressMs_ = 0;
+        setO2ProtocolState_(O2ProtocolBlocked, O2BlockPsi, nowMs);
+        return false;
+    }
+    if (tankLow) {
+        o2LastProgressMs_ = 0;
+        setO2ProtocolState_(O2ProtocolBlocked, O2BlockTankLow, nowMs);
+        return false;
+    }
+
+    float flowLh = 0.0f;
+    if (!readPoolDeviceFlowLh_(orpPumpDeviceSlot_, flowLh)) {
+        o2LastFlowLh_ = 0.0f;
+        o2LastProgressMs_ = 0;
+        setO2ProtocolState_(O2ProtocolBlocked, O2BlockFlowInvalid, nowMs);
+        return false;
+    }
+    o2LastFlowLh_ = flowLh;
+
+    const bool filtrationReady = filtrationOn && filtrationDesired && filtrationRunMin >= o2MinFilterRunMin_;
+    if (!filtrationReady) {
+        o2LastProgressMs_ = 0;
+        setO2ProtocolState_(O2ProtocolPending, O2BlockFiltrationWait, nowMs);
+        return false;
+    }
+
+    PoolDeviceSvcMeta meta{};
+    if (!poolSvc_ || !poolSvc_->meta || poolSvc_->meta(poolSvc_->ctx, orpPumpDeviceSlot_, &meta) != POOLDEV_SVC_OK) {
+        o2LastProgressMs_ = 0;
+        setO2ProtocolState_(O2ProtocolBlocked, O2BlockPumpService, nowMs);
+        return false;
+    }
+    if (meta.blockReason == POOL_DEVICE_BLOCK_MAX_UPTIME ||
+        meta.blockReason == POOL_DEVICE_BLOCK_DISABLED ||
+        meta.blockReason == POOL_DEVICE_BLOCK_IO_DISABLED ||
+        meta.blockReason == POOL_DEVICE_BLOCK_INTERLOCK ||
+        meta.blockReason == POOL_DEVICE_BLOCK_IO_ERROR) {
+        o2LastProgressMs_ = 0;
+        setO2ProtocolState_(O2ProtocolBlocked, O2BlockPumpBlocked, nowMs);
+        return false;
+    }
+
+    pumpDesiredOut = true;
+    if (orpPumpFsm_.on) {
+        const uint32_t deltaMs = (o2LastProgressMs_ == 0U) ? 0U : (nowMs - o2LastProgressMs_);
+        o2LastProgressMs_ = nowMs ? nowMs : 1U;
+        if (deltaMs > 0U) {
+            const float injectedMl = (flowLh / 3600.0f) * (float)deltaMs;
+            if (std::isfinite(injectedMl) && injectedMl > 0.0f) {
+                o2PendingMl_ -= injectedMl;
+                o2WeeklyDoneMl_ += injectedMl;
+                if (o2PendingMl_ <= kO2DoseEpsilonMl) {
+                    if (o2PendingMl_ < 0.0f) {
+                        o2WeeklyDoneMl_ += o2PendingMl_;
+                    }
+                    o2PendingMl_ = 0.0f;
+                    o2LastDoseDay_ = dayKey;
+                    pumpDesiredOut = false;
+                    o2LastProgressMs_ = 0;
+                    setO2ProtocolState_(O2ProtocolIdle, O2BlockNone, nowMs);
+                    persistO2Protocol_(nowMs, true);
+                    return true;
+                }
+                setO2ProtocolState_(O2ProtocolDosing, O2BlockNone, nowMs);
+                persistO2Protocol_(nowMs, false);
+            }
+        } else {
+            setO2ProtocolState_(O2ProtocolDosing, O2BlockNone, nowMs);
+        }
+    } else {
+        o2LastProgressMs_ = 0;
+        setO2ProtocolState_(O2ProtocolPending, O2BlockNone, nowMs);
+    }
+
+    return pumpDesiredOut;
+}
 
 // Alarm conditions intentionally stay close to the control helpers because they
 // read the same live IO/runtime state and should evolve together.
@@ -222,6 +737,14 @@ void PoolLogicModule::syncDeviceState_(uint8_t deviceSlot, DeviceFsm& fsm, uint3
         turnedOffOut = (fsm.on && !actualOn);
         fsm.on = actualOn;
         fsm.stateSinceMs = nowMs;
+        PoolDeviceSvcMeta meta{};
+        const char* label = nullptr;
+        if (poolSvc_ && poolSvc_->meta &&
+            poolSvc_->meta(poolSvc_->ctx, deviceSlot, &meta) == POOLDEV_SVC_OK &&
+            meta.label[0] != '\0') {
+            label = meta.label;
+        }
+        emitDeviceActivity_(false, actualOn, deviceSlot, label, ActivityReason::None);
     }
 }
 
@@ -394,6 +917,9 @@ void PoolLogicModule::applyDeviceControl_(uint8_t deviceSlot,
     if (desiredChanged || needRetry) {
         if (writeDeviceDesired_(deviceSlot, desired)) {
             LOGI("%s %s", desired ? "Start" : "Stop", label ? label : "Pool Device");
+            if (desiredChanged) {
+                emitDeviceActivity_(true, desired, deviceSlot, label, ActivityReason::Auto);
+            }
         }
         fsm.lastCmdMs = nowMs;
     }
@@ -461,7 +987,17 @@ void PoolLogicModule::runControlLoop_(uint32_t nowMs)
         haveWaterTemp &&
         (waterTempTsMs != 0U) &&
         ((uint32_t)(nowMs - waterTempTsMs) <= kHeaterTempFreshMaxMs);
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+    uint32_t airTempTsMs = 0U;
+    const bool haveAirTemp = loadAnalogSensor_(airTempIoId_, airTemp, &airTempTsMs);
+    const bool airTempFresh =
+        haveAirTemp &&
+        std::isfinite(airTemp) &&
+        (airTempTsMs != 0U) &&
+        ((uint32_t)(nowMs - airTempTsMs) <= kHeaterTempFreshMaxMs);
+#else
     const bool haveAirTemp = loadAnalogSensor_(airTempIoId_, airTemp);
+#endif
     const bool haveOrp = loadAnalogSensor_(orpIoId_, orp);
     const bool haveLevel = loadDigitalSensor_(levelIoId_, poolLevelOn);
     const bool havePhTankLow = loadDigitalSensor_(phLevelIoId_, phTankLow);
@@ -490,6 +1026,23 @@ void PoolLogicModule::runControlLoop_(uint32_t nowMs)
                      (double)psi,
                      (double)psiLowThreshold_,
                      (double)psiHighThreshold_);
+                char detail[128] = {0};
+                snprintf(detail,
+                         sizeof(detail),
+                         "Pression %.3f bar hors plage %.3f-%.3f bar.",
+                         (double)psi,
+                         (double)psiLowThreshold_,
+                         (double)psiHighThreshold_);
+                emitActivity_(ActivityCode::PoolLogicSafetyPressureLatched,
+                              ActivitySource::Safety,
+                              ActivitySeverity::Warning,
+                              ActivityRole::Filtration,
+                              ActivityState::None,
+                              ActivityReason::Safety,
+                              filtrationDeviceSlot_,
+                              "Sécurité pression piscine activée",
+                              detail,
+                              "warning");
             }
         }
     }
@@ -502,10 +1055,31 @@ void PoolLogicModule::runControlLoop_(uint32_t nowMs)
         if (phAutoMode_ && !phPidEnabled_ && runMin >= delayPidsMin_) {
             phPidEnabled_ = true;
             LOGI("Activate pH regulation (delay=%umin)", (unsigned)runMin);
+            emitActivity_(ActivityCode::PoolLogicPhRegulationEnabled,
+                          ActivitySource::Pid,
+                          ActivitySeverity::Info,
+                          ActivityRole::Ph,
+                          ActivityState::None,
+                          ActivityReason::Pid,
+                          phPumpDeviceSlot_,
+                          "Régulation pH activée",
+                          "La filtration est stable, le PID pH peut piloter la pompe.",
+                          "science");
         }
-        if (orpAutoMode_ && !orpPidEnabled_ && runMin >= delayPidsMin_) {
+        if (orpAutoMode_ && isDisinfectionType_(DisinfectionChlorineBromine) &&
+            !orpPidEnabled_ && runMin >= delayPidsMin_) {
             orpPidEnabled_ = true;
             LOGI("Activate ORP regulation (delay=%umin)", (unsigned)runMin);
+            emitActivity_(ActivityCode::PoolLogicOrpRegulationEnabled,
+                          ActivitySource::Pid,
+                          ActivitySeverity::Info,
+                          ActivityRole::Disinfection,
+                          ActivityState::None,
+                          ActivityReason::Pid,
+                          orpPumpDeviceSlot_,
+                          "Régulation ORP activée",
+                          "La filtration est stable, le PID ORP peut piloter la désinfection.",
+                          "science");
         }
     } else {
         phPidEnabled_ = false;
@@ -527,7 +1101,16 @@ void PoolLogicModule::runControlLoop_(uint32_t nowMs)
     forceFiltrationReconcile = pendingFiltrationReconcile_;
     pendingFiltrationReconcile_ = false;
     portEXIT_CRITICAL(&pendingMux_);
-    if (forceFiltrationReconcile && schedSvc_ && schedSvc_->isActive) {
+
+    bool clockWindowActive = false;
+    if (currentFiltrationWindowActive_(filtrationCalcStart_, filtrationCalcStop_, clockWindowActive)) {
+        if (clockWindowActive != windowActive || forceFiltrationReconcile) {
+            windowActive = clockWindowActive;
+            portENTER_CRITICAL(&pendingMux_);
+            filtrationWindowActive_ = windowActive;
+            portEXIT_CRITICAL(&pendingMux_);
+        }
+    } else if (forceFiltrationReconcile && schedSvc_ && schedSvc_->isActive) {
         windowActive = schedSvc_->isActive(schedSvc_->ctx, SLOT_FILTR_WINDOW);
         portENTER_CRITICAL(&pendingMux_);
         filtrationWindowActive_ = windowActive;
@@ -569,6 +1152,74 @@ void PoolLogicModule::runControlLoop_(uint32_t nowMs)
     auto elapsedSecSince = [&](uint16_t pastSec) -> uint16_t {
         return (uint16_t)(nowSec - pastSec);
     };
+
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+    auto refreshHeatAssistAdaptiveInterval = [&]() {
+        const bool wasValid = heatAssistAdaptiveInputsValid_;
+        const uint16_t previousIntervalMin = heatAssistIntervalMin_;
+        if (!heatAssistValidatedWaterTempValid_ ||
+            !std::isfinite(heatAssistValidatedWaterTempC_) ||
+            !airTempFresh) {
+            heatAssistAdaptiveInputsValid_ = false;
+            heatAssistIntervalMin_ = kHeatAssistAdaptiveFallbackMin;
+            if (wasValid || previousIntervalMin != heatAssistIntervalMin_) {
+                LOGD("Heat Assist adaptive fallback interval=%u min water_valid=%u air_fresh=%u",
+                     (unsigned)heatAssistIntervalMin_,
+                     heatAssistValidatedWaterTempValid_ ? 1u : 0u,
+                     airTempFresh ? 1u : 0u);
+            }
+            return;
+        }
+
+        heatAssistAirTempC_ = airTemp;
+        heatAssistDeltaC_ = heatAssistValidatedWaterTempC_ - heatAssistAirTempC_;
+        if (heatAssistDeltaC_ < 0.0f) heatAssistDeltaC_ = 0.0f;
+
+        if (heatAssistDeltaC_ <= kHeatAssistAdaptiveLowDeltaC) {
+            heatAssistIntervalMin_ = kHeatAssistAdaptiveMaxIntervalMin;
+        } else if (heatAssistDeltaC_ >= kHeatAssistAdaptiveHighDeltaC) {
+            heatAssistIntervalMin_ = kHeatAssistAdaptiveMinIntervalMin;
+        } else {
+            const float intervalMin =
+                (float)kHeatAssistAdaptiveMaxIntervalMin -
+                (heatAssistDeltaC_ - kHeatAssistAdaptiveLowDeltaC) * 4.0f;
+            heatAssistIntervalMin_ = (uint16_t)lroundf(intervalMin);
+        }
+        heatAssistAdaptiveInputsValid_ = true;
+        if (!wasValid || previousIntervalMin != heatAssistIntervalMin_) {
+            LOGD("Heat Assist adaptive interval water=%.2fC air=%.2fC delta=%.2fC interval=%u min",
+                 (double)heatAssistValidatedWaterTempC_,
+                 (double)heatAssistAirTempC_,
+                 (double)heatAssistDeltaC_,
+                 (unsigned)heatAssistIntervalMin_);
+        }
+    };
+
+    auto recordValidatedWaterTemperature = [&]() -> bool {
+        if (!waterTempFresh || !std::isfinite(waterTemp)) return false;
+        heatAssistValidatedWaterTempC_ = waterTemp;
+        heatAssistValidatedWaterTempValid_ = true;
+        refreshHeatAssistAdaptiveInterval();
+        return true;
+    };
+
+    // A regular filtration run also provides a trustworthy basin temperature.
+    // Do not retain the line temperature before water has circulated for 5 minutes.
+    const bool recordedUnderFlow =
+        heaterAutoMode_ &&
+        filtrationFsm_.on &&
+        stateUptimeSec_(filtrationFsm_, nowMs) >= kHeatAssistProbeRunSec &&
+        recordValidatedWaterTemperature();
+    if (recordedUnderFlow) {
+        // While normal filtration or heating is already circulating water, the
+        // latest trustworthy reading is also the origin of the next interval.
+        setLastProbeEndSec(nowSec);
+    } else {
+        // Keep the cadence responsive to outdoor-temperature changes while the
+        // pump is stopped, using only the last water value validated under flow.
+        refreshHeatAssistAdaptiveInterval();
+    }
+#endif
 
     // Filtration arbitration intentionally applies safety, then manual mode,
     // then automatic scheduling/winter logic in that order.
@@ -649,8 +1300,8 @@ void PoolLogicModule::runControlLoop_(uint32_t nowMs)
     bool swgDesired = swgFsm_.on;
     if (autoMode_) {
         swgDesired = false;
-        if (electrolyseMode_ && filtrationFsm_.on) {
-            if (electroRunMode_) {
+        if (isDisinfectionType_(DisinfectionSwg) && filtrationFsm_.on) {
+            if (swgControlMode_ == SwgControlOrp) {
                 if (swgFsm_.on) {
                     swgDesired = haveOrp && (orp <= orpSetpoint_);
                 } else {
@@ -679,6 +1330,11 @@ void PoolLogicModule::runControlLoop_(uint32_t nowMs)
         resetHeatAssistSession();
         setHeatAssistFlag(kHeatAssistFlagFastCycle, false);
         setLastProbeEndSec(0U);
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+        heatAssistValidatedWaterTempValid_ = false;
+        heatAssistAdaptiveInputsValid_ = false;
+        heatAssistIntervalMin_ = kHeatAssistAdaptiveFallbackMin;
+#endif
         setHeatAssistReason(HeatAssistReason::Disabled);
     } else if (!autoMode_) {
         resetHeatAssistSession();
@@ -694,8 +1350,29 @@ void PoolLogicModule::runControlLoop_(uint32_t nowMs)
     } else {
         const float heaterStartThreshold = heaterSetpoint_ - kHeaterHysteresisC;
         const float heaterStopThreshold = heaterSetpoint_ + kHeaterHysteresisC;
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+        const bool heatAssistWaterTempAvailable = waterTempFresh && std::isfinite(waterTemp);
+        // The requested interval is measurement-to-measurement. Start the pump
+        // five minutes earlier so its validation run is included in that period.
+        const uint16_t measurementIntervalSec = (uint16_t)(heatAssistIntervalMin_ * 60U);
+        const uint16_t idleSec =
+            (measurementIntervalSec > kHeatAssistProbeRunSec)
+                ? (uint16_t)(measurementIntervalSec - kHeatAssistProbeRunSec)
+                : 0U;
+#else
+        const bool heatAssistWaterTempAvailable = waterTempFresh;
         const bool fastCycle = hasHeatAssistFlag(kHeatAssistFlagFastCycle);
         const uint16_t idleSec = fastCycle ? kHeatAssistIdleFastSec : kHeatAssistIdleSlowSec;
+#endif
+
+        auto setProbeWaitReason = [&]() {
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+            setHeatAssistReason(HeatAssistReason::ProbeWaitAdaptive);
+#else
+            setHeatAssistReason(fastCycle ? HeatAssistReason::ProbeWait20m
+                                          : HeatAssistReason::ProbeWait30m);
+#endif
+        };
 
         auto startProbe = [&]() {
             setHeatAssistFlag(kHeatAssistFlagProbeRunning, true);
@@ -708,7 +1385,7 @@ void PoolLogicModule::runControlLoop_(uint32_t nowMs)
 
         if (hasHeatAssistFlag(kHeatAssistFlagHeatingActive)) {
             filtrationDesired = true;
-            if (!waterTempFresh) {
+            if (!heatAssistWaterTempAvailable) {
                 heaterDesired = false;
                 setHeatAssistReason(HeatAssistReason::TempUnavailable);
             } else if (waterTemp >= heaterStopThreshold) {
@@ -716,9 +1393,21 @@ void PoolLogicModule::runControlLoop_(uint32_t nowMs)
                 setHeatAssistFlag(kHeatAssistFlagProbeRunning, false);
                 setProbeStartSec(0U);
                 setLastProbeEndSec(nowSec);
+#if !defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
                 setHeatAssistFlag(kHeatAssistFlagFastCycle, true);
+#endif
                 heaterDesired = false;
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+                // Heating may reach its setpoint while the daily filtration
+                // window is still active. In that case, keep filtration running.
+                filtrationDesired = filtrationDesiredBase;
+                LOGD("Heat Assist setpoint reached water=%.2fC setpoint=%.2fC filtration_window=%u",
+                     (double)waterTemp,
+                     (double)heaterSetpoint_,
+                     filtrationDesiredBase ? 1u : 0u);
+#else
                 filtrationDesired = false;
+#endif
                 setHeatAssistReason(HeatAssistReason::SetpointReached);
             } else {
                 heaterDesired = true;
@@ -731,7 +1420,10 @@ void PoolLogicModule::runControlLoop_(uint32_t nowMs)
             if (probeElapsedSec >= kHeatAssistProbeRunSec) {
                 setHeatAssistFlag(kHeatAssistFlagProbeRunning, false);
                 setProbeStartSec(0U);
-                if (!waterTempFresh) {
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+                (void)recordValidatedWaterTemperature();
+#endif
+                if (!heatAssistWaterTempAvailable) {
                     filtrationDesired = filtrationDesiredBase;
                     setLastProbeEndSec(nowSec);
                     setHeatAssistReason(HeatAssistReason::TempUnavailable);
@@ -743,25 +1435,69 @@ void PoolLogicModule::runControlLoop_(uint32_t nowMs)
                 } else {
                     setLastProbeEndSec(nowSec);
                     filtrationDesired = filtrationDesiredBase;
-                    setHeatAssistReason(fastCycle ? HeatAssistReason::ProbeWait20m
-                                                  : HeatAssistReason::ProbeWait30m);
+                    setProbeWaitReason();
                 }
             } else {
                 setHeatAssistReason(HeatAssistReason::ProbeRunning);
             }
         } else if (filtrationFsm_.on || filtrationDesiredBase) {
             filtrationDesired = filtrationDesiredBase;
-            if (!waterTempFresh) {
+            if (!heatAssistWaterTempAvailable) {
                 heaterDesired = false;
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+                if (filtrationFsm_.on && !filtrationDesiredBase) {
+                    // The daily run is ending without a usable final sample.
+                    // Anchor the fallback interval now to prevent relay chatter.
+                    setLastProbeEndSec(nowSec);
+                    if (!heatAssistValidatedWaterTempValid_) {
+                        heatAssistAdaptiveInputsValid_ = false;
+                        heatAssistIntervalMin_ = kHeatAssistAdaptiveFallbackMin;
+                    }
+                    if (filtrationFsm_.lastDesired) {
+                        LOGD("Heat Assist filtration end temp unavailable; retry interval=%u min",
+                             (unsigned)heatAssistIntervalMin_);
+                    }
+                }
+#endif
                 setHeatAssistReason(HeatAssistReason::TempUnavailable);
             } else {
-                if (heaterFsm_.on) {
-                    heaterDesired = (waterTemp < heaterStopThreshold);
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+                if (!recordedUnderFlow) {
+                    // A newly-started daily filtration has not circulated long
+                    // enough yet. Keep the heater off until its water sample is valid.
+                    heaterDesired = false;
+                    setHeatAssistReason(HeatAssistReason::IdlePumpOn);
                 } else {
-                    heaterDesired = (waterTemp <= heaterStartThreshold);
+#endif
+                    if (heaterFsm_.on) {
+                        heaterDesired = (waterTemp < heaterStopThreshold);
+                    } else {
+                        heaterDesired = (waterTemp <= heaterStartThreshold);
+                    }
+                    if (heaterDesired) {
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+                        // The water is already validated under flow: hand over
+                        // directly to heating without stopping and restarting the pump.
+                        setHeatAssistFlag(kHeatAssistFlagHeatingActive, true);
+                        filtrationDesired = true;
+                        LOGD("Heat Assist filtration-to-heating handoff water=%.2fC setpoint=%.2fC",
+                             (double)waterTemp,
+                             (double)heaterSetpoint_);
+#endif
+                        setHeatAssistReason(HeatAssistReason::Heating);
+                    } else {
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+                        if (filtrationFsm_.on && !filtrationDesiredBase && filtrationFsm_.lastDesired) {
+                            LOGD("Heat Assist filtration end no heat water=%.2fC next_interval=%u min",
+                                 (double)waterTemp,
+                                 (unsigned)heatAssistIntervalMin_);
+                        }
+#endif
+                        setHeatAssistReason(HeatAssistReason::IdlePumpOn);
+                    }
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
                 }
-                setHeatAssistReason(heaterDesired ? HeatAssistReason::Heating
-                                                  : HeatAssistReason::IdlePumpOn);
+#endif
             }
         } else {
             heaterDesired = false;
@@ -772,8 +1508,7 @@ void PoolLogicModule::runControlLoop_(uint32_t nowMs)
             if (dueForProbe) {
                 startProbe();
             } else {
-                setHeatAssistReason(fastCycle ? HeatAssistReason::ProbeWait20m
-                                              : HeatAssistReason::ProbeWait30m);
+                setProbeWaitReason();
             }
         }
     }
@@ -807,9 +1542,9 @@ void PoolLogicModule::runControlLoop_(uint32_t nowMs)
             }
 
             if (orpAutoMode_) {
-                // ORP peristaltic dosing is disabled when electrolyse mode is active.
                 const bool orpAllowed =
-                    orpPidEnabled_ && haveOrp && !electrolyseMode_ && !psiError_ && !chlorineTankLowError_;
+                    orpPidEnabled_ && haveOrp && isDisinfectionType_(DisinfectionChlorineBromine) &&
+                    !psiError_ && !chlorineTankLowError_;
                 if (orpAllowed) {
                     uint32_t outMs = 0;
                     (void)stepTemporalPid_(orpPidState_,
@@ -847,6 +1582,25 @@ void PoolLogicModule::runControlLoop_(uint32_t nowMs)
         }
     }
 
+    bool o2RequestFiltration = false;
+    bool o2PumpDesired = false;
+    (void)stepO2Protocol_(filtrationDesired,
+                          filtrationFsm_.on,
+                          stateUptimeSec_(filtrationFsm_, nowMs) / 60U,
+                          haveWaterTemp,
+                          waterTemp,
+                          psiError_,
+                          chlorineTankLowError_,
+                          nowMs,
+                          o2RequestFiltration,
+                          o2PumpDesired);
+    if (o2RequestFiltration && !psiError_) {
+        filtrationDesired = true;
+    }
+    if (isDisinfectionType_(DisinfectionActiveOxygen)) {
+        orpPumpDesired = o2PumpDesired;
+    }
+
     bool fillingDesired = false;
     if (haveLevel) {
         if (!fillingFsm_.on) {
@@ -865,7 +1619,11 @@ void PoolLogicModule::runControlLoop_(uint32_t nowMs)
     }
     applyDeviceControl_(filtrationDeviceSlot_, "Filtration Pump", filtrationFsm_, filtrationDesired, nowMs);
     applyDeviceControl_(phPumpDeviceSlot_, "pH Pump", phPumpFsm_, phPumpDesired, nowMs);
-    applyDeviceControl_(orpPumpDeviceSlot_, "Chlorine Pump", orpPumpFsm_, orpPumpDesired, nowMs);
+    applyDeviceControl_(orpPumpDeviceSlot_,
+                        isDisinfectionType_(DisinfectionActiveOxygen) ? "O2 Pump" : "Chlorine Pump",
+                        orpPumpFsm_,
+                        orpPumpDesired,
+                        nowMs);
     applyDeviceControl_(robotDeviceSlot_, "Robot Pump", robotFsm_, robotDesired, nowMs);
     applyDeviceControl_(swgDeviceSlot_, "SWG Pump", swgFsm_, swgDesired, nowMs);
     applyDeviceControl_(heaterDeviceSlot_, "Water Heater", heaterFsm_, heaterDesired, nowMs);

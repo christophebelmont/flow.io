@@ -5,15 +5,15 @@
     "version": 1
   },
   "docs": {
-    "hmi/fcd_udp/enabled": {
+    "hmi/nextion_udp/enabled": {
       "type": "Bool",
-      "label_t": "cfgdocs.hmi.fcd_udp.enabled.label",
-      "help_t": "cfgdocs.hmi.fcd_udp.enabled.help"
+      "label_t": "cfgdocs.hmi.nextion_udp.enabled.label",
+      "help_t": "cfgdocs.hmi.nextion_udp.enabled.help"
     },
-    "hmi/fcd_udp/token": {
+    "hmi/nextion_udp/token": {
       "type": "CharArray",
-      "label_t": "cfgdocs.hmi.fcd_udp.token.label",
-      "help_t": "cfgdocs.hmi.fcd_udp.token.help"
+      "label_t": "cfgdocs.hmi.nextion_udp.token.label",
+      "help_t": "cfgdocs.hmi.nextion_udp.token.help"
     }
   }
 }

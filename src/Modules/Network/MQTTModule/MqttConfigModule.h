@@ -11,7 +11,7 @@
 #include "Core/WokwiDefaultOverrides.h"
 
 struct MqttConfigData {
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
     bool enabled = false;
 #else
     bool enabled = FLOW_WIRDEF_MQ_EN;

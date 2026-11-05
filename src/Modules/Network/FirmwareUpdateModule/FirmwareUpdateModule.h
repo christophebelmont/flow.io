@@ -1,7 +1,7 @@
 #pragma once
 /**
  * @file FirmwareUpdateModule.h
- * @brief Supervisor firmware updater (Flow.IO + Nextion).
+ * @brief Firmware updater.
  */
 
 #include "Core/Module.h"
@@ -20,7 +20,7 @@ public:
     const char* taskName() const override { return "fwupdate"; }
     BaseType_t taskCore() const override { return 0; }
     uint16_t taskStackSize() const override {
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         return 6144;
 #else
         return 8192;
@@ -29,7 +29,7 @@ public:
     uint8_t taskCount() const override { return 1; }
     const ModuleTaskSpec* taskSpecs() const override { return singleLoopTaskSpec(); }
     uint32_t startDelayMs() const override {
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         return 6000U;
 #else
         return 0U;
@@ -64,16 +64,22 @@ private:
 
     struct UpdateJob {
         bool pending = false;
-        FirmwareUpdateTarget target = FirmwareUpdateTarget::FlowIO;
+        FirmwareUpdateTarget target = FirmwareUpdateTarget::Waveshare;
         char url[kUrlLen] = {0};
     };
 
     struct UpdateStatus {
         UpdateState state = UpdateState::Idle;
-        FirmwareUpdateTarget target = FirmwareUpdateTarget::FlowIO;
+        FirmwareUpdateTarget target = FirmwareUpdateTarget::Waveshare;
         uint8_t progress = 0;
         uint32_t updatedAtMs = 0;
         char msg[kMsgLen] = {0};
+    };
+
+    struct ManifestCheckJob {
+        bool pending = false;
+        uint32_t requestId = 0;
+        char url[kUrlLen] = {0};
     };
 
     struct ConfigData {
@@ -97,9 +103,9 @@ private:
     const NetworkAccessService* netAccessSvc_ = nullptr;
     const WebInterfaceService* webInterfaceSvc_ = nullptr;
     const FlowCfgRemoteService* flowCfgSvc_ = nullptr;
+    const HmiService* hmiSvc_ = nullptr;
 
     int8_t flowIoEnablePin_ = -1;
-    int8_t flowIoBootPin_ = -1;
     int8_t nextionRxPin_ = -1;
     int8_t nextionTxPin_ = -1;
     int8_t nextionRebootPin_ = -1;
@@ -108,38 +114,46 @@ private:
     portMUX_TYPE lock_ = portMUX_INITIALIZER_UNLOCKED;
     UpdateJob queuedJob_{};
     UpdateStatus status_{};
+    ManifestCheckJob manifestCheckJob_{};
+    FirmwareManifestCheckSnapshot manifestCheck_{};
+    char* manifestPayload_ = nullptr;
+    uint32_t nextManifestRequestId_ = 0;
+    uint8_t manifestCopyReaders_ = 0;
     bool nextionRebootQueued_ = false;
-    bool flowIoHardwareRebootQueued_ = false;
     bool busy_ = false;
+    bool hmiOtaActive_ = false;
     uint32_t activeTotalBytes_ = 0;
     uint32_t activeSentBytes_ = 0;
 
     static bool cmdStatus_(void* userCtx, const CommandRequest& req, char* reply, size_t replyLen);
-    static bool cmdFlowIo_(void* userCtx, const CommandRequest& req, char* reply, size_t replyLen);
-    static bool cmdSupervisor_(void* userCtx, const CommandRequest& req, char* reply, size_t replyLen);
+    static bool cmdWaveshare_(void* userCtx, const CommandRequest& req, char* reply, size_t replyLen);
     static bool cmdNextion_(void* userCtx, const CommandRequest& req, char* reply, size_t replyLen);
     static bool cmdNextionReboot_(void* userCtx, const CommandRequest& req, char* reply, size_t replyLen);
-    static bool cmdFlowIoHardwareReboot_(void* userCtx, const CommandRequest& req, char* reply, size_t replyLen);
     static bool cmdSpiffs_(void* userCtx, const CommandRequest& req, char* reply, size_t replyLen);
 
     bool startUpdate_(FirmwareUpdateTarget target, const char* url, char* errOut, size_t errOutLen);
     bool queueNextionReboot_(char* errOut, size_t errOutLen);
-    bool queueFlowIoHardwareReboot_(char* errOut, size_t errOutLen);
     bool statusJson_(char* out, size_t outLen);
     bool isBusy_();
     bool configJson_(char* out, size_t outLen) const;
-    bool checkManifestJsonStream_(Print& out, char* errOut, size_t errOutLen);
-    bool manifestUrl_(char* out, size_t outLen, char* errOut, size_t errOutLen);
+    bool startManifestCheck_(uint32_t* requestIdOut, char* errOut, size_t errOutLen);
+    bool manifestCheckStatus_(uint32_t requestId, FirmwareManifestCheckSnapshot* out);
+    bool copyManifestResult_(uint32_t requestId,
+                             char* out,
+                             size_t outLen,
+                             size_t* copiedLenOut);
     bool setConfig_(const char* updateHost,
                     const char* updatePath,
                     char* errOut,
                     size_t errOutLen);
     bool runJob_(const UpdateJob& job);
-    bool runFlowIoUpdate_(const char* url, char* errOut, size_t errOutLen);
-    bool runSupervisorUpdate_(const char* url, char* errOut, size_t errOutLen);
+    bool runManifestCheck_(const ManifestCheckJob& job,
+                           size_t* payloadLenOut,
+                           char* errOut,
+                           size_t errOutLen);
+    bool runWaveshareUpdate_(const char* url, char* errOut, size_t errOutLen);
     bool runNextionUpdate_(const char* url, char* errOut, size_t errOutLen);
     bool runNextionReboot_(char* errOut, size_t errOutLen);
-    bool runFlowIoHardwareReboot_(char* errOut, size_t errOutLen);
     bool runSpiffsUpdate_(const char* url, char* errOut, size_t errOutLen);
     bool resolveUrl_(FirmwareUpdateTarget target,
                      const char* explicitUrl,
@@ -155,6 +169,7 @@ private:
     bool parseUrlArg_(const CommandRequest& req, char* out, size_t outLen) const;
     void setStatus_(UpdateState state, FirmwareUpdateTarget target, uint8_t progress, const char* msg);
     void setError_(FirmwareUpdateTarget target, const char* msg);
+    void setHmiOtaCondition_(bool active);
     void onProgressChunk_(uint32_t chunkBytes);
     void attachWebInterfaceSvcIfNeeded_();
     void attachFlowCfgSvcIfNeeded_();
@@ -167,8 +182,9 @@ private:
         ServiceBinding::bind<&FirmwareUpdateModule::statusJson_>,
         ServiceBinding::bind<&FirmwareUpdateModule::isBusy_>,
         ServiceBinding::bind<&FirmwareUpdateModule::configJson_>,
-        ServiceBinding::bind<&FirmwareUpdateModule::checkManifestJsonStream_>,
-        ServiceBinding::bind<&FirmwareUpdateModule::manifestUrl_>,
+        ServiceBinding::bind<&FirmwareUpdateModule::startManifestCheck_>,
+        ServiceBinding::bind<&FirmwareUpdateModule::manifestCheckStatus_>,
+        ServiceBinding::bind<&FirmwareUpdateModule::copyManifestResult_>,
         ServiceBinding::bind<&FirmwareUpdateModule::setConfig_>,
         this
     };

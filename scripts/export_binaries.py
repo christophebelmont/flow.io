@@ -64,49 +64,22 @@ def _classify_artifact(software, ext):
             "kind": "nextion-tft",
             "route": "/fwupdate/nextion",
         }
-    if norm.startswith("spiffs-supervisor") or norm == "spiffs":
+    if norm in ("flowios3-spiffs", "esp32s3-spiffs", "waveshare-spiffs"):
         return {
             "category": "spiffs",
             "target": "spiffs",
             "kind": "esp32-spiffs",
             "route": "/fwupdate/spiffs",
         }
-    if norm == "esp32s3-spiffs":
+    if norm in ("flowios3", "esp32s3", "waveshare"):
         return {
-            "category": "esp32s3-spiffs",
-            "target": "spiffs",
-            "kind": "esp32-spiffs",
-            "route": "/fwupdate/spiffs",
-        }
-    if norm == "supervisor":
-        return {
-            "category": "supervisor",
-            "target": "supervisor",
+            "category": "flowios3",
+            "target": "flowios3",
             "kind": "esp32-firmware",
-            "route": "/fwupdate/supervisor",
-        }
-    if norm == "flowio":
-        return {
-            "category": "flowio",
-            "target": "flowio",
-            "kind": "esp32-firmware",
-            "route": "/fwupdate/flowio",
-        }
-    if norm == "esp32s3":
-        return {
-            "category": "esp32s3",
-            "target": "esp32s3",
-            "kind": "esp32-firmware",
-            # Kept on flow.io update endpoint for compatibility with current updater API.
-            "route": "/fwupdate/flowio",
+            "route": "/fwupdate/waveshare",
         }
 
-    return {
-        "category": software_name,
-        "target": software_name,
-        "kind": "esp32-firmware" if ext == "bin" else "nextion-tft",
-        "route": "",
-    }
+    return None
 
 
 def _update_manifest():
@@ -136,6 +109,9 @@ def _update_manifest():
         version = match.group("version")
         ext = match.group("ext")
         spec = _classify_artifact(software, ext)
+        if spec is None:
+            print(f"[export_binaries] skip manifest entry for '{path.name}'")
+            continue
 
         entry = {
             "title": software,
@@ -178,12 +154,8 @@ def _export_program_bin(source, target, env):
     env_name = env.subst("$PIOENV")
     fw_version = _resolve_firmware_version()
 
-    if env_name == "FlowIO":
-        _copy_if_exists(build_dir / "firmware.bin", f"flowio-{fw_version}.bin")
-    elif env_name == "Waveshare-ESP32-S3" or env_name == "FlowIOS3Wokwi":
-        _copy_if_exists(build_dir / "firmware.bin", f"esp32s3-{fw_version}.bin")
-    elif env_name == "Supervisor":
-        _copy_if_exists(build_dir / "firmware.bin", f"supervisor-{fw_version}.bin")
+    if env_name == "Waveshare-ESP32-S3" or env_name == "WaveshareWokwi":
+        _copy_if_exists(build_dir / "firmware.bin", f"flowios3-{fw_version}.bin")
     elif env_name == "FlowConnectDisplay":
         _copy_if_exists(build_dir / "firmware.bin", f"flow-connect-display-{fw_version}.bin")
 
@@ -192,11 +164,8 @@ def _export_spiffs_bin(source, target, env):
     build_dir = Path(env.subst("$BUILD_DIR"))
     env_name = env.subst("$PIOENV")
     fw_version = _resolve_firmware_version()
-    if env_name == "Supervisor":
-        _copy_if_exists(build_dir / "spiffs.bin", f"spiffs-supervisor-{fw_version}.bin")
-        return
-    if env_name == "Waveshare-ESP32-S3" or env_name == "FlowIOS3Wokwi":
-        _copy_if_exists(build_dir / "spiffs.bin", f"esp32s3-spiffs-{fw_version}.bin")
+    if env_name == "Waveshare-ESP32-S3" or env_name == "WaveshareWokwi":
+        _copy_if_exists(build_dir / "spiffs.bin", f"flowios3-spiffs-{fw_version}.bin")
         return
 
 

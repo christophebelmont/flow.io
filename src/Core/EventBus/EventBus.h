@@ -101,6 +101,7 @@ private:
 
     struct QueuedEvent {
         EventId id;
+        ModuleId producer = ModuleId::Unknown;
         uint8_t len;
         uint8_t data[MAX_PAYLOAD_SIZE];
     };

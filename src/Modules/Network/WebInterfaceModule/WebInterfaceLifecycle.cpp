@@ -124,6 +124,15 @@ void WebInterfaceModule::scheduleReboot_(uint32_t delayMs, const char* reason)
     rebootPending_ = true;
     rebootAtMs_ = millis() + delayMs;
     snprintf(rebootReason_, sizeof(rebootReason_), "%s", (reason && reason[0] != '\0') ? reason : "web");
+    if (!netAccessSvc_ && services_) {
+        netAccessSvc_ = services_->get<NetworkAccessService>(ServiceId::NetworkAccess);
+    }
+    if (netAccessSvc_ && netAccessSvc_->notifyShutdownPending) {
+        (void)netAccessSvc_->notifyShutdownPending(netAccessSvc_->ctx);
+    }
+    if (eventBus_) {
+        (void)eventBus_->post(EventId::NetworkShutdownPending, nullptr, 0, moduleId());
+    }
     LOGW("Web reboot scheduled in %lu ms reason=%s", (unsigned long)delayMs, rebootReason_);
 }
 
@@ -136,6 +145,14 @@ void WebInterfaceModule::onEventStatic_(const Event& e, void* user)
 
 void WebInterfaceModule::onEvent_(const Event& e)
 {
+    if (e.id == EventId::ConfigChanged) {
+#if defined(FLOW_PROFILE_WAVESHARE)
+        portENTER_CRITICAL(&ioResponseMux_);
+        ++ioTopologyChangeGeneration_;
+        portEXIT_CRITICAL(&ioResponseMux_);
+#endif
+        return;
+    }
     if (e.id != EventId::DataChanged) return;
     if (!e.payload || e.len < sizeof(DataChangedPayload)) return;
     const DataChangedPayload* p = static_cast<const DataChangedPayload*>(e.payload);
@@ -175,7 +192,7 @@ void WebInterfaceModule::loop()
             return;
         }
 
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         if (mode == NetworkAccessMode::AccessPoint) {
             provisioningOnly_ = true;
             LOGI("Web startup in flow.io AP provisioning mode");
@@ -223,6 +240,10 @@ void WebInterfaceModule::loop()
         vTaskDelay(pdMS_TO_TICKS(25));
         return;
     }
+
+#if defined(FLOW_PROFILE_WAVESHARE)
+    refreshIoResponseCaches_();
+#endif
 
     const bool wsClientActive = started_ && (wsLog_.count() > 0U);
     const bool flowSourceActive = wsClientActive && (wsActiveSource_() == 1U) && bridgeUartEnabled_;

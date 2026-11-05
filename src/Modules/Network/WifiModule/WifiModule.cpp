@@ -4,6 +4,7 @@
  */
 #include "WifiModule.h"
 #include "Core/BufferUsageTracker.h"
+#include "Core/EventBus/EventPayloads.h"
 #define LOG_MODULE_ID ((LogModuleId)LogModuleIdValue::WifiModule)
 #include "Core/ModuleLog.h"
 #include "Core/Runtime.h"
@@ -20,17 +21,6 @@ static constexpr MqttConfigRouteProducer::Route kWifiCfgRoutes[] = {
     {1, {(uint8_t)ConfigModuleId::Wifi, kWifiCfgBranch}, "wifi", "wifi", (uint8_t)MqttPublishPriority::Normal, nullptr},
 };
 
-bool isKnownDefaultMdnsHost_(const char* host)
-{
-    if (!host || host[0] == '\0') return true;
-    return strcmp(host, "flowio") == 0 ||
-           strcmp(host, "flowio-s3") == 0 ||
-           strcmp(host, "flowio-core") == 0 ||
-           strcmp(host, "flowio-display") == 0 ||
-           strcmp(host, "flow-connect-display") == 0 ||
-           strcmp(host, "flowio-micronova") == 0;
-}
-
 bool isBlank_(const char* text, size_t maxLen)
 {
     if (!text) return true;
@@ -40,6 +30,51 @@ bool isBlank_(const char* text, size_t maxLen)
         if (!isspace((unsigned char)text[i])) return false;
     }
     return true;
+}
+
+void formatHostname_(const char* deviceName, char* out, size_t outLen)
+{
+    if (!out || outLen == 0U) return;
+
+    size_t w = 0U;
+    if (deviceName) {
+        for (size_t i = 0U; deviceName[i] != '\0' && w < (outLen - 1U); ++i) {
+            const char c = deviceName[i];
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+                out[w++] = (char)tolower((unsigned char)c);
+            } else if (c == ' ' || c == '_' || c == '.') {
+                out[w++] = '-';
+            }
+        }
+    }
+    out[w] = '\0';
+
+    while (w > 0U && out[0] == '-') {
+        memmove(out, out + 1, w);
+        --w;
+    }
+    while (w > 0U && out[w - 1U] == '-') {
+        out[--w] = '\0';
+    }
+
+    if (out[0] == '\0') {
+        snprintf(out, outLen, "flowio");
+    }
+}
+
+void formatDhcpHostname_(const char* deviceName, char* out, size_t outLen)
+{
+    formatHostname_(deviceName, out, outLen);
+    if (!out || outLen == 0U || strcmp(out, "flowio") != 0) return;
+
+    uint8_t mac[6] = {0};
+    if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) return;
+    snprintf(out,
+             outLen,
+             "FlowIO-%02X%02X%02X",
+             (unsigned)mac[3],
+             (unsigned)mac[4],
+             (unsigned)mac[5]);
 }
 
 void formatStaMac_(char* out, size_t outLen)
@@ -72,7 +107,7 @@ const char* wifiModeName_(wifi_mode_t mode)
 
 WifiModule::WifiModule(const BoardSpec& board)
 {
-    applyBoardDefaults_(board);
+    (void)board;
 }
 
 WifiState WifiModule::stateSvc_() const {
@@ -285,7 +320,7 @@ bool WifiModule::cmdDumpCfg_(void* userCtx, const CommandRequest& req, char* rep
 
     const size_t ssidLen = strnlen(self->cfgData.ssid, sizeof(self->cfgData.ssid));
     const size_t passLen = strnlen(self->cfgData.pass, sizeof(self->cfgData.pass));
-    const size_t mdnsLen = strnlen(self->cfgData.mdns, sizeof(self->cfgData.mdns));
+    const size_t deviceNameLen = strnlen(self->deviceName_, sizeof(self->deviceName_));
 
     StaticJsonDocument<512> doc;
     doc["ok"] = true;
@@ -296,8 +331,9 @@ bool WifiModule::cmdDumpCfg_(void* userCtx, const CommandRequest& req, char* rep
     doc["ssid_len"] = (uint32_t)ssidLen;
     doc["pass"] = self->cfgData.pass;
     doc["pass_len"] = (uint32_t)passLen;
-    doc["mdns"] = self->cfgData.mdns;
-    doc["mdns_len"] = (uint32_t)mdnsLen;
+    doc["devicename"] = self->deviceName_;
+    doc["devicename_len"] = (uint32_t)deviceNameLen;
+    doc["mdns"] = self->mdnsApplied;
     doc["connected"] = WiFi.isConnected();
     doc["rssi"] = WiFi.isConnected() ? WiFi.RSSI() : -127;
     doc["last_disconnect_reason"] = (uint32_t)self->lastDisconnectReason_;
@@ -320,26 +356,26 @@ void WifiModule::logConfigSummary_() const
 {
     const size_t ssidLen = strnlen(cfgData.ssid, sizeof(cfgData.ssid));
     const size_t passLen = strnlen(cfgData.pass, sizeof(cfgData.pass));
-    const size_t mdnsLen = strnlen(cfgData.mdns, sizeof(cfgData.mdns));
+    const size_t deviceNameLen = strnlen(deviceName_, sizeof(deviceName_));
 
     if (ssidLen == 0U) {
-        LOGW("WiFi config loaded enabled=%d ethernet=%d ssid=<empty> pass_len=%u mdns='%s' mdns_len=%u",
+        LOGW("WiFi config loaded enabled=%d ethernet=%d ssid=<empty> pass_len=%u devicename='%s' devicename_len=%u",
              (int)cfgData.enabled,
              (int)ethernetEnabled_,
              (unsigned)passLen,
-             cfgData.mdns,
-             (unsigned)mdnsLen);
+             deviceName_,
+             (unsigned)deviceNameLen);
         return;
     }
 
-    LOGI("WiFi config loaded enabled=%d ethernet=%d ssid='%s' ssid_len=%u pass_len=%u mdns='%s' mdns_len=%u",
+    LOGI("WiFi config loaded enabled=%d ethernet=%d ssid='%s' ssid_len=%u pass_len=%u devicename='%s' devicename_len=%u",
          (int)cfgData.enabled,
          (int)ethernetEnabled_,
          cfgData.ssid,
          (unsigned)ssidLen,
          (unsigned)passLen,
-         cfgData.mdns,
-         (unsigned)mdnsLen);
+         deviceName_,
+         (unsigned)deviceNameLen);
 }
 
 bool WifiModule::isStartupTransientWindow_() const
@@ -433,6 +469,12 @@ void WifiModule::startConnect() {
     lastDisconnectReason_ = 0;
     lastConnectingLogMs_ = millis();
 
+    char hostname[sizeof(deviceName_)] = {0};
+    formatDhcpHostname_(deviceName_, hostname, sizeof(hostname));
+    if (!WiFi.setHostname(hostname)) {
+        LOGW("WiFi DHCP hostname default update failed host=%s", hostname);
+    }
+
     if (!WiFi.enableSTA(true)) {
         if (transientBoot) {
             LOGD("enableSTA not ready yet during boot");
@@ -450,6 +492,11 @@ void WifiModule::startConnect() {
     const bool modeOk = WiFi.mode(wantedMode);
     if (!modeOk) {
         LOGW("WiFi.mode failed requested=%d current=%d", (int)wantedMode, (int)WiFi.getMode());
+    }
+    if (!WiFi.STA.setHostname(hostname)) {
+        LOGW("WiFi DHCP hostname update failed host=%s", hostname);
+    } else {
+        LOGI("WiFi DHCP hostname=%s", hostname);
     }
     WiFi.setSleep(false);               ///< ✅ important (stability)
 
@@ -814,19 +861,25 @@ void WifiModule::init(ConfigStore& cfg,
     constexpr uint8_t kCfgBranchId = kWifiCfgBranch;
     /// récupérer service loghub (log async)
     logHub = services.get<LogHubService>(ServiceId::LogHub);
+    cfgStore_ = &cfg;
 
     const DataStoreService* dsSvc = services.get<DataStoreService>(ServiceId::DataStore);
     dataStore = dsSvc ? dsSvc->store : nullptr;
+    netAccessSvc_ = services.get<NetworkAccessService>(ServiceId::NetworkAccess);
+    const EventBusService* eventBusSvc = services.get<EventBusService>(ServiceId::EventBus);
+    eventBus_ = eventBusSvc ? eventBusSvc->bus : nullptr;
 
     /// Register config vars
     cfg.registerVar(enabledVar, kCfgModuleId, kCfgBranchId);
     cfg.registerVar(ssidVar, kCfgModuleId, kCfgBranchId);
     cfg.registerVar(passVar, kCfgModuleId, kCfgBranchId);
-    cfg.registerVar(mdnsVar, kCfgModuleId, kCfgBranchId);
 
     /// Register WifiService
     if (!services.add(ServiceId::Wifi, &wifiSvc_)) {
         LOGE("service registration failed: %s", toString(ServiceId::Wifi));
+    }
+    if (eventBus_) {
+        eventBus_->subscribe(EventId::ConfigChanged, &WifiModule::onEventStatic_, this);
     }
 
     const CommandService* cmdSvc = services.get<CommandService>(ServiceId::Command);
@@ -864,6 +917,8 @@ void WifiModule::init(ConfigStore& cfg,
 void WifiModule::onConfigLoaded(ConfigStore& cfg, ServiceRegistry& services)
 {
     refreshEthernetConfig_(cfg);
+    netAccessSvc_ = services.get<NetworkAccessService>(ServiceId::NetworkAccess);
+    loadSystemDeviceName_();
     if (!cfgMqttPub_) {
         cfgMqttPub_ = new (std::nothrow) MqttConfigRouteProducer();
     }
@@ -876,19 +931,9 @@ void WifiModule::onConfigLoaded(ConfigStore& cfg, ServiceRegistry& services)
     }
     registerHaEntities_(services);
 
-    applyBoardMdnsHost_();
     cfgData.ssid[sizeof(cfgData.ssid) - 1U] = '\0';
     cfgData.pass[sizeof(cfgData.pass) - 1U] = '\0';
-    cfgData.mdns[sizeof(cfgData.mdns) - 1U] = '\0';
     logConfigSummary_();
-    if (ethernetEnabled_) {
-        LOGW("WiFi disabled because ethernet.enabled=true");
-        if (WiFi.isConnected()) {
-            WiFi.disconnect(false, false);
-        }
-        setState(WifiState::Disabled);
-        return;
-    }
     if (!cfgData.enabled) {
         LOGW("WiFi disabled in config, disconnecting STA");
         if (WiFi.isConnected()) {
@@ -897,9 +942,15 @@ void WifiModule::onConfigLoaded(ConfigStore& cfg, ServiceRegistry& services)
         setState(WifiState::Disabled);
         return;
     }
-    initialConnectNotBeforeMs_ = isBlank_(cfgData.ssid, sizeof(cfgData.ssid))
-        ? 0U
-        : millis() + kInitialConnectDelayMs;
+    if (ethernetEnabled_ && !isBlank_(cfgData.ssid, sizeof(cfgData.ssid))) {
+        initialConnectNotBeforeMs_ = millis() + ETH_TIMEOUT_MS;
+        LOGI("[NET] Ethernet preferred; WiFi STA fallback armed after %lu ms",
+             (unsigned long)ETH_TIMEOUT_MS);
+    } else {
+        initialConnectNotBeforeMs_ = isBlank_(cfgData.ssid, sizeof(cfgData.ssid))
+            ? 0U
+            : millis() + kInitialConnectDelayMs;
+    }
     startupTransientLogUntilMs_ = millis() + kStartupTransientLogWindowMs;
     setState(WifiState::Idle);
 }
@@ -919,23 +970,53 @@ void WifiModule::refreshEthernetConfig_(ConfigStore& cfg)
     ethernetEnabled_ = root["enabled"] | false;
 }
 
-void WifiModule::applyBoardDefaults_(const BoardSpec& board)
+bool WifiModule::preferredEthernetAvailable_() const
 {
-    const char* host = boardMdnsHost(board);
-    if (!host || host[0] == '\0') return;
-
-    snprintf(boardMdnsHost_, sizeof(boardMdnsHost_), "%s", host);
-    snprintf(cfgData.mdns, sizeof(cfgData.mdns), "%s", host);
+    if (!ethernetEnabled_) return false;
+    if (WiFi.isConnected()) return false;
+    if (!netAccessSvc_ || !netAccessSvc_->mode) return false;
+    return netAccessSvc_->mode(netAccessSvc_->ctx) == NetworkAccessMode::Station;
 }
 
-void WifiModule::applyBoardMdnsHost_()
+void WifiModule::onEventStatic_(const Event& e, void* user)
 {
-    if (boardMdnsHost_[0] == '\0') return;
-    if (strncmp(cfgData.mdns, boardMdnsHost_, sizeof(cfgData.mdns)) == 0) return;
-    if (!isKnownDefaultMdnsHost_(cfgData.mdns)) return;
+    WifiModule* self = static_cast<WifiModule*>(user);
+    if (self) self->onEvent_(e);
+}
 
-    snprintf(cfgData.mdns, sizeof(cfgData.mdns), "%s", boardMdnsHost_);
-    LOGD("mDNS host defaulted by board: %s", cfgData.mdns);
+void WifiModule::onEvent_(const Event& e)
+{
+    if (e.id != EventId::ConfigChanged) return;
+    if (!e.payload || e.len < sizeof(ConfigChangedPayload)) return;
+
+    const ConfigChangedPayload* p = static_cast<const ConfigChangedPayload*>(e.payload);
+    if (p->moduleId != (uint8_t)ConfigModuleId::System) return;
+    if (strcmp(p->nvsKey, NvsKeys::System::DeviceName) != 0) return;
+    deviceNameDirty_ = true;
+}
+
+void WifiModule::loadSystemDeviceName_()
+{
+    char next[sizeof(deviceName_)] = "flowio";
+    if (cfgStore_) {
+        char systemJson[128] = {0};
+        if (cfgStore_->toJsonModule("system", systemJson, sizeof(systemJson), nullptr, false)) {
+            StaticJsonDocument<128> doc;
+            if (deserializeJson(doc, systemJson) == DeserializationError::Ok && doc.is<JsonObjectConst>()) {
+                const char* configured = doc.as<JsonObjectConst>()["devicename"] | "";
+                if (!isBlank_(configured, sizeof(deviceName_))) {
+                    snprintf(next, sizeof(next), "%s", configured);
+                }
+            }
+        }
+    }
+    next[sizeof(next) - 1U] = '\0';
+    if (strncmp(deviceName_, next, sizeof(deviceName_)) == 0) return;
+    snprintf(deviceName_, sizeof(deviceName_), "%s", next);
+    LOGI("System device name loaded: %s", deviceName_);
+    if (mdnsStarted) {
+        stopMdns_();
+    }
 }
 
 void WifiModule::stopMdns_()
@@ -954,31 +1035,8 @@ void WifiModule::syncMdns_()
         return;
     }
 
-    char host[sizeof(cfgData.mdns)] = {0};
-    size_t w = 0;
-    for (size_t i = 0; cfgData.mdns[i] != '\0' && w < (sizeof(host) - 1); ++i) {
-        char c = cfgData.mdns[i];
-        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
-            host[w++] = (char)tolower((unsigned char)c);
-        } else if (c == ' ' || c == '_' || c == '.') {
-            host[w++] = '-';
-        }
-    }
-    host[w] = '\0';
-
-    while (w > 0 && host[0] == '-') {
-        memmove(host, host + 1, w);
-        --w;
-    }
-    while (w > 0 && host[w - 1] == '-') {
-        host[w - 1] = '\0';
-        --w;
-    }
-
-    if (host[0] == '\0') {
-        stopMdns_();
-        return;
-    }
+    char host[sizeof(deviceName_)] = {0};
+    formatHostname_(deviceName_, host, sizeof(host));
 
     if (mdnsStarted && strcmp(mdnsApplied, host) == 0) return;
 
@@ -999,6 +1057,11 @@ void WifiModule::syncMdns_()
 }
 
 void WifiModule::loop() {
+    if (deviceNameDirty_) {
+        deviceNameDirty_ = false;
+        loadSystemDeviceName_();
+    }
+
     processScan_();
 
     switch (state) {
@@ -1010,6 +1073,10 @@ void WifiModule::loop() {
     case WifiState::Idle:
         if (!staRetryEnabled_) {
             vTaskDelay(pdMS_TO_TICKS(Limits::Wifi::Timing::IdleRetryDisabledLoopDelayMs));
+            break;
+        }
+        if (preferredEthernetAvailable_()) {
+            vTaskDelay(pdMS_TO_TICKS(Limits::Wifi::Timing::IdleConnectPollDelayMs));
             break;
         }
         if (initialConnectNotBeforeMs_ != 0U && millis() < initialConnectNotBeforeMs_) {

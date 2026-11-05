@@ -6,10 +6,15 @@
 #include "Board/BoardSpec.h"
 #include "Modules/Network/WifiModule/WifiRuntime.h"
 
+#include <ArduinoJson.h>
 #include <Arduino.h>
 #include <SPI.h>
+#include <WiFi.h>
+#include <ctype.h>
 #include <esp_err.h>
+#include <esp_mac.h>
 #include <esp_netif_ip_addr.h>
+#include <string.h>
 
 namespace {
 const char* stateName(EthernetState s)
@@ -33,6 +38,62 @@ uint8_t toSpiFreqMhz_(uint32_t hz)
     if (mhz < 1U) mhz = 1U;
     if (mhz > 80U) mhz = 80U;
     return (uint8_t)mhz;
+}
+
+bool isBlank_(const char* text, size_t maxLen)
+{
+    if (!text) return true;
+    const size_t len = strnlen(text, maxLen);
+    if (len == 0U || len >= maxLen) return true;
+    for (size_t i = 0; i < len; ++i) {
+        if (!isspace((unsigned char)text[i])) return false;
+    }
+    return true;
+}
+
+void formatHostname_(const char* deviceName, char* out, size_t outLen)
+{
+    if (!out || outLen == 0U) return;
+
+    size_t w = 0U;
+    if (deviceName) {
+        for (size_t i = 0U; deviceName[i] != '\0' && w < (outLen - 1U); ++i) {
+            const char c = deviceName[i];
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+                out[w++] = (char)tolower((unsigned char)c);
+            } else if (c == ' ' || c == '_' || c == '.') {
+                out[w++] = '-';
+            }
+        }
+    }
+    out[w] = '\0';
+
+    while (w > 0U && out[0] == '-') {
+        memmove(out, out + 1, w);
+        --w;
+    }
+    while (w > 0U && out[w - 1U] == '-') {
+        out[--w] = '\0';
+    }
+
+    if (out[0] == '\0') {
+        snprintf(out, outLen, "flowio");
+    }
+}
+
+void formatDhcpHostname_(const char* deviceName, char* out, size_t outLen)
+{
+    formatHostname_(deviceName, out, outLen);
+    if (!out || outLen == 0U || strcmp(out, "flowio") != 0) return;
+
+    uint8_t mac[6] = {0};
+    if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) return;
+    snprintf(out,
+             outLen,
+             "FlowIO-%02X%02X%02X",
+             (unsigned)mac[3],
+             (unsigned)mac[4],
+             (unsigned)mac[5]);
 }
 }  // namespace
 
@@ -58,9 +119,15 @@ void EthernetModule::init(ConfigStore& cfg, ServiceRegistry& services)
     constexpr uint8_t kCfgBranchId = 1U;
     cfg.registerVar(enabledVar_, kCfgModuleId, kCfgBranchId);
 
+    cfgStore_ = &cfg;
     services_ = &services;
     const DataStoreService* dsSvc = services.get<DataStoreService>(ServiceId::DataStore);
     dataStore_ = dsSvc ? dsSvc->store : nullptr;
+    const EventBusService* eventBusSvc = services.get<EventBusService>(ServiceId::EventBus);
+    eventBus_ = eventBusSvc ? eventBusSvc->bus : nullptr;
+    if (eventBus_) {
+        eventBus_->subscribe(EventId::ConfigChanged, &EthernetModule::onEventStatic_, this);
+    }
 
     gEthernetInstance = this;
     cleanupDriver_();
@@ -70,7 +137,13 @@ void EthernetModule::init(ConfigStore& cfg, ServiceRegistry& services)
 
 void EthernetModule::onConfigLoaded(ConfigStore&, ServiceRegistry& services)
 {
-    if (cfgData_.enabled) {
+    loadSystemDeviceName_();
+#if ENABLE_ETHERNET
+    const bool ethernetEnabled = cfgData_.enabled;
+#else
+    const bool ethernetEnabled = false;
+#endif
+    if (ethernetEnabled) {
         if (!hasEthPins_) {
             LOGE("ethernet enabled in config but board has no valid W5500 pin mapping");
             setState_(EthernetState::ErrorWait);
@@ -84,19 +157,29 @@ void EthernetModule::onConfigLoaded(ConfigStore&, ServiceRegistry& services)
             }
         }
         setState_(EthernetState::Starting);
-        LOGI("Ethernet enabled (W5500 DHCP via ETH.begin)");
+        LOGI("[NET] Starting Ethernet (W5500 DHCP via ETH.begin)");
     } else {
         cleanupDriver_();
         resetRuntimeState_();
         setState_(EthernetState::Disabled);
+#if ENABLE_ETHERNET
         LOGI("Ethernet disabled");
+#else
+        LOGI("Ethernet disabled at compile time (ENABLE_ETHERNET=0)");
+#endif
     }
 }
 
 void EthernetModule::loop()
 {
+    if (deviceNameDirty_) {
+        deviceNameDirty_ = false;
+        loadSystemDeviceName_();
+    }
+
     if (cfgData_.enabled || driverStarted_) {
         syncRuntimeState_();
+        handleDeferredDriverActions_();
     }
 
     switch (state_) {
@@ -157,14 +240,14 @@ void EthernetModule::onNetworkEvent_(arduino_event_t* event)
     switch (event->event_id) {
         case ARDUINO_EVENT_ETH_START:
             LOGI("ETH event: started");
-            (void)ETH.setHostname("flowio-eth0");
+            hostnameDirty_ = true;
             break;
 
         case ARDUINO_EVENT_ETH_CONNECTED:
             linkUp_ = true;
             linkDirty_ = true;
+            linkInfoDirty_ = true;
             LOGI("ETH link up");
-            logEthLinkInfo_();
             break;
 
         case ARDUINO_EVENT_ETH_GOT_IP: {
@@ -174,8 +257,8 @@ void EthernetModule::onNetworkEvent_(arduino_event_t* event)
             ipDirty_ = true;
             linkUp_ = true;
             linkDirty_ = true;
-            LOGI("ETH got IP " IPSTR, IP2STR(&got->ip_info.ip));
-            startMdns_();
+            LOGI("[NET] Ethernet got IP: " IPSTR, IP2STR(&got->ip_info.ip));
+            mdnsStartDirty_ = true;
             break;
         }
 
@@ -184,7 +267,7 @@ void EthernetModule::onNetworkEvent_(arduino_event_t* event)
             ipAddr_ = 0U;
             ipDirty_ = true;
             LOGW("ETH lost IP");
-            stopMdns_();
+            mdnsStopDirty_ = true;
             break;
 
         case ARDUINO_EVENT_ETH_DISCONNECTED:
@@ -194,7 +277,7 @@ void EthernetModule::onNetworkEvent_(arduino_event_t* event)
             linkDirty_ = true;
             ipDirty_ = true;
             LOGW("ETH link down");
-            stopMdns_();
+            mdnsStopDirty_ = true;
             break;
 
         case ARDUINO_EVENT_ETH_STOP:
@@ -204,12 +287,29 @@ void EthernetModule::onNetworkEvent_(arduino_event_t* event)
             linkDirty_ = true;
             ipDirty_ = true;
             LOGI("ETH event: stopped");
-            stopMdns_();
+            mdnsStopDirty_ = true;
             break;
 
         default:
             break;
     }
+}
+
+void EthernetModule::onEventStatic_(const Event& e, void* user)
+{
+    EthernetModule* self = static_cast<EthernetModule*>(user);
+    if (self) self->onEvent_(e);
+}
+
+void EthernetModule::onEvent_(const Event& e)
+{
+    if (e.id != EventId::ConfigChanged) return;
+    if (!e.payload || e.len < sizeof(ConfigChangedPayload)) return;
+
+    const ConfigChangedPayload* p = static_cast<const ConfigChangedPayload*>(e.payload);
+    if (p->moduleId != (uint8_t)ConfigModuleId::System) return;
+    if (strcmp(p->nvsKey, NvsKeys::System::DeviceName) != 0) return;
+    deviceNameDirty_ = true;
 }
 
 void EthernetModule::setState_(EthernetState next)
@@ -227,6 +327,10 @@ void EthernetModule::resetRuntimeState_()
     ipAddr_ = 0U;
     ipDirty_ = true;
     linkDirty_ = true;
+    hostnameDirty_ = false;
+    linkInfoDirty_ = false;
+    mdnsStartDirty_ = false;
+    mdnsStopDirty_ = false;
     if (dataStore_) {
         setNetworkIp(*dataStore_, IpV4{});
         setNetworkReady(*dataStore_, false);
@@ -254,8 +358,10 @@ bool EthernetModule::installDriver_()
         networkEventHandle_ = Network.onEvent(EthernetModule::onNetworkEventStatic_);
     }
 
+    resetPhyHardware_();
     SPI.begin(ethCfg_.sclkPin, ethCfg_.misoPin, ethCfg_.mosiPin);
     spiStarted_ = true;
+    ETH.setTaskStackSize(6144);
 
     const bool ok = ETH.begin(ETH_PHY_W5500,
                               (int32_t)ethCfg_.phyAddr,
@@ -275,9 +381,24 @@ bool EthernetModule::installDriver_()
     lastStartFailureStage_ = "none";
     lastStartFailureErr_ = ESP_OK;
 
-    const String mac = ETH.macAddress();
-    LOGI("Ethernet driver started freq_mhz=%u mac=%s", (unsigned)spiFreqMhz_, mac.c_str());
+    LOGI("Ethernet driver started freq_mhz=%u", (unsigned)spiFreqMhz_);
     return true;
+}
+
+void EthernetModule::resetPhyHardware_()
+{
+    if (ethCfg_.csPin >= 0) {
+        pinMode(ethCfg_.csPin, OUTPUT);
+        digitalWrite(ethCfg_.csPin, HIGH);
+    }
+    if (ethCfg_.rstPin < 0) return;
+
+    pinMode(ethCfg_.rstPin, OUTPUT);
+    digitalWrite(ethCfg_.rstPin, LOW);
+    vTaskDelay(pdMS_TO_TICKS(25));
+    digitalWrite(ethCfg_.rstPin, HIGH);
+    vTaskDelay(pdMS_TO_TICKS(150));
+    LOGD("W5500 hardware reset pulse rst=%d", (int)ethCfg_.rstPin);
 }
 
 bool EthernetModule::ensureDriverStarted_()
@@ -305,6 +426,10 @@ void EthernetModule::cleanupDriver_()
 
     driverStarted_ = false;
     spiStarted_ = false;
+    hostnameDirty_ = false;
+    linkInfoDirty_ = false;
+    mdnsStartDirty_ = false;
+    mdnsStopDirty_ = false;
 }
 
 void EthernetModule::noteStartFailure_(const char* stage, int err)
@@ -327,17 +452,80 @@ void EthernetModule::logEthLinkInfo_() const
     LOGI("ETH duplex=%s", ETH.fullDuplex() ? "full" : "half");
 }
 
+void EthernetModule::loadSystemDeviceName_()
+{
+    char next[sizeof(deviceName_)] = "flowio";
+    if (cfgStore_) {
+        char systemJson[128] = {0};
+        if (cfgStore_->toJsonModule("system", systemJson, sizeof(systemJson), nullptr, false)) {
+            StaticJsonDocument<128> doc;
+            if (deserializeJson(doc, systemJson) == DeserializationError::Ok && doc.is<JsonObjectConst>()) {
+                const char* configured = doc.as<JsonObjectConst>()["devicename"] | "";
+                if (!isBlank_(configured, sizeof(deviceName_))) {
+                    snprintf(next, sizeof(next), "%s", configured);
+                }
+            }
+        }
+    }
+
+    next[sizeof(next) - 1U] = '\0';
+    if (strncmp(deviceName_, next, sizeof(deviceName_)) == 0) return;
+    snprintf(deviceName_, sizeof(deviceName_), "%s", next);
+    LOGI("System device name loaded: %s", deviceName_);
+    hostnameDirty_ = true;
+    if (mdnsStarted_) {
+        stopMdns_();
+        startMdns_();
+    }
+}
+
+void EthernetModule::handleDeferredDriverActions_()
+{
+    if (!driverStarted_) return;
+
+    if (hostnameDirty_) {
+        hostnameDirty_ = false;
+        char hostname[sizeof(deviceName_)] = {0};
+        formatDhcpHostname_(deviceName_, hostname, sizeof(hostname));
+        if (!ETH.setHostname(hostname)) {
+            LOGW("Ethernet DHCP hostname update failed host=%s", hostname);
+        } else {
+            LOGI("Ethernet DHCP hostname=%s", hostname);
+        }
+    }
+
+    if (linkInfoDirty_) {
+        linkInfoDirty_ = false;
+        logEthLinkInfo_();
+    }
+
+    if (mdnsStopDirty_) {
+        mdnsStopDirty_ = false;
+        mdnsStartDirty_ = false;
+        stopMdns_();
+    }
+
+    if (mdnsStartDirty_) {
+        mdnsStartDirty_ = false;
+        startMdns_();
+    }
+}
+
 void EthernetModule::startMdns_()
 {
     if (mdnsStarted_) return;
     if (!gotIp_) return;
 
-    if (!MDNS.begin("flowio")) {
-        LOGW("mDNS start failed host=flowio on Ethernet");
+    char host[sizeof(deviceName_)] = {0};
+    formatHostname_(deviceName_, host, sizeof(host));
+
+    if (!MDNS.begin(host)) {
+        LOGW("mDNS start failed host=%s on Ethernet", host);
         return;
     }
     mdnsStarted_ = true;
-    LOGI("mDNS started host=flowio.local (Ethernet)");
+    snprintf(mdnsApplied_, sizeof(mdnsApplied_), "%s", host);
+    LOGI("mDNS started host=%s.local (Ethernet)", mdnsApplied_);
 }
 
 void EthernetModule::stopMdns_()
@@ -345,6 +533,7 @@ void EthernetModule::stopMdns_()
     if (!mdnsStarted_) return;
     MDNS.end();
     mdnsStarted_ = false;
+    mdnsApplied_[0] = '\0';
     LOGI("mDNS stopped (Ethernet)");
 }
 
@@ -354,43 +543,93 @@ void EthernetModule::syncRuntimeState_()
 
     if (ipDirty_) {
         ipDirty_ = false;
-        IpV4 ip{};
-        const esp_ip4_addr_t ip4 = {ipAddr_};
-        ip.b[0] = (uint8_t)esp_ip4_addr1_16(&ip4);
-        ip.b[1] = (uint8_t)esp_ip4_addr2_16(&ip4);
-        ip.b[2] = (uint8_t)esp_ip4_addr3_16(&ip4);
-        ip.b[3] = (uint8_t)esp_ip4_addr4_16(&ip4);
-        setNetworkIp(*dataStore_, ip);
+        if (gotIp_) {
+            IpV4 ip{};
+            const esp_ip4_addr_t ip4 = {ipAddr_};
+            ip.b[0] = (uint8_t)esp_ip4_addr1_16(&ip4);
+            ip.b[1] = (uint8_t)esp_ip4_addr2_16(&ip4);
+            ip.b[2] = (uint8_t)esp_ip4_addr3_16(&ip4);
+            ip.b[3] = (uint8_t)esp_ip4_addr4_16(&ip4);
+            setNetworkIp(*dataStore_, ip);
+        } else if (!wifiStaConnected_()) {
+            setNetworkIp(*dataStore_, IpV4{});
+        }
     }
 
     if (linkDirty_) {
         linkDirty_ = false;
     }
-    setNetworkReady(*dataStore_, gotIp_);
+    setNetworkReady(*dataStore_, gotIp_ || wifiStaConnected_());
+}
+
+bool EthernetModule::wifiStaConnected_() const
+{
+    return WiFi.isConnected();
+}
+
+bool EthernetModule::wifiApActive_() const
+{
+    const wifi_mode_t mode = WiFi.getMode();
+    if ((mode & WIFI_MODE_AP) == 0) return false;
+    const IPAddress ip = WiFi.softAPIP();
+    return ip[0] != 0 || ip[1] != 0 || ip[2] != 0 || ip[3] != 0;
 }
 
 bool EthernetModule::isWebReachable_() const
 {
-    return gotIp_;
+    return gotIp_ || wifiStaConnected_() || wifiApActive_();
 }
 
 NetworkAccessMode EthernetModule::mode_() const
 {
-    return gotIp_ ? NetworkAccessMode::Station : NetworkAccessMode::None;
+    if (gotIp_ || wifiStaConnected_()) return NetworkAccessMode::Station;
+    if (wifiApActive_()) return NetworkAccessMode::AccessPoint;
+    return NetworkAccessMode::None;
 }
 
 bool EthernetModule::getIp_(char* out, size_t len) const
 {
     if (!out || len == 0) return false;
     out[0] = '\0';
-    if (!gotIp_) return false;
 
-    const esp_ip4_addr_t ip = {ipAddr_};
-    snprintf(out, len, IPSTR, IP2STR(&ip));
+    if (gotIp_) {
+        const esp_ip4_addr_t ip = {ipAddr_};
+        snprintf(out, len, IPSTR, IP2STR(&ip));
+        return out[0] != '\0';
+    }
+
+    if (wifiStaConnected_()) {
+        const IPAddress ip = WiFi.localIP();
+        snprintf(out, len, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+        return out[0] != '\0';
+    }
+
+    if (wifiApActive_()) {
+        const IPAddress ip = WiFi.softAPIP();
+        snprintf(out, len, "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+        return out[0] != '\0';
+    }
+
     return out[0] != '\0';
 }
 
 bool EthernetModule::notifyWifiConfigChanged_()
 {
-    return false;
+    const WifiService* wifi = services_ ? services_->get<WifiService>(ServiceId::Wifi) : nullptr;
+    bool ok = false;
+    if (wifi && wifi->setStaRetryEnabled) {
+        ok = wifi->setStaRetryEnabled(wifi->ctx, true) || ok;
+    }
+    if (wifi && wifi->requestReconnect) {
+        ok = wifi->requestReconnect(wifi->ctx) || ok;
+    }
+    return ok;
+}
+
+bool EthernetModule::notifyShutdownPending_()
+{
+    if (eventBus_) {
+        return eventBus_->post(EventId::NetworkShutdownPending, nullptr, 0, moduleId());
+    }
+    return true;
 }

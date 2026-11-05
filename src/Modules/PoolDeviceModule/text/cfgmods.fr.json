@@ -7,9 +7,6 @@
   "docs": {
     "pdm": {
       "hidden": true
-    },
-    "pdmrt": {
-      "hidden": true
     }
   }
 }

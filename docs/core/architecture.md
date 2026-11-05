@@ -1,6 +1,8 @@
 # Architecture Core
 
-Cette page décrit l'architecture actuellement utilisée par les firmwares `FlowIO` et `Supervisor`.
+Cette page décrit l'architecture du firmware principal `Waveshare-ESP32-S3`. Les
+profils historiques `FlowIO` et `Supervisor` réutilisent les mêmes briques Core avec
+une composition de modules différente.
 
 ## Blocs runtime
 
@@ -94,7 +96,9 @@ Séquence de démarrage commune:
 
 Ce mécanisme s'applique aussi aux modules passifs. Un module sans tâche peut donc déplacer son setup métier de `onConfigLoaded()` vers `onStart()` s'il doit être exécuté à un moment précis du boot.
 
-Dans `FlowIO`, le bootstrap enregistre ensuite les providers runtime MQTT et Runtime UI du profil.
+Dans `Waveshare-ESP32-S3`, le bootstrap configure ensuite les E/S depuis le domaine
+Pool, définit les équipements, puis enregistre les providers runtime MQTT et Home
+Assistant du profil.
 
 ### Delais de sequencement retenus
 
@@ -109,11 +113,15 @@ Dans `FlowIO`, le bootstrap enregistre ensuite les providers runtime MQTT et Run
 
 ## Répartition actuelle des responsabilités
 
-### `FlowIO`
+### `Waveshare-ESP32-S3`
 
-Le profil `FlowIO` porte notamment:
+Le profil principal Waveshare porte notamment:
 
+- `ethernet`
 - `wifi`
+- `wifiprov`
+- `webinterface`
+- `fwupdate`
 - `time`
 - `mqtt`
 - `ha`
@@ -121,11 +129,16 @@ Le profil `FlowIO` porte notamment:
 - `poollogic`
 - `pooldev`
 - `hmi`
-- `i2ccfg.server`
+- `hmi.buzzer`
+- `tft.s3`
 
-### `Supervisor`
+Il exécute donc sur un seul ESP32-S3 les responsabilités autrefois réparties entre
+les profils `FlowIO` et `Supervisor`, sans lien I2C inter-contrôleurs.
 
-Le profil `Supervisor` porte notamment:
+### Profils historiques
+
+`FlowIO` conserve le moteur métier, les IO, MQTT/Home Assistant, le HMI Nextion et
+`i2ccfg.server`. `Supervisor` conserve notamment:
 
 - `wifi`
 - `wifiprov`
@@ -142,9 +155,12 @@ La chaîne de logs commune est:
 2. `LogDispatcherModule`: distribution vers les sinks
 3. `LogSerialSinkModule`: sortie série
 
-Le profil `Supervisor` ajoute aussi `LogAlarmSinkModule`, qui convertit certains logs `Warn`/`Error` en conditions d'alarme. Le profil `FlowIO` ne l'enregistre pas dans `src/Profiles/FlowIO/FlowIOBootstrap.cpp`.
+Le profil Waveshare ajoute la journalisation d'activité et, lorsque
+`FLOW_ENABLE_BOOT_LOG_CAPTURE=1`, la capture des logs précoces. Le profil historique
+`Supervisor` ajoute aussi `LogAlarmSinkModule`, qui convertit certains logs
+`Warn`/`Error` en conditions d'alarme.
 
-Le logging fonctionne de manière asynchrone. Les modules produisent des entrées de log et les poussent dans le buffer central porté par `LogHubModule`. Ces entrées sont ensuite consommées par `LogDispatcherModule`, qui les redistribue vers les sinks enregistrés. Chaque sink applique ensuite son propre traitement, par exemple l'émission sur le port série pour `LogSerialSinkModule` ou la transformation en alarmes pour `LogAlarmSinkModule` côté `Supervisor`.
+Le logging fonctionne de manière asynchrone. Les modules produisent des entrées de log et les poussent dans le buffer central porté par `LogHubModule`. Ces entrées sont ensuite consommées par `LogDispatcherModule`, qui les redistribue vers les sinks enregistrés. Chaque sink applique ensuite son propre traitement, par exemple l'émission sur le port série pour `LogSerialSinkModule`.
 
 ## Transport MQTT
 

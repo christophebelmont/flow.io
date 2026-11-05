@@ -18,7 +18,7 @@ public:
     uint8_t taskCount() const override { return (_hub && _sinkReg) ? 1 : 0; }
     const ModuleTaskSpec* taskSpecs() const override;
     UBaseType_t taskStackCaps() const override {
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         return MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
 #else
         return Module::taskStackCaps();

@@ -25,7 +25,7 @@ public:
     void init(ConfigStore& cfg, ServiceRegistry& services) override;
 
 private:
-    static constexpr uint16_t kCapacity = 384;
+    static constexpr uint16_t kCapacity = 768;
 
     static void sinkWrite_(void* ctx, const LogEntry& e);
     static void serviceMarkComplete_(void* ctx);

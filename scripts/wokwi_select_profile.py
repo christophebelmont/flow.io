@@ -4,7 +4,7 @@ Select active Wokwi profile by copying profile files to project root.
 
 Usage:
   python3 scripts/wokwi_select_profile.py flowio
-  python3 scripts/wokwi_select_profile.py flowio-s3
+  python3 scripts/wokwi_select_profile.py waveshare
   python3 scripts/wokwi_select_profile.py supervisor
 
 This script can also be used as a PlatformIO extra_script. In that mode, it
@@ -28,7 +28,7 @@ except Exception:
 PROFILE_FILES = ("diagram.json", "wokwi.toml")
 ENV_PROFILE_MAP = {
     "FlowIOWokwi": "flowio",
-    "FlowIOS3Wokwi": "flowio-s3",
+    "WaveshareWokwi": "waveshare",
     "SupervisorWokwi": "supervisor",
 }
 
@@ -47,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Select active Wokwi profile")
     parser.add_argument(
         "profile",
-        choices=("flowio", "flowio-s3", "supervisor"),
+        choices=("flowio", "waveshare", "supervisor"),
         help="Profile name under wokwi/<profile>/",
     )
     return parser.parse_args()

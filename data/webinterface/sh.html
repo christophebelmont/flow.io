@@ -16,12 +16,24 @@
       </div>
       <nav class="menu-group">
         <button class="menu-item active" data-page="page-pool-measures"><span class="ico icon-measures" aria-hidden="true"></span><span class="label" data-i18n="menu.dashboard">Tableau de bord</span></button>
+        <button class="menu-item" data-page="page-pool"><span class="ico icon-pool" aria-hidden="true"></span><span class="label" data-i18n="menu.pool">Piscine</span></button>
+        <button class="menu-item" data-page="page-io-summary"><span class="ico icon-io" aria-hidden="true"></span><span class="label" data-i18n="menu.io">Entrées/Sorties</span></button>
         <button class="menu-item" data-page="page-calibration"><span class="ico icon-calibration" aria-hidden="true"></span><span class="label" data-i18n="menu.calibration">Étalonnage</span></button>
-        <button class="menu-item" data-page="page-terminal"><span class="ico icon-terminal" aria-hidden="true"></span><span class="label" data-i18n="menu.terminal">Journal d’activité</span></button>
+        <button class="menu-item" data-page="page-activity-log"><span class="ico icon-activity" aria-hidden="true"></span><span class="label" data-i18n="menu.activity">Activité</span></button>
         <button class="menu-item" data-page="page-system"><span class="ico icon-system" aria-hidden="true"></span><span class="label" data-i18n="menu.updates">Mises à Jour</span></button>
         <button class="menu-item" data-page="page-control"><span class="ico icon-flowcfg" aria-hidden="true"></span><span class="label" data-i18n="menu.config">Configuration</span></button>
         <button class="menu-item" data-page="page-info"><span class="ico icon-info" aria-hidden="true"></span><span class="label" data-i18n="menu.info">Informations</span></button>
       </nav>
+      <div class="drawer-footer">
+        <label class="theme-switch" title="Activer le mode sombre">
+          <span class="theme-toggle-label">Mode sombre</span>
+          <span class="md3-switch md3-switch-compact theme-mode-switch">
+            <input id="themeToggle" type="checkbox" aria-label="Activer le mode sombre" />
+            <span class="md3-track"></span>
+            <span class="md3-thumb"></span>
+          </span>
+        </label>
+      </div>
     </aside>
 
     <main class="content">
@@ -31,9 +43,9 @@
         </div>
         <div class="app-header-status">
           <div class="header-status-item">
-            <span class="ui-msr header-status-icon" aria-hidden="true">wifi</span>
+            <span id="headerNetworkIcon" class="ui-msr header-status-icon" aria-hidden="true">wifi</span>
             <span class="header-status-copy">
-              <span class="header-status-label" data-i18n="header.wifi">WiFi</span>
+              <span class="header-status-label" data-i18n="header.wifi">Réseau</span>
               <span class="header-wifi-line"><span id="headerWifiDot" class="header-wifi-dot" aria-hidden="true"></span><span id="headerWifiStatus" class="header-status-value">-</span></span>
             </span>
           </div>
@@ -41,13 +53,13 @@
             <span class="ui-msr header-status-icon" aria-hidden="true">developer_board</span>
             <span class="header-status-copy">
               <span class="header-status-label" data-i18n="header.device">Appareil</span>
-              <span id="headerDeviceStatus" class="header-status-value">-</span>
+              <span class="header-reachability-line"><span id="headerReachabilityDot" class="header-reachability-dot" aria-hidden="true"></span><span id="headerDeviceStatus" class="header-status-value" data-i18n="header.device.pending">Vérification...</span></span>
             </span>
           </div>
           <div class="header-status-item">
             <span class="ui-msr header-status-icon" aria-hidden="true">schedule</span>
             <span class="header-status-copy">
-              <span class="header-status-label" data-i18n="header.time">Heure</span>
+              <span id="headerClockLabel" class="header-status-label" data-i18n="header.time">Heure</span>
               <span id="headerClockStatus" class="header-status-value">--:--:--</span>
             </span>
           </div>
@@ -84,38 +96,78 @@
         </div>
       </section>
 
-      <section id="page-terminal" class="page">
+      <section id="page-pool" class="page">
         <div class="topbar">
-          <h1 class="ui-heading-inline"><span class="ui-msr" aria-hidden="true">list_alt</span><span data-i18n="menu.terminal">Journal d’activité</span></h1>
+          <h1 class="ui-heading-inline"><span class="ui-msr" aria-hidden="true">pool</span><span data-i18n="menu.pool">Piscine</span></h1>
+        </div>
+        <div class="pool-page-shell">
+          <section class="pool-hero-panel">
+            <div class="pool-hero-main">
+              <span class="ui-msr pool-hero-icon" aria-hidden="true">pool</span>
+              <div class="pool-hero-copy">
+                <h2 id="poolConfigTitle" data-i18n="pool.title">Vue piscine</h2>
+                <div id="poolHeroState" class="pool-hero-state is-ok" aria-live="polite">
+                  <span class="ui-msr pool-hero-state-icon" aria-hidden="true">check_circle</span>
+                  <span data-i18n="pool.state.normalStatus">État normal</span>
+                </div>
+                <p id="poolConfigSummary" data-i18n="pool.summary">Lecture des paramètres utilisateur de filtration, traitement, chauffage et remplissage.</p>
+                <div class="pool-filtration-daybar" aria-hidden="true">
+                  <span id="poolFiltrationStart" class="pool-daybar-time">--:--</span>
+                  <span class="pool-daybar-track"><span id="poolFiltrationFill" class="pool-daybar-fill"></span></span>
+                  <span id="poolFiltrationStop" class="pool-daybar-time">--:--</span>
+                </div>
+              </div>
+            </div>
+            <div class="pool-hero-side">
+              <button id="poolConfigRefresh" class="btn-tonal btn-icon-only btn-refresh-icon pool-hero-refresh" aria-label="Rafraîchir la configuration piscine" title="Rafraîchir la configuration piscine" data-i18n-aria-label="pool.refresh" data-i18n-title="pool.refresh"><span class="refresh-icon-glyph" aria-hidden="true"></span></button>
+              <div id="poolModeBadges" class="pool-mode-badges" aria-live="polite"></div>
+            </div>
+          </section>
+          <section id="poolAlarmCard" class="pool-alarm-card" hidden aria-live="polite"></section>
+          <section id="poolDisinfectionModes" class="pool-treatment-panel" aria-live="polite"></section>
+          <section id="poolConfigGrid" class="pool-config-grid" aria-live="polite"></section>
+        </div>
+      </section>
+
+      <section id="page-io-summary" class="page">
+        <div class="topbar">
+          <h1 class="ui-heading-inline"><span class="ui-msr" aria-hidden="true">lan</span><span data-i18n="menu.io">Entrées/Sorties</span></h1>
+        </div>
+        <div class="control-shell io-summary-shell">
+          <div id="ioSummaryCards" class="status-grid io-summary-cards" aria-live="polite"></div>
+          <div id="ioSummaryTables" class="io-table-stack" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <section id="page-activity-log" class="page">
+        <div class="topbar">
+          <h1 class="ui-heading-inline"><span class="ui-msr" aria-hidden="true">history</span><span data-i18n="activity.title">Journal d’Activité</span></h1>
           <div class="topbar-actions">
-            <select id="logSourceSelect" class="log-source-select" aria-label="Source des journaux" title="Source des journaux affichés" data-i18n-aria-label="terminal.source.aria" data-i18n-title="terminal.source.title">
-              <option value="supervisor" data-i18n="terminal.source.supervisor">Supervisor (local)</option>
-              <option value="flowio" data-i18n="terminal.source.flowio">flow.io (wserial)</option>
-            </select>
-            <span id="wsStatus" class="status-chip" data-i18n="terminal.inactive">inactif</span>
-            <button id="bootLogDumpBtn" class="secondary btn-compact" type="button" title="Afficher les logs de boot" aria-label="Afficher les logs de boot" data-i18n-title="terminal.bootLogs" data-i18n-aria-label="terminal.bootLogs">
-              <span class="ui-msr ui-msr-sm" aria-hidden="true">history</span><span data-i18n="terminal.boot">Boot</span>
-            </button>
-            <label class="autoscroll-chip" for="toggleAutoscroll" title="Défilement automatique des journaux" data-i18n-title="terminal.autoscroll.title">
-              <span class="autoscroll-label" data-i18n="terminal.autoscroll">Scroll</span>
-              <span class="md3-switch md3-switch-compact">
-                <input id="toggleAutoscroll" type="checkbox" checked aria-label="Activer le défilement automatique des journaux" data-i18n-aria-label="terminal.autoscroll.aria" />
-                <span class="md3-track"></span>
-                <span class="md3-thumb"></span>
-              </span>
-            </label>
+            <button id="activityPrevBtn" class="btn-tonal btn-icon-only" type="button" aria-label="Période précédente" title="Période précédente"><span class="ui-msr" aria-hidden="true">chevron_left</span></button>
+            <button id="activityNextBtn" class="btn-tonal btn-icon-only" type="button" aria-label="Période suivante" title="Période suivante"><span class="ui-msr" aria-hidden="true">chevron_right</span></button>
+            <button id="activityRefreshBtn" class="btn-tonal btn-icon-only" type="button" aria-label="Rafraîchir le journal" title="Rafraîchir le journal"><span class="ui-msr" aria-hidden="true">refresh</span></button>
+            <button id="activityPurgeBtn" class="btn-tonal btn-icon-only danger-action" type="button" aria-label="Purger le journal" title="Purger le journal"><span class="ui-msr" aria-hidden="true">delete</span></button>
           </div>
         </div>
-        <div class="card">
-          <div id="term" class="terminal"></div>
+        <div class="activity-toolbar">
+          <div class="activity-range-card">
+            <span class="activity-range-label">Date de début - Date de fin</span>
+            <span id="activityRangeText" class="activity-range-value">Dernières activités</span>
+          </div>
+          <div class="activity-filter-row">
+            <button class="activity-filter is-active" type="button" data-activity-filter="all">Tous</button>
+            <button class="activity-filter" type="button" data-activity-filter="poollogic">PoolLogic</button>
+            <button class="activity-filter" type="button" data-activity-filter="manual">Manuel</button>
+            <button class="activity-filter" type="button" data-activity-filter="safety">Sécurité</button>
+            <button class="activity-filter" type="button" data-activity-filter="system">Système</button>
+          </div>
         </div>
+        <div id="activityLogStatus" class="activity-status" aria-live="polite">Chargement du journal...</div>
+        <div id="activityLogList" class="activity-list" aria-live="polite"></div>
       </section>
 
       <section id="page-system" class="page">
         <div class="card updates-panel">
-          <input id="updateServerPath" class="visually-hidden" tabindex="-1" aria-hidden="true" />
-          <button id="applyUpdateServerPath" type="button" class="visually-hidden" tabindex="-1" aria-hidden="true">✓</button>
-
           <div id="upgradeCards" class="updates-summary-grid" aria-live="polite"></div>
 
           <div class="updates-table-shell">
@@ -151,19 +203,22 @@
               <div id="upgradeProgressBar" class="bar-fill visually-hidden"></div>
               <span id="upgradePct" class="visually-hidden">0%</span>
             </div>
-            <button id="checkUpdates" type="button" class="btn-tonal updates-check-btn"><span class="refresh-icon-glyph" aria-hidden="true"></span><span data-i18n="updates.check">Vérifier les mises à jour</span></button>
+            <div class="updates-action-stack">
+              <button id="checkUpdates" type="button" class="btn-tonal updates-check-btn"><span class="refresh-icon-glyph" aria-hidden="true"></span><span data-i18n="updates.check">Vérifier les mises à jour</span></button>
+              <button id="cancelUpgradeUi" type="button" class="btn-tonal updates-cancel-btn" hidden disabled><span class="ui-msr btn-msr" aria-hidden="true">close</span><span data-i18n="updates.cancel">Annuler</span></button>
+            </div>
           </div>
         </div>
       </section>
 
       <section id="page-wifi" class="page">
         <div class="topbar">
-          <h1 class="ui-heading-inline"><span class="ui-msr" aria-hidden="true">wifi</span><span data-i18n="wifi.title">Configuration WiFi</span></h1>
+          <h1 class="ui-heading-inline"><span id="networkConfigIcon" class="ui-msr" aria-hidden="true">wifi</span><span data-i18n="wifi.title">Configuration réseau</span></h1>
         </div>
         <div class="card">
           <div class="config-section">
             <div class="config-section-head wifi-section-head">
-              <h2 class="ui-heading-inline"><span class="ui-msr ui-msr-sm" aria-hidden="true">router</span><span data-i18n="wifi.section">WiFi</span></h2>
+              <h2 class="ui-heading-inline"><span class="ui-msr ui-msr-sm" aria-hidden="true">router</span><span data-i18n="wifi.section">Réseau</span></h2>
               <div class="wifi-section-toggle">
                 <span data-i18n="wifi.enable">Activer</span>
                 <label class="md3-switch">
@@ -176,7 +231,7 @@
             <div class="form-grid">
               <div class="field">
                 <label for="wifiSsid" data-i18n="wifi.ssid.label">SSID</label>
-                <input id="wifiSsid" placeholder="Nom du réseau WiFi" data-i18n-placeholder="wifi.ssid.placeholder" />
+                <input id="wifiSsid" placeholder="Nom du réseau" data-i18n-placeholder="wifi.ssid.placeholder" />
               </div>
               <div class="field">
                 <label for="wifiSsidList" data-i18n="wifi.networksDetected">Réseaux détectés</label>
@@ -190,15 +245,15 @@
               <div class="field full">
                 <label for="wifiPass" data-i18n="wifi.password.label">Mot de passe</label>
                 <div class="password-wrap">
-                  <input id="wifiPass" type="password" placeholder="Mot de passe WiFi" data-i18n-placeholder="wifi.password.placeholder" />
-                  <button id="toggleWifiPass" class="password-toggle" type="button" aria-label="Afficher le mot de passe WiFi" aria-pressed="false" data-i18n="wifi.password.showShort" data-i18n-aria-label="wifi.password.show">Voir</button>
+                  <input id="wifiPass" type="password" placeholder="Mot de passe réseau" data-i18n-placeholder="wifi.password.placeholder" />
+                  <button id="toggleWifiPass" class="password-toggle" type="button" aria-label="Afficher le mot de passe réseau" aria-pressed="false" data-i18n="wifi.password.showShort" data-i18n-aria-label="wifi.password.show">Voir</button>
                 </div>
               </div>
             </div>
             <div class="btn-row">
-              <button id="applyWifiCfg" class="btn-primary"><span class="ui-msr btn-msr" aria-hidden="true">wifi_protected_setup</span><span data-i18n="wifi.apply">Appliquer WiFi</span></button>
+              <button id="applyWifiCfg" class="btn-primary"><span id="applyNetworkIcon" class="ui-msr btn-msr" aria-hidden="true">wifi_protected_setup</span><span data-i18n="wifi.apply">Appliquer réseau</span></button>
             </div>
-            <div id="wifiConfigStatus" class="config-status" data-i18n="wifi.ready">Configuration WiFi prête.</div>
+            <div id="wifiConfigStatus" class="config-status" data-i18n="wifi.ready">Configuration réseau prête.</div>
           </div>
         </div>
       </section>
@@ -325,20 +380,12 @@
                 </div>
                 <div class="control-divider"></div>
                 <div class="control-section-title ui-heading-inline"><span class="ui-msr ui-msr-sm" aria-hidden="true">tune</span><span data-i18n="config.variables">Variables</span></div>
+                <div id="flowCfgApplyBusy" class="config-apply-busy" hidden role="status" aria-live="polite">
+                  <span class="config-apply-spinner" aria-hidden="true"></span>
+                  <span data-i18n="cfg.apply.busy">Application de la configuration en cours...</span>
+                </div>
                 <div id="flowCfgFields" class="control-fields"></div>
                 <div id="flowCfgStatus" class="config-status" data-i18n="config.remoteReady">Configuration distante prête.</div>
-                <div id="flowCfgBackupProgress" class="flow-cfg-backup-progress" hidden>
-                  <div class="ug-header flow-cfg-backup-progress-head">
-                    <span class="ug-label" data-i18n="config.exportProgress">Export ConfigStore</span>
-                    <span id="flowCfgBackupPct" class="ug-pct">0%</span>
-                  </div>
-                  <div class="bar-shell">
-                    <div id="flowCfgBackupProgressBar" class="bar-fill" style="width:0%">
-                      <div class="bar-shimmer"></div>
-                      <div id="flowCfgBackupProgressDot" class="bar-dot"></div>
-                    </div>
-                  </div>
-                </div>
                 <div class="control-actions">
                   <button id="flowCfgApply" class="btn-primary"><span class="ui-msr btn-msr" aria-hidden="true">done_all</span><span data-i18n="config.apply">Appliquer</span></button>
                 </div>
@@ -350,12 +397,11 @@
 
       <section id="page-info" class="page">
         <div class="topbar">
-          <h1 class="ui-heading-inline"><span class="ui-msr" aria-hidden="true">info</span><span data-i18n="menu.info">Informations</span></h1>
+          <h1 class="ui-heading-inline"><span class="ui-msr" aria-hidden="true">info</span><span data-i18n="info.systemTitle">Informations système</span></h1>
         </div>
         <div class="info-card-stack">
           <div class="info-main-column">
             <div class="card info-card info-system-table-card">
-              <div class="info-table-title" data-i18n="info.systemTitle">Informations système</div>
               <div id="infoGrid" class="info-list info-system-table" aria-live="polite"></div>
             </div>
             <div class="card info-card info-legal-card">
@@ -398,6 +444,26 @@
                   <span class="action-tile-desc" data-i18n="config.importDesc">Charge une configuration précédemment sauvegardée.</span>
                 </span>
               </button>
+              <button id="openLogsOverlay" type="button" class="system-action-tile">
+                <span class="ui-msr action-tile-msr" aria-hidden="true">terminal</span>
+                <span class="action-tile-copy">
+                  <span class="action-tile-title">Logs système</span>
+                  <span class="action-tile-desc">Ouvre le terminal système et les logs de boot.</span>
+                </span>
+              </button>
+              <div id="flowCfgBackupStatus" class="config-status config-status-muted" data-i18n="config.backupReady">Sauvegarde configuration prête.</div>
+              <div id="flowCfgBackupProgress" class="flow-cfg-backup-progress" hidden>
+                <div class="ug-header flow-cfg-backup-progress-head">
+                  <span id="flowCfgBackupProgressLabel" class="ug-label" data-i18n="config.backupProgress">Progression ConfigStore</span>
+                  <span id="flowCfgBackupPct" class="ug-pct">0%</span>
+                </div>
+                <div class="bar-shell">
+                  <div id="flowCfgBackupProgressBar" class="bar-fill" style="width:0%">
+                    <div class="bar-shimmer"></div>
+                    <div id="flowCfgBackupProgressDot" class="bar-dot"></div>
+                  </div>
+                </div>
+              </div>
               <button id="factoryResetDeviceAction" type="button" class="system-action-tile system-action-tile-danger">
                 <span class="action-tile-icon action-tile-icon-factory" aria-hidden="true"></span>
                 <span class="action-tile-copy">
@@ -411,4 +477,31 @@
         </div>
       </section>
     </main>
+  </div>
+  <div id="logsOverlay" class="logs-overlay" hidden aria-hidden="true">
+    <div class="logs-overlay-panel" role="dialog" aria-modal="true" aria-labelledby="logsOverlayTitle">
+      <div class="logs-overlay-head">
+        <h2 id="logsOverlayTitle" class="ui-heading-inline"><span class="ui-msr" aria-hidden="true">terminal</span><span>Logs système</span></h2>
+        <div class="logs-overlay-actions">
+          <select id="logSourceSelect" class="log-source-select" aria-label="Source des journaux" title="Source des journaux affichés" data-i18n-aria-label="terminal.source.aria" data-i18n-title="terminal.source.title">
+            <option value="supervisor" data-i18n="terminal.source.supervisor">Supervisor (local)</option>
+            <option value="flowio" data-i18n="terminal.source.flowio">flow.io (wserial)</option>
+          </select>
+          <span id="wsStatus" class="status-chip">inactif</span>
+          <button id="bootLogDumpBtn" class="secondary btn-compact" type="button" title="Afficher les logs de boot" aria-label="Afficher les logs de boot" data-i18n-title="terminal.bootLogs" data-i18n-aria-label="terminal.bootLogs">
+            <span class="ui-msr ui-msr-sm" aria-hidden="true">history</span><span data-i18n="terminal.boot">Boot</span>
+          </button>
+          <label class="autoscroll-chip" for="toggleAutoscroll" title="Défilement automatique des journaux" data-i18n-title="terminal.autoscroll.title">
+            <span class="autoscroll-label" data-i18n="terminal.autoscroll">Scroll</span>
+            <span class="md3-switch md3-switch-compact">
+              <input id="toggleAutoscroll" type="checkbox" checked aria-label="Activer le défilement automatique des journaux" data-i18n-aria-label="terminal.autoscroll.aria" />
+              <span class="md3-track"></span>
+              <span class="md3-thumb"></span>
+            </span>
+          </label>
+          <button id="closeLogsOverlay" class="btn-tonal btn-icon-only" type="button" aria-label="Fermer les logs système" title="Fermer"><span class="ui-msr" aria-hidden="true">close</span></button>
+        </div>
+      </div>
+      <div id="term" class="terminal logs-overlay-terminal"></div>
+    </div>
   </div>

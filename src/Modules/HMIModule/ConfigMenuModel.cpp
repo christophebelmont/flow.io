@@ -674,7 +674,7 @@ const char* ConfigMenuModel::poolDeviceDisplayNameByRef_(const char* ref) const
     const uint8_t count = (uint8_t)(sizeof(PoolDomain::kPoolDevices) / sizeof(PoolDomain::kPoolDevices[0]));
     for (uint8_t i = 0; i < count; ++i) {
         const PoolDevicePreset& preset = PoolDomain::kPoolDevices[i];
-        if (preset.legacySlot == uSlot) {
+        if (preset.id == uSlot) {
             return preset.displayName;
         }
     }

@@ -1,0 +1,6 @@
+{
+  "translations": {
+    "cfgdocs.hmi.buzzer.enable.help": "Active le bip local de validation après application d'une configuration dans le ConfigStore.",
+    "cfgdocs.hmi.buzzer.enable.label": "Buzzer actif"
+  }
+}

@@ -1,16 +1,17 @@
 {
   "translations": {
-    "cfgdocs.hmi.leds.enabled.help": "Active le bandeau de LEDs en façade certaines cartes flow.io/Poolmaster.",
+    "cfgdocs.hmi.leds.enabled.help": "Active le bandeau de LEDs en façade piloté par le PCF8574A dédié à l'adresse I2C 0x3C.",
     "cfgdocs.hmi.leds.enabled.label": "Activation LEDs facade",
+    "cfgdocs.hmi.leds.waveshare_enabled.help": "Active la LED WS2812 Waveshare.",
+    "cfgdocs.hmi.leds.waveshare_enabled.label": "LED Waveshare active",
     "cfgdocs.hmi.nextion.enabled.help": "Active la mise à jour de l'écran Nextion connecté au port série.",
     "cfgdocs.hmi.nextion.enabled.label": "Nextion actif",
+    "cfgdocs.hmi.nextion.motion_io_id.help": "Entrée logique IOModule utilisée pour sortir le Nextion de veille lorsqu'un mouvement est détecté. Le Nextion continue à gérer lui-même sa mise en veille.",
+    "cfgdocs.hmi.nextion.motion_io_id.label": "Entrée mouvement Nextion",
     "cfgdocs.hmi.venice.enabled.help": "Active la mise à jour de la température d'eau vers afficheur TFT Venice.",
     "cfgdocs.hmi.venice.enabled.label": "Venice RF433 actif",
     "cfgdocs.hmi.venice.tx_gpio.help": "GPIO utilisé pour l'émetteur RF433 du driver Venice.",
     "cfgdocs.hmi.venice.tx_gpio.label": "GPIO émission Venice",
-    "cfgmods.hmi.label": "affichage",
-    "cfgmods.hmi.leds.label": "LEDs façade",
-    "cfgmods.hmi.nextion.label": "Nextion",
-    "cfgmods.hmi.venice.label": "Venice RF433"
+    "cfgmods.hmi.label": "hmi"
   }
 }

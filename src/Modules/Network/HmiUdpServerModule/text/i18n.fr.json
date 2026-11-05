@@ -1,8 +1,8 @@
 {
   "translations": {
-    "cfgdocs.hmi.fcd_udp.enabled.help": "Utilise un Flow Connect Display distant via UDP a la place du Nextion local.",
-    "cfgdocs.hmi.fcd_udp.enabled.label": "Flow Connect Display UDP actif",
-    "cfgdocs.hmi.fcd_udp.token.help": "Token partage optionnel. Si renseigne, le Flow Connect Display doit envoyer le meme token sous forme CRC.",
-    "cfgdocs.hmi.fcd_udp.token.label": "Token Flow Connect Display"
+    "cfgdocs.hmi.nextion_udp.enabled.help": "Utilise un Flow Connect Display distant via UDP a la place du Nextion local.",
+    "cfgdocs.hmi.nextion_udp.enabled.label": "Nextion UDP actif",
+    "cfgdocs.hmi.nextion_udp.token.help": "Token partage optionnel. Si renseigne, le Flow Connect Display doit envoyer le meme token sous forme CRC.",
+    "cfgdocs.hmi.nextion_udp.token.label": "Token Nextion UDP"
   }
 }

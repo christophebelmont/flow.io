@@ -68,6 +68,7 @@ Responsabilités:
 - applique sécurités pression PSI
 - pilote robot, électrolyse, remplissage
 - exécute la régulation temporelle PID pH et ORP (pompes péristaltiques)
+- exécute le protocole oxygène actif liquide par volume calculé quand `disinfection_type=2`
 - publie la configuration `cfg/poollogic/*` et snapshots `rt/poollogic/ph|orp`
 
 Important: en mode manuel (`auto_mode=false`), la filtration reste pilotée manuellement **sauf sécurité PSI** (qui garde priorité et peut couper).
@@ -87,7 +88,7 @@ Responsabilités:
   - temps de marche jour/semaine/mois/total
   - volume injecté jour/semaine/mois/total
   - volume restant cuve
-- persiste les métriques (`metrics_blob`) dans ConfigStore
+- persiste les métriques via les blobs runtime NVS du ConfigStore
 
 ## 3.3 `IOModule`
 
@@ -149,24 +150,49 @@ Le PID est temporel (sortie en `outputOnMs` dans une fenêtre), avec minimum ON 
 Conditions d’autorisation:
 
 - filtration demandée ON
-- PID ORP armé (`orp_auto_mode` + délai post-filtration)
+- PID désinfection armé (`dis_auto_mode` + délai post-filtration)
 - mesure ORP disponible
 - pas d’erreur PSI
 - cuve chlore non vide
-- **et** `elec_mode=false` (la pompe ORP est inhibée quand électrolyse active)
+- **et** `disinfection_type=0` (`Chlore/Brome`; la pompe ORP automatique est inhibée en mode électrolyse, oxygène actif ou désactivé)
+
+`disinfection_type=3` (`Désactivé`) coupe la désinfection automatique. Un démarrage manuel de la pompe chlore/O2 bascule aussi ce champ sur `Désactivé`, afin de laisser la main à l'utilisateur sans relance automatique de dosage.
 
 ## 5.4 Électrolyseur
 
 En auto:
 
 - nécessite filtration ON
-- nécessite `elec_mode=true`
+- nécessite `disinfection_type=1` (`Electrolyse`)
 - démarrage autorisé si:
   - température eau >= `secure_elec_t`
   - délai filtration >= `dly_electro_min`
-- si `elec_run=true`, l’électrolyse est asservie à ORP (hystérésis de démarrage à 90% de la consigne)
+- si `swg_control_mode=0`, l’électrolyse est asservie à ORP (hystérésis de démarrage à 90% de la consigne)
+- si `swg_control_mode=1`, l’électrolyse fonctionne en continu sur la plage autorisée
 
-## 5.5 Robot
+## 5.5 Oxygène actif liquide
+
+En auto:
+
+- nécessite `disinfection_type=2` (`Oxygène actif`)
+- n'utilise pas la sonde ORP
+- calcule une dose hebdomadaire à partir de:
+  - `pool_volume_m3`
+  - `dose_ml_10m3_week`
+  - `load_factor`
+  - compensation température optionnelle (`temp_comp`)
+- fractionne la dose selon `split_count`:
+  - `1`: lundi
+  - `2`: lundi et jeudi
+  - `3`: lundi, mercredi et vendredi
+- crée une dose en attente à partir de `main_hour`
+- demande la filtration si une dose est en attente
+- attend `min_filter_run_min` minutes de filtration effective
+- pilote la pompe de désinfection au volume, avec le débit `flow_l_h` configuré dans `PoolDeviceModule`
+
+Le protocole persiste `protocol_state`, `last_dose_day`, `weekly_done_ml` et `pending_ml` pour reprendre après reboot. La limite `max_uptime_day_s` de la pompe reste appliquée par `PoolDeviceModule`; si elle est atteinte, l'O2 est bloqué avec la raison `pump_blocked`.
+
+## 5.6 Robot
 
 En auto:
 
@@ -175,7 +201,7 @@ En auto:
 - s’arrête après `robot_dur_min`
 - `cleaning_done` est remis à false au changement de jour
 
-## 5.6 Remplissage
+## 5.7 Remplissage
 
 - basé sur capteur niveau bassin (`i0`)
 - si niveau bas (`i0 == true`): marche
@@ -197,16 +223,47 @@ Si le service alarme n’est pas disponible, `PoolLogic` utilise un fallback loc
 
 ## 7.1 `poollogic/*`
 
-### `poollogic/mode`
+### `poollogic/modes`
 
 - `enabled`
 - `auto_mode`
 - `winter_mode`
+- `disinfection_type`
+
+### `poollogic/ph`
+
 - `ph_auto_mode`
-- `orp_auto_mode`
 - `ph_dose_plus`
-- `elec_mode`
-- `elec_run`
+- `ph_setpoint`
+- `ph_kp`, `ph_ki`, `ph_kd`
+- `ph_window_ms`
+
+### `poollogic/chlorine`
+
+- `dis_auto_mode`
+- `dis_setpoint`
+- `dis_kp`, `dis_ki`, `dis_kd`
+- `dis_window_ms`
+
+### `poollogic/swg`
+
+- `swg_control_mode`
+- `secure_elec_t`
+- `dly_electro_min`
+
+### `poollogic/o2`
+
+- `pool_volume_m3`
+- `dose_ml_10m3_week`
+- `load_factor`
+- `temp_comp`
+- `split_count`
+- `main_hour`
+- `min_filter_run_min`
+- `protocol_state`
+- `last_dose_day`
+- `weekly_done_ml`
+- `pending_ml`
 
 ### `poollogic/filtration`
 
@@ -220,7 +277,7 @@ Si le service alarme n’est pas disponible, `PoolLogic` utilise un fallback loc
 ### `poollogic/sensors`
 
 - `ph_io_id`
-- `orp_io_id`
+- `dis_io_id`
 - `psi_io_id`
 - `wat_temp_io_id`
 - `air_temp_io_id`
@@ -228,39 +285,42 @@ Si le service alarme n’est pas disponible, `PoolLogic` utilise un fallback loc
 - `ph_lvl_io_id`
 - `chl_lvl_io_id`
 
-### `poollogic/pid`
+### `poollogic/safety`
 
 - `psi_low_th`
 - `psi_high_th`
 - `winter_start_t`
 - `freeze_hold_t`
-- `secure_elec_t`
-- `ph_setpoint`
-- `orp_setpoint`
-- `ph_kp`, `ph_ki`, `ph_kd`
-- `orp_kp`, `orp_ki`, `orp_kd`
-- `ph_window_ms`
-- `orp_window_ms`
+- `psi_start_dly_s`
+
+### `poollogic/regulation`
+
+- `dly_pid_min`
 - `pid_min_on_ms`
 - `pid_sample_ms`
 
-### `poollogic/delay`
+### `poollogic/heater`
 
-- `psi_start_dly_s`
-- `dly_pid_min`
-- `dly_electro_min`
+- `heater_auto_mode`
+- `heater_setpoint`
+
+### `poollogic/robot`
+
 - `robot_delay_min`
 - `robot_dur_min`
+
+### `poollogic/refill`
+
 - `fill_min_on_s`
 
-### `poollogic/device`
+### `poollogic/devices`
 
 - `filtr_slot`
 - `swg_slot`
 - `robot_slot`
 - `fill_slot`
 - `ph_pump_slot`
-- `orp_pump_slot`
+- `dis_pump_slot`
 
 ## 7.2 `pdm/*` (device manager)
 
@@ -273,9 +333,9 @@ Par slot `pdm/pdN` (N=0..7):
 - `tank_init_ml`
 - `max_uptime_day_s`
 
-Runtime persistant par slot `pdmrt/pdN`:
+Runtime persistant par slot, stocké en blob NVS interne `pdNrt`:
 
-- `metrics_blob`
+- blob de métriques
 
 ## 7.3 `io/*` (principalement utile à la logique piscine)
 

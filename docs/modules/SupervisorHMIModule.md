@@ -56,7 +56,7 @@ Ce n'est pas le bus I2C `SDA/SCL` interlink.
 
 Source de vérité unique: `Board`.
 
-- `FlowIO`: `src/Board/FlowIODINBoards.h` -> bus I2C `interlink` (`SDA=5`, `SCL=15`, `400000 Hz`)
+- `FlowIO`: `src/Board/FlowIODINBoard.h` -> bus I2C `interlink` (`SDA=5`, `SCL=15`, `400000 Hz`)
 - `Supervisor`: `src/Board/SupervisorBoardRev1.h` -> bus I2C `interlink` (`SDA=27`, `SCL=13`, `400000 Hz`)
 - `i2ccfg.server` et `i2ccfg.client` lisent ce bus `interlink` au constructeur pour initialiser `cfgData_.sda/scl/freq_hz`
 - `sda/scl/freq_hz` ne sont plus des variables de config persistantes de `elink/server` et `elink/client` (pas d'override NVS concurrent)

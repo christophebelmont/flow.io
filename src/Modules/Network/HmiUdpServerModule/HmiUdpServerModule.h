@@ -31,8 +31,8 @@ public:
     bool isDisplayOnline() const { return displayOnline_; }
     bool isDisplaySleeping() const { return displaySleeping_; }
     bool hasDisplayVersion() const { return displayVersionDetected_; }
-    uint32_t displayVersion() const { return displayVersion_; }
-    bool isLegacyV2() const { return displayVersionDetected_ && displayVersion_ == 2U; }
+    const char* displayVersion() const { return displayVersion_; }
+    bool isLegacyV2() const;
     bool consumeFullRefreshRequested();
 
     bool sendHomeText(HmiHomeTextField field, const char* text);
@@ -73,7 +73,7 @@ private:
     } cfgData_{};
 
     ConfigVariable<char,0> tokenVar_{
-        NVS_KEY(NvsKeys::Hmi::FlowConnectUdpToken), "token", "hmi/fcd_udp",
+        NVS_KEY(NvsKeys::Hmi::FlowConnectUdpToken), "token", "hmi/nextion_udp",
         ConfigType::CharArray, cfgData_.token, ConfigPersistence::Persistent, sizeof(cfgData_.token)
     };
 
@@ -91,7 +91,7 @@ private:
     bool displaySleeping_ = false;
     bool fullRefreshRequested_ = false;
     bool displayVersionDetected_ = false;
-    uint32_t displayVersion_ = 0U;
+    char displayVersion_[HMI_DISPLAY_VERSION_TEXT_MAX]{};
     uint16_t txSeq_ = 1;
     uint16_t lastRxSeq_ = 0;
     uint16_t lastEventSeq_ = 0;

@@ -1,6 +1,6 @@
 /**
  * @file FirmwareUpdateModule.cpp
- * @brief Supervisor firmware updater implementation.
+ * @brief Firmware updater implementation.
  */
 
 #include "FirmwareUpdateModule.h"
@@ -12,6 +12,7 @@
 #include <HTTPClient.h>
 #include <Update.h>
 #include <string.h>
+#include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
 
 #include "App/BuildFlags.h"
@@ -21,7 +22,6 @@
 #include "Core/SystemLimits.h"
 
 #include <ESPNexUpload.h>
-#include <esp32_flasher.h>
 
 #define LOG_MODULE_ID ((LogModuleId)LogModuleIdValue::FirmwareUpdateModule)
 #include "Core/ModuleLog.h"
@@ -73,8 +73,58 @@ const UartSpec& panelUartSpec_(const BoardSpec& board)
 {
     static constexpr UartSpec kFallback{"panel", 2, 33, 32, 115200, false, -1};
     const UartSpec* spec = boardFindUart(board, "panel");
+    if (!spec) spec = boardFindUart(board, "hmi");
     return spec ? *spec : kFallback;
 }
+
+bool manifestCheckIsActive_(FirmwareManifestCheckState state)
+{
+    return state == FirmwareManifestCheckState::Queued ||
+           state == FirmwareManifestCheckState::Downloading;
+}
+
+class BoundedBufferStream final : public Stream {
+public:
+    BoundedBufferStream(char* data, size_t capacity)
+        : data_(reinterpret_cast<uint8_t*>(data)), capacity_(capacity)
+    {
+    }
+
+    size_t write(uint8_t value) override
+    {
+        return write(&value, 1U);
+    }
+
+    size_t write(const uint8_t* data, size_t len) override
+    {
+        if (!data || len == 0U) return 0U;
+        const size_t room = (length_ < capacity_) ? (capacity_ - length_) : 0U;
+        const size_t count = (len < room) ? len : room;
+        if (count > 0U && data_) {
+            memcpy(data_ + length_, data, count);
+            length_ += count;
+        }
+        if (count != len) {
+            overflow_ = true;
+            setWriteError();
+        }
+        return count;
+    }
+
+    int available() override { return 0; }
+    int read() override { return -1; }
+    int peek() override { return -1; }
+    void flush() override {}
+
+    size_t length() const { return length_; }
+    bool overflowed() const { return overflow_; }
+
+private:
+    uint8_t* data_ = nullptr;
+    size_t capacity_ = 0;
+    size_t length_ = 0;
+    bool overflow_ = false;
+};
 
 }  // namespace
 
@@ -83,7 +133,6 @@ FirmwareUpdateModule::FirmwareUpdateModule(const BoardSpec& board)
     const SupervisorBoardSpec& boardCfg = supervisorBoardSpec_(board);
     const UartSpec& panelUart = panelUartSpec_(board);
     flowIoEnablePin_ = boardCfg.update.flowIoEnablePin;
-    flowIoBootPin_ = boardCfg.update.flowIoBootPin;
     nextionRxPin_ = panelUart.rxPin;
     nextionTxPin_ = panelUart.txPin;
     nextionRebootPin_ = boardCfg.update.nextionRebootPin;
@@ -205,18 +254,6 @@ static bool writeHttpCodeFailedError_(const char* resourceLabel,
     return writeSimpleError_(errOut, errOutLen, msg);
 }
 
-static const char* flasherErrorText_(int code)
-{
-    switch (code) {
-        case SUCCESS: return "success";
-        case ERR_FAIL: return "generic-failure";
-        case ERR_TIMEOUT: return "timeout";
-        case ERR_IMG_SIZE: return "image-too-large";
-        case ERR_INVALID_RESP: return "invalid-response";
-        case ERR_CMD_STATUS: return "target-command-failed";
-        default: return "unknown";
-    }
-}
 static bool appendUrlSegment_(char* out, size_t outLen, const char* segment)
 {
     if (!out || outLen == 0) return false;
@@ -249,9 +286,8 @@ const char* FirmwareUpdateModule::stateStr_(UpdateState s)
 const char* FirmwareUpdateModule::targetStr_(FirmwareUpdateTarget t)
 {
     switch (t) {
-        case FirmwareUpdateTarget::FlowIO: return "flowio";
         case FirmwareUpdateTarget::Nextion: return "nextion";
-        case FirmwareUpdateTarget::Supervisor: return "supervisor";
+        case FirmwareUpdateTarget::Waveshare: return "waveshare";
         case FirmwareUpdateTarget::Spiffs: return "spiffs";
         default: return "unknown";
     }
@@ -267,11 +303,29 @@ void FirmwareUpdateModule::setStatus_(UpdateState state, FirmwareUpdateTarget ta
     if (!msg) msg = "";
     snprintf(status_.msg, sizeof(status_.msg), "%s", msg);
     portEXIT_CRITICAL(&lock_);
+
+    const bool otaActive = state == UpdateState::Queued ||
+                           state == UpdateState::Downloading ||
+                           state == UpdateState::Flashing ||
+                           state == UpdateState::Rebooting;
+    setHmiOtaCondition_(otaActive);
 }
 
 void FirmwareUpdateModule::setError_(FirmwareUpdateTarget target, const char* msg)
 {
     setStatus_(UpdateState::Error, target, 0, msg ? msg : "failed");
+}
+
+void FirmwareUpdateModule::setHmiOtaCondition_(bool active)
+{
+    if (hmiOtaActive_ == active) return;
+    if (!hmiSvc_ && services_) {
+        hmiSvc_ = services_->get<HmiService>(ServiceId::Hmi);
+    }
+    if (hmiSvc_ && hmiSvc_->setLedCondition) {
+        (void)hmiSvc_->setLedCondition(hmiSvc_->ctx, HmiLedCondition::OtaInProgress, active);
+    }
+    hmiOtaActive_ = active;
 }
 
 void FirmwareUpdateModule::onProgressChunk_(uint32_t chunkBytes)
@@ -432,14 +486,14 @@ bool FirmwareUpdateModule::isBusy_()
     bool busy = false;
     bool pending = false;
     bool nextionReboot = false;
-    bool flowIoHwReboot = false;
+    bool manifestCheckActive = false;
     portENTER_CRITICAL(&lock_);
     busy = busy_;
     pending = queuedJob_.pending;
     nextionReboot = nextionRebootQueued_;
-    flowIoHwReboot = flowIoHardwareRebootQueued_;
+    manifestCheckActive = manifestCheckIsActive_(manifestCheck_.state);
     portEXIT_CRITICAL(&lock_);
-    return busy || pending || nextionReboot || flowIoHwReboot;
+    return busy || pending || nextionReboot || manifestCheckActive;
 }
 
 bool FirmwareUpdateModule::configJson_(char* out, size_t outLen) const
@@ -461,88 +515,108 @@ bool FirmwareUpdateModule::configJson_(char* out, size_t outLen) const
     return n > 0 && (size_t)n < outLen;
 }
 
-bool FirmwareUpdateModule::checkManifestJsonStream_(Print& out, char* errOut, size_t errOutLen)
+bool FirmwareUpdateModule::startManifestCheck_(uint32_t* requestIdOut,
+                                               char* errOut,
+                                               size_t errOutLen)
 {
-    bool isBusy = false;
-    bool hasPending = false;
-    portENTER_CRITICAL(&lock_);
-    isBusy = busy_;
-    hasPending = queuedJob_.pending;
-    portEXIT_CRITICAL(&lock_);
-    if (isBusy || hasPending) {
-        writeSimpleError_(errOut, errOutLen, "updater busy");
+    if (!requestIdOut) {
+        writeSimpleError_(errOut, errOutLen, "request id output missing");
         return false;
     }
+    *requestIdOut = 0;
 
     char url[kUrlLen] = {0};
     if (!resolveUpdateUrl_("manifest.json", url, sizeof(url), errOut, errOutLen)) {
         return false;
     }
 
-    HTTPClient http;
-    configureDownloadHttp_(http);
-    if (!http.begin(url)) {
-        writeHttpBeginFailedError_("manifest", url, errOut, errOutLen);
+    if (!manifestPayload_) {
+        writeSimpleError_(errOut, errOutLen, "manifest storage unavailable");
         return false;
     }
 
-    const int code = http.GET();
-    if (code != HTTP_CODE_OK) {
-        writeHttpCodeFailedError_("manifest", url, http, code, errOut, errOutLen);
-        http.end();
-        return false;
-    }
-
-    const String payload = http.getString();
-    http.end();
-    if (payload.length() == 0U) {
-        writeSimpleError_(errOut, errOutLen, "manifest empty");
-        return false;
-    }
-
-    size_t jsonCapacity = payload.length() + 1024U;
-    if (jsonCapacity < 4096U) jsonCapacity = 4096U;
-    DynamicJsonDocument doc(jsonCapacity);
-    const DeserializationError jsonErr = deserializeJson(doc, payload);
-    if (jsonErr || !doc.is<JsonObjectConst>()) {
-        writeSimpleError_(errOut, errOutLen, "manifest invalid json");
-        return false;
-    }
-
-    char safeUrl[kUrlLen] = {0};
-    char current[48] = {0};
-    snprintf(safeUrl, sizeof(safeUrl), "%s", url);
-    snprintf(current, sizeof(current), "%s", FirmwareVersion::Full);
-    sanitizeJsonString_(safeUrl);
-    sanitizeJsonString_(current);
-
-    out.print("{\"ok\":true,\"manifest_url\":\"");
-    out.print(safeUrl);
-    out.print("\",\"current\":{\"supervisor\":\"");
-    out.print(current);
-    out.print("\"},\"manifest\":");
-    out.print(payload);
-    out.print("}");
-    return true;
-}
-
-bool FirmwareUpdateModule::manifestUrl_(char* out, size_t outLen, char* errOut, size_t errOutLen)
-{
-    if (!out || outLen == 0) return false;
-    out[0] = '\0';
-
-    bool isBusy = false;
-    bool hasPending = false;
     portENTER_CRITICAL(&lock_);
-    isBusy = busy_;
-    hasPending = queuedJob_.pending;
-    portEXIT_CRITICAL(&lock_);
-    if (isBusy || hasPending) {
+    if (busy_ || queuedJob_.pending || nextionRebootQueued_ ||
+        manifestCheckIsActive_(manifestCheck_.state) || manifestCopyReaders_ > 0U) {
+        portEXIT_CRITICAL(&lock_);
         writeSimpleError_(errOut, errOutLen, "updater busy");
         return false;
     }
 
-    return resolveUpdateUrl_("manifest.json", out, outLen, errOut, errOutLen);
+    ++nextManifestRequestId_;
+    if (nextManifestRequestId_ == 0U) {
+        ++nextManifestRequestId_;
+    }
+    manifestCheckJob_ = {};
+    manifestCheckJob_.pending = true;
+    manifestCheckJob_.requestId = nextManifestRequestId_;
+    snprintf(manifestCheckJob_.url, sizeof(manifestCheckJob_.url), "%s", url);
+
+    manifestCheck_ = {};
+    manifestCheck_.requestId = nextManifestRequestId_;
+    manifestCheck_.state = FirmwareManifestCheckState::Queued;
+    manifestCheck_.updatedAtMs = millis();
+    snprintf(manifestCheck_.manifestUrl, sizeof(manifestCheck_.manifestUrl), "%s", url);
+    snprintf(manifestCheck_.message, sizeof(manifestCheck_.message), "queued");
+    manifestPayload_[0] = '\0';
+    *requestIdOut = nextManifestRequestId_;
+    portEXIT_CRITICAL(&lock_);
+
+    LOGI("Manifest check queued request=%lu url=%s",
+         (unsigned long)*requestIdOut,
+         url);
+    return true;
+}
+
+bool FirmwareUpdateModule::manifestCheckStatus_(uint32_t requestId,
+                                                FirmwareManifestCheckSnapshot* out)
+{
+    if (!out || requestId == 0U) return false;
+    portENTER_CRITICAL(&lock_);
+    if (manifestCheck_.requestId != requestId) {
+        portEXIT_CRITICAL(&lock_);
+        return false;
+    }
+    *out = manifestCheck_;
+    portEXIT_CRITICAL(&lock_);
+    return true;
+}
+
+bool FirmwareUpdateModule::copyManifestResult_(uint32_t requestId,
+                                               char* out,
+                                               size_t outLen,
+                                               size_t* copiedLenOut)
+{
+    if (copiedLenOut) *copiedLenOut = 0U;
+    if (!out || outLen == 0U || requestId == 0U || !manifestPayload_) return false;
+
+    size_t payloadLen = 0U;
+    portENTER_CRITICAL(&lock_);
+    if (manifestCheck_.requestId != requestId ||
+        manifestCheck_.state != FirmwareManifestCheckState::Ready ||
+        manifestCheck_.payloadLen == 0U ||
+        outLen <= manifestCheck_.payloadLen) {
+        portEXIT_CRITICAL(&lock_);
+        return false;
+    }
+    payloadLen = manifestCheck_.payloadLen;
+    if (manifestCopyReaders_ < UINT8_MAX) {
+        ++manifestCopyReaders_;
+    } else {
+        portEXIT_CRITICAL(&lock_);
+        return false;
+    }
+    portEXIT_CRITICAL(&lock_);
+
+    memcpy(out, manifestPayload_, payloadLen);
+    out[payloadLen] = '\0';
+
+    portENTER_CRITICAL(&lock_);
+    if (manifestCopyReaders_ > 0U) --manifestCopyReaders_;
+    portEXIT_CRITICAL(&lock_);
+
+    if (copiedLenOut) *copiedLenOut = payloadLen;
+    return true;
 }
 
 bool FirmwareUpdateModule::setConfig_(const char* updateHost,
@@ -557,11 +631,13 @@ bool FirmwareUpdateModule::setConfig_(const char* updateHost,
 
     bool isBusy = false;
     bool hasPending = false;
+    bool manifestCheckActive = false;
     portENTER_CRITICAL(&lock_);
     isBusy = busy_;
     hasPending = queuedJob_.pending;
+    manifestCheckActive = manifestCheckIsActive_(manifestCheck_.state);
     portEXIT_CRITICAL(&lock_);
-    if (isBusy || hasPending) {
+    if (isBusy || hasPending || manifestCheckActive) {
         writeSimpleError_(errOut, errOutLen, "updater busy");
         return false;
     }
@@ -594,7 +670,8 @@ bool FirmwareUpdateModule::startUpdate_(FirmwareUpdateTarget target,
     }
 
     portENTER_CRITICAL(&lock_);
-    if (busy_ || queuedJob_.pending) {
+    if (busy_ || queuedJob_.pending || nextionRebootQueued_ ||
+        manifestCheckIsActive_(manifestCheck_.state) || manifestCopyReaders_ > 0U) {
         portEXIT_CRITICAL(&lock_);
         writeSimpleError_(errOut, errOutLen, "updater busy");
         return false;
@@ -616,7 +693,8 @@ bool FirmwareUpdateModule::queueNextionReboot_(char* errOut, size_t errOutLen)
     }
 
     portENTER_CRITICAL(&lock_);
-    if (busy_ || queuedJob_.pending || nextionRebootQueued_) {
+    if (busy_ || queuedJob_.pending || nextionRebootQueued_ ||
+        manifestCheckIsActive_(manifestCheck_.state) || manifestCopyReaders_ > 0U) {
         portEXIT_CRITICAL(&lock_);
         writeSimpleError_(errOut, errOutLen, "updater busy");
         return false;
@@ -628,115 +706,9 @@ bool FirmwareUpdateModule::queueNextionReboot_(char* errOut, size_t errOutLen)
     return true;
 }
 
-bool FirmwareUpdateModule::queueFlowIoHardwareReboot_(char* errOut, size_t errOutLen)
+bool FirmwareUpdateModule::runWaveshareUpdate_(const char* url, char* errOut, size_t errOutLen)
 {
-    if (flowIoEnablePin_ < 0) {
-        writeSimpleError_(errOut, errOutLen, "flowio EN pin not configured");
-        return false;
-    }
-
-    portENTER_CRITICAL(&lock_);
-    if (busy_ || queuedJob_.pending || nextionRebootQueued_ || flowIoHardwareRebootQueued_) {
-        portEXIT_CRITICAL(&lock_);
-        writeSimpleError_(errOut, errOutLen, "updater busy");
-        return false;
-    }
-    flowIoHardwareRebootQueued_ = true;
-    portEXIT_CRITICAL(&lock_);
-
-    LOGI("flow.io hardware reboot queued");
-    return true;
-}
-
-bool FirmwareUpdateModule::runFlowIoUpdate_(const char* url, char* errOut, size_t errOutLen)
-{
-    if (flowIoBootPin_ < 0 || flowIoEnablePin_ < 0) {
-        writeSimpleError_(errOut, errOutLen, "flowio board pins not configured");
-        return false;
-    }
-
-    setStatus_(UpdateState::Downloading, FirmwareUpdateTarget::FlowIO, 0, "downloading");
-
-    HTTPClient http;
-    configureDownloadHttp_(http);
-    if (!http.begin(url)) {
-        writeHttpBeginFailedError_("fichier de mise a jour", url, errOut, errOutLen);
-        return false;
-    }
-
-    const int code = http.GET();
-    const int32_t contentLength = http.getSize();
-    if (code != HTTP_CODE_OK) {
-        writeHttpCodeFailedError_("fichier de mise a jour", url, http, code, errOut, errOutLen);
-        http.end();
-        return false;
-    }
-    if (contentLength <= 0) {
-        writeSimpleError_(errOut, errOutLen, "invalid content-length");
-        http.end();
-        return false;
-    }
-
-    setStatus_(UpdateState::Flashing, FirmwareUpdateTarget::FlowIO, 0, "flashing");
-    portENTER_CRITICAL(&lock_);
-    activeTotalBytes_ = (uint32_t)contentLength;
-    activeSentBytes_ = 0;
-    portEXIT_CRITICAL(&lock_);
-
-    attachWebInterfaceSvcIfNeeded_();
-    const bool flowCfgPaused = setFlowCfgPaused_(true);
-    if (webInterfaceSvc_ && webInterfaceSvc_->setPaused) {
-        webInterfaceSvc_->setPaused(webInterfaceSvc_->ctx, true);
-    }
-
-    bool ok = false;
-    ESP32Flasher flasher(flowIoBootPin_, flowIoEnablePin_);
-    flasher.setUpdateProgressCallback([this]() {
-        this->onProgressChunk_(1024U);
-    });
-    flasher.espFlasherInit();
-
-    const int connectStatus = flasher.espConnect();
-    if (connectStatus != SUCCESS) {
-        char msg[64] = {0};
-        snprintf(msg,
-                 sizeof(msg),
-                 "target connect failed (%d:%s)",
-                 connectStatus,
-                 flasherErrorText_(connectStatus));
-        writeSimpleError_(errOut, errOutLen, msg);
-    } else {
-        const int flashStatus = flasher.espFlashBinStream(*http.getStreamPtr(), (uint32_t)contentLength);
-        if (flashStatus != SUCCESS) {
-            char msg[64] = {0};
-            snprintf(msg,
-                     sizeof(msg),
-                     "stream flash failed (%d:%s)",
-                     flashStatus,
-                     flasherErrorText_(flashStatus));
-            writeSimpleError_(errOut, errOutLen, msg);
-        } else {
-            ok = true;
-        }
-    }
-
-    if (webInterfaceSvc_ && webInterfaceSvc_->setPaused) {
-        webInterfaceSvc_->setPaused(webInterfaceSvc_->ctx, false);
-    }
-    if (flowCfgPaused) {
-        (void)setFlowCfgPaused_(false);
-    }
-
-    http.end();
-    if (!ok) return false;
-
-    setStatus_(UpdateState::Done, FirmwareUpdateTarget::FlowIO, 100, "flow.io update complete");
-    return true;
-}
-
-bool FirmwareUpdateModule::runSupervisorUpdate_(const char* url, char* errOut, size_t errOutLen)
-{
-    setStatus_(UpdateState::Downloading, FirmwareUpdateTarget::Supervisor, 0, "downloading");
+    setStatus_(UpdateState::Downloading, FirmwareUpdateTarget::Waveshare, 0, "downloading");
 
     HTTPClient http;
     configureDownloadHttp_(http);
@@ -753,7 +725,7 @@ bool FirmwareUpdateModule::runSupervisorUpdate_(const char* url, char* errOut, s
         return false;
     }
 
-    setStatus_(UpdateState::Flashing, FirmwareUpdateTarget::Supervisor, 0, "flashing");
+    setStatus_(UpdateState::Flashing, FirmwareUpdateTarget::Waveshare, 0, "flashing");
     portENTER_CRITICAL(&lock_);
     activeTotalBytes_ = (contentLength > 0) ? (uint32_t)contentLength : 0U;
     activeSentBytes_ = 0;
@@ -852,7 +824,7 @@ bool FirmwareUpdateModule::runSupervisorUpdate_(const char* url, char* errOut, s
         return false;
     }
 
-    setStatus_(UpdateState::Rebooting, FirmwareUpdateTarget::Supervisor, 100, "rebooting");
+    setStatus_(UpdateState::Rebooting, FirmwareUpdateTarget::Waveshare, 100, "rebooting");
     delay(1800);
     ESP.restart();
     return true;
@@ -860,25 +832,31 @@ bool FirmwareUpdateModule::runSupervisorUpdate_(const char* url, char* errOut, s
 
 bool FirmwareUpdateModule::runNextionUpdate_(const char* url, char* errOut, size_t errOutLen)
 {
-    if (flowIoEnablePin_ < 0 || nextionRebootPin_ < 0 || nextionRxPin_ < 0 || nextionTxPin_ < 0) {
+    if (nextionRxPin_ < 0 || nextionTxPin_ < 0) {
         writeSimpleError_(errOut, errOutLen, "nextion board pins not configured");
         return false;
     }
 
     setStatus_(UpdateState::Downloading, FirmwareUpdateTarget::Nextion, 0, "downloading");
 
-    pinMode(flowIoEnablePin_, OUTPUT);
-    digitalWrite(flowIoEnablePin_, LOW);
+    if (flowIoEnablePin_ >= 0) {
+        pinMode(flowIoEnablePin_, OUTPUT);
+        digitalWrite(flowIoEnablePin_, LOW);
+    }
 
-    pinMode(nextionRebootPin_, OUTPUT);
-    digitalWrite(nextionRebootPin_, HIGH);
+    if (nextionRebootPin_ >= 0) {
+        pinMode(nextionRebootPin_, OUTPUT);
+        digitalWrite(nextionRebootPin_, HIGH);
+    }
 
     HTTPClient http;
     configureDownloadHttp_(http);
     if (!http.begin(url)) {
         writeHttpBeginFailedError_("fichier de mise a jour", url, errOut, errOutLen);
-        digitalWrite(flowIoEnablePin_, HIGH);
-        pinMode(flowIoEnablePin_, INPUT);
+        if (flowIoEnablePin_ >= 0) {
+            digitalWrite(flowIoEnablePin_, HIGH);
+            pinMode(flowIoEnablePin_, INPUT);
+        }
         return false;
     }
 
@@ -887,15 +865,19 @@ bool FirmwareUpdateModule::runNextionUpdate_(const char* url, char* errOut, size
     if (code != HTTP_CODE_OK) {
         writeHttpCodeFailedError_("fichier de mise a jour", url, http, code, errOut, errOutLen);
         http.end();
-        digitalWrite(flowIoEnablePin_, HIGH);
-        pinMode(flowIoEnablePin_, INPUT);
+        if (flowIoEnablePin_ >= 0) {
+            digitalWrite(flowIoEnablePin_, HIGH);
+            pinMode(flowIoEnablePin_, INPUT);
+        }
         return false;
     }
     if (contentLength <= 0) {
         writeSimpleError_(errOut, errOutLen, "invalid content-length");
         http.end();
-        digitalWrite(flowIoEnablePin_, HIGH);
-        pinMode(flowIoEnablePin_, INPUT);
+        if (flowIoEnablePin_ >= 0) {
+            digitalWrite(flowIoEnablePin_, HIGH);
+            pinMode(flowIoEnablePin_, INPUT);
+        }
         return false;
     }
 
@@ -924,8 +906,10 @@ bool FirmwareUpdateModule::runNextionUpdate_(const char* url, char* errOut, size
     pinMode(nextionTxPin_, INPUT);
 
     http.end();
-    digitalWrite(flowIoEnablePin_, HIGH);
-    pinMode(flowIoEnablePin_, INPUT);
+    if (flowIoEnablePin_ >= 0) {
+        digitalWrite(flowIoEnablePin_, HIGH);
+        pinMode(flowIoEnablePin_, INPUT);
+    }
 
     if (!ok) return false;
 
@@ -950,37 +934,6 @@ bool FirmwareUpdateModule::runNextionReboot_(char* errOut, size_t errOutLen)
     digitalWrite(nextionRebootPin_, LOW);
 
     LOGI("Nextion reboot pulse sequence completed on pin=%d", (int)nextionRebootPin_);
-    return true;
-}
-
-bool FirmwareUpdateModule::runFlowIoHardwareReboot_(char* errOut, size_t errOutLen)
-{
-    if (flowIoEnablePin_ < 0) {
-        writeSimpleError_(errOut, errOutLen, "flowio EN pin not configured");
-        return false;
-    }
-
-    setStatus_(UpdateState::Rebooting, FirmwareUpdateTarget::FlowIO, 0, "flow.io hardware reboot");
-
-    if (flowIoBootPin_ >= 0) {
-        pinMode(flowIoBootPin_, OUTPUT);
-        digitalWrite(flowIoBootPin_, HIGH);
-    }
-    pinMode(flowIoEnablePin_, OUTPUT);
-    digitalWrite(flowIoEnablePin_, HIGH);
-    vTaskDelay(pdMS_TO_TICKS(50));
-    digitalWrite(flowIoEnablePin_, LOW);
-    vTaskDelay(pdMS_TO_TICKS(150));
-    digitalWrite(flowIoEnablePin_, HIGH);
-    vTaskDelay(pdMS_TO_TICKS(500));
-
-    if (flowIoBootPin_ >= 0) {
-        pinMode(flowIoBootPin_, INPUT);
-    }
-    pinMode(flowIoEnablePin_, INPUT);
-
-    setStatus_(UpdateState::Done, FirmwareUpdateTarget::FlowIO, 100, "flow.io hardware reboot done");
-    LOGI("flow.io hardware reboot pulse completed en=%d boot=%d", (int)flowIoEnablePin_, (int)flowIoBootPin_);
     return true;
 }
 
@@ -1107,11 +1060,8 @@ bool FirmwareUpdateModule::runJob_(const UpdateJob& job)
     char err[128] = {0};
     bool ok = false;
     switch (job.target) {
-        case FirmwareUpdateTarget::FlowIO:
-            ok = runFlowIoUpdate_(job.url, err, sizeof(err));
-            break;
-        case FirmwareUpdateTarget::Supervisor:
-            ok = runSupervisorUpdate_(job.url, err, sizeof(err));
+        case FirmwareUpdateTarget::Waveshare:
+            ok = runWaveshareUpdate_(job.url, err, sizeof(err));
             break;
         case FirmwareUpdateTarget::Nextion:
             ok = runNextionUpdate_(job.url, err, sizeof(err));
@@ -1135,6 +1085,96 @@ bool FirmwareUpdateModule::runJob_(const UpdateJob& job)
     return true;
 }
 
+bool FirmwareUpdateModule::runManifestCheck_(const ManifestCheckJob& job,
+                                             size_t* payloadLenOut,
+                                             char* errOut,
+                                             size_t errOutLen)
+{
+    if (payloadLenOut) *payloadLenOut = 0U;
+    if (!manifestPayload_) {
+        writeSimpleError_(errOut, errOutLen, "manifest storage unavailable");
+        return false;
+    }
+
+    if (!netAccessSvc_ && services_) {
+        netAccessSvc_ = services_->get<NetworkAccessService>(ServiceId::NetworkAccess);
+    }
+    bool netReady = false;
+    if (netAccessSvc_ && netAccessSvc_->isWebReachable) {
+        netReady = netAccessSvc_->isWebReachable(netAccessSvc_->ctx);
+    } else if (wifiSvc_ && wifiSvc_->isConnected) {
+        netReady = wifiSvc_->isConnected(wifiSvc_->ctx);
+    }
+    if (!netReady) {
+        writeSimpleError_(errOut, errOutLen, "network not connected");
+        return false;
+    }
+
+    constexpr size_t kPayloadCapacity = Limits::FirmwareUpdate::Buffers::ManifestResponseJson;
+    manifestPayload_[0] = '\0';
+
+    HTTPClient http;
+    configureDownloadHttp_(http);
+    if (!http.begin(job.url)) {
+        writeHttpBeginFailedError_("manifest", job.url, errOut, errOutLen);
+        return false;
+    }
+
+    const int code = http.GET();
+    if (code != HTTP_CODE_OK) {
+        writeHttpCodeFailedError_("manifest", job.url, http, code, errOut, errOutLen);
+        http.end();
+        return false;
+    }
+
+    const int announcedSize = http.getSize();
+    if (announcedSize == 0) {
+        writeSimpleError_(errOut, errOutLen, "manifest empty");
+        http.end();
+        return false;
+    }
+    if (announcedSize > 0 && (size_t)announcedSize > kPayloadCapacity) {
+        writeSimpleError_(errOut, errOutLen, "manifest too large");
+        http.end();
+        return false;
+    }
+
+    BoundedBufferStream sink(manifestPayload_, kPayloadCapacity);
+    const int written = http.writeToStream(&sink);
+    const bool overflowed = sink.overflowed();
+    const size_t payloadLen = sink.length();
+    http.end();
+
+    if (overflowed) {
+        writeSimpleError_(errOut, errOutLen, "manifest too large");
+        return false;
+    }
+    if (written < 0) {
+        writeSimpleError_(errOut, errOutLen, "manifest read failed");
+        return false;
+    }
+    if (payloadLen == 0U) {
+        writeSimpleError_(errOut, errOutLen, "manifest empty");
+        return false;
+    }
+
+    manifestPayload_[payloadLen] = '\0';
+    size_t jsonCapacity = payloadLen + 1024U;
+    if (jsonCapacity < Limits::FirmwareUpdate::Buffers::ManifestParseJson) {
+        jsonCapacity = Limits::FirmwareUpdate::Buffers::ManifestParseJson;
+    }
+    DynamicJsonDocument doc(jsonCapacity);
+    const DeserializationError jsonErr =
+        deserializeJson(doc, static_cast<const char*>(manifestPayload_), payloadLen);
+    if (jsonErr || !doc.is<JsonObjectConst>()) {
+        writeSimpleError_(errOut, errOutLen, "manifest invalid json");
+        return false;
+    }
+
+    if (payloadLenOut) *payloadLenOut = payloadLen;
+    return true;
+}
+
 bool FirmwareUpdateModule::cmdStatus_(void* userCtx, const CommandRequest&, char* reply, size_t replyLen)
 {
     FirmwareUpdateModule* self = static_cast<FirmwareUpdateModule*>(userCtx);
@@ -1148,7 +1188,7 @@ bool FirmwareUpdateModule::cmdStatus_(void* userCtx, const CommandRequest&, char
     return true;
 }
 
-bool FirmwareUpdateModule::cmdFlowIo_(void* userCtx, const CommandRequest& req, char* reply, size_t replyLen)
+bool FirmwareUpdateModule::cmdWaveshare_(void* userCtx, const CommandRequest& req, char* reply, size_t replyLen)
 {
     FirmwareUpdateModule* self = static_cast<FirmwareUpdateModule*>(userCtx);
     if (!self) return false;
@@ -1156,39 +1196,14 @@ bool FirmwareUpdateModule::cmdFlowIo_(void* userCtx, const CommandRequest& req, 
     char url[kUrlLen] = {0};
     const char* explicitUrl = self->parseUrlArg_(req, url, sizeof(url)) ? url : nullptr;
     char err[120] = {0};
-    FirmwareUpdateTarget target = FirmwareUpdateTarget::FlowIO;
-#if FLOW_BUILD_IS_FLOWIOS3
-    // flow.io is a local single-device build: route this command to local OTA update.
-    target = FirmwareUpdateTarget::Supervisor;
-#endif
-    if (!self->startUpdate_(target, explicitUrl, err, sizeof(err))) {
-        if (!writeErrorJson(reply, replyLen, ErrorCode::Failed, "fw.update.flowio")) {
+    if (!self->startUpdate_(FirmwareUpdateTarget::Waveshare, explicitUrl, err, sizeof(err))) {
+        if (!writeErrorJson(reply, replyLen, ErrorCode::Failed, "fw.update.waveshare")) {
             snprintf(reply, replyLen, "{\"ok\":false}");
         }
         return false;
     }
 
-    const char* targetLabel = (target == FirmwareUpdateTarget::Supervisor) ? "esp32s3" : "flowio";
-    snprintf(reply, replyLen, "{\"ok\":true,\"queued\":true,\"target\":\"%s\"}", targetLabel);
-    return true;
-}
-
-bool FirmwareUpdateModule::cmdSupervisor_(void* userCtx, const CommandRequest& req, char* reply, size_t replyLen)
-{
-    FirmwareUpdateModule* self = static_cast<FirmwareUpdateModule*>(userCtx);
-    if (!self) return false;
-
-    char url[kUrlLen] = {0};
-    const char* explicitUrl = self->parseUrlArg_(req, url, sizeof(url)) ? url : nullptr;
-    char err[120] = {0};
-    if (!self->startUpdate_(FirmwareUpdateTarget::Supervisor, explicitUrl, err, sizeof(err))) {
-        if (!writeErrorJson(reply, replyLen, ErrorCode::Failed, "fw.update.supervisor")) {
-            snprintf(reply, replyLen, "{\"ok\":false}");
-        }
-        return false;
-    }
-
-    snprintf(reply, replyLen, "{\"ok\":true,\"queued\":true,\"target\":\"supervisor\"}");
+    snprintf(reply, replyLen, "{\"ok\":true,\"queued\":true,\"target\":\"waveshare\"}");
     return true;
 }
 
@@ -1230,25 +1245,6 @@ bool FirmwareUpdateModule::cmdNextionReboot_(void* userCtx, const CommandRequest
     return true;
 }
 
-bool FirmwareUpdateModule::cmdFlowIoHardwareReboot_(void* userCtx, const CommandRequest&, char* reply, size_t replyLen)
-{
-    FirmwareUpdateModule* self = static_cast<FirmwareUpdateModule*>(userCtx);
-    if (!self) return false;
-
-    char err[120] = {0};
-    if (!self->queueFlowIoHardwareReboot_(err, sizeof(err))) {
-        sanitizeJsonString_(err);
-        const int wrote = snprintf(reply,
-                                   replyLen,
-                                   "{\"ok\":false,\"err\":{\"code\":\"Failed\",\"where\":\"fw.flowio.hw_reboot\",\"msg\":\"%s\"}}",
-                                   err[0] ? err : "failed");
-        return wrote > 0 && (size_t)wrote < replyLen;
-    }
-
-    snprintf(reply, replyLen, "{\"ok\":true,\"queued\":true,\"target\":\"flowio_hardware_reboot\"}");
-    return true;
-}
-
 bool FirmwareUpdateModule::cmdSpiffs_(void* userCtx, const CommandRequest& req, char* reply, size_t replyLen)
 {
     FirmwareUpdateModule* self = static_cast<FirmwareUpdateModule*>(userCtx);
@@ -1278,9 +1274,34 @@ void FirmwareUpdateModule::init(ConfigStore& cfg, ServiceRegistry& services)
     netAccessSvc_ = services.get<NetworkAccessService>(ServiceId::NetworkAccess);
     webInterfaceSvc_ = services.get<WebInterfaceService>(ServiceId::WebInterface);
     flowCfgSvc_ = services.get<FlowCfgRemoteService>(ServiceId::FlowCfg);
+    hmiSvc_ = services.get<HmiService>(ServiceId::Hmi);
 
     cfg.registerVar(updateHostVar_);
     cfg.registerVar(updatePathVar_);
+
+    constexpr size_t kManifestStorageBytes =
+        Limits::FirmwareUpdate::Buffers::ManifestResponseJson + 1U;
+#if defined(FLOW_PROFILE_WAVESHARE)
+    manifestPayload_ = static_cast<char*>(
+        heap_caps_calloc(1, kManifestStorageBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+    );
+#else
+    manifestPayload_ = static_cast<char*>(
+        heap_caps_calloc(1, kManifestStorageBytes, MALLOC_CAP_8BIT)
+    );
+#endif
+    if (!manifestPayload_) {
+        LOGE("Manifest storage allocation failed bytes=%u", (unsigned)kManifestStorageBytes);
+    } else {
+        LOGI("Manifest storage ready bytes=%u%s",
+             (unsigned)kManifestStorageBytes,
+#if defined(FLOW_PROFILE_WAVESHARE)
+             " memory=psram"
+#else
+             ""
+#endif
+        );
+    }
 
     if (!services.add(ServiceId::FirmwareUpdate, &firmwareUpdateSvc_)) {
         LOGE("service registration failed: %s", toString(ServiceId::FirmwareUpdate));
@@ -1288,24 +1309,22 @@ void FirmwareUpdateModule::init(ConfigStore& cfg, ServiceRegistry& services)
 
     if (cmdSvc_ && cmdSvc_->registerHandler) {
         cmdSvc_->registerHandler(cmdSvc_->ctx, "fw.update.status", &FirmwareUpdateModule::cmdStatus_, this);
-        cmdSvc_->registerHandler(cmdSvc_->ctx, "fw.update.flowio", &FirmwareUpdateModule::cmdFlowIo_, this);
-        cmdSvc_->registerHandler(cmdSvc_->ctx, "fw.update.supervisor", &FirmwareUpdateModule::cmdSupervisor_, this);
+        cmdSvc_->registerHandler(cmdSvc_->ctx, "fw.update.waveshare", &FirmwareUpdateModule::cmdWaveshare_, this);
         cmdSvc_->registerHandler(cmdSvc_->ctx, "fw.update.nextion", &FirmwareUpdateModule::cmdNextion_, this);
         cmdSvc_->registerHandler(cmdSvc_->ctx, "fw.nextion.reboot", &FirmwareUpdateModule::cmdNextionReboot_, this);
-        cmdSvc_->registerHandler(cmdSvc_->ctx, "fw.flowio.hw_reboot", &FirmwareUpdateModule::cmdFlowIoHardwareReboot_, this);
         cmdSvc_->registerHandler(cmdSvc_->ctx, "fw.update.spiffs", &FirmwareUpdateModule::cmdSpiffs_, this);
-        cmdSvc_->registerHandler(cmdSvc_->ctx, "fw.update.cfgdocs", &FirmwareUpdateModule::cmdSpiffs_, this);
     }
 
-    setStatus_(UpdateState::Idle, FirmwareUpdateTarget::FlowIO, 0, "idle");
+    setStatus_(UpdateState::Idle, FirmwareUpdateTarget::Waveshare, 0, "idle");
     LOGI("Firmware updater ready");
 }
 
 void FirmwareUpdateModule::loop()
 {
     UpdateJob job{};
+    ManifestCheckJob manifestJob{};
     bool runNextionReboot = false;
-    bool runFlowIoHardwareReboot = false;
+    bool runManifestCheck = false;
 
     portENTER_CRITICAL(&lock_);
     if (busy_) {
@@ -1317,14 +1336,20 @@ void FirmwareUpdateModule::loop()
         busy_ = true;
         nextionRebootQueued_ = false;
         runNextionReboot = true;
-    } else if (flowIoHardwareRebootQueued_) {
-        busy_ = true;
-        flowIoHardwareRebootQueued_ = false;
-        runFlowIoHardwareReboot = true;
     } else if (queuedJob_.pending) {
         busy_ = true;
         job = queuedJob_;
         queuedJob_.pending = false;
+    } else if (manifestCheckJob_.pending) {
+        busy_ = true;
+        manifestJob = manifestCheckJob_;
+        manifestCheckJob_.pending = false;
+        runManifestCheck = true;
+        if (manifestCheck_.requestId == manifestJob.requestId) {
+            manifestCheck_.state = FirmwareManifestCheckState::Downloading;
+            manifestCheck_.updatedAtMs = millis();
+            snprintf(manifestCheck_.message, sizeof(manifestCheck_.message), "downloading");
+        }
     } else {
         portEXIT_CRITICAL(&lock_);
         vTaskDelay(pdMS_TO_TICKS(60));
@@ -1339,13 +1364,38 @@ void FirmwareUpdateModule::loop()
         } else {
             LOGI("Nextion reboot done");
         }
-    } else if (runFlowIoHardwareReboot) {
+    } else if (runManifestCheck) {
+        size_t payloadLen = 0U;
         char err[128] = {0};
-        if (!runFlowIoHardwareReboot_(err, sizeof(err))) {
-            LOGE("flow.io hardware reboot failed reason=%s", err[0] ? err : "unknown");
-            setError_(FirmwareUpdateTarget::FlowIO, err[0] ? err : "flow.io hardware reboot failed");
+        const bool ok =
+            runManifestCheck_(manifestJob, &payloadLen, err, sizeof(err));
+
+        portENTER_CRITICAL(&lock_);
+        if (manifestCheck_.requestId == manifestJob.requestId) {
+            manifestCheck_.updatedAtMs = millis();
+            if (ok) {
+                manifestCheck_.state = FirmwareManifestCheckState::Ready;
+                manifestCheck_.payloadLen = payloadLen;
+                snprintf(manifestCheck_.message, sizeof(manifestCheck_.message), "ready");
+            } else {
+                manifestCheck_.state = FirmwareManifestCheckState::Error;
+                manifestCheck_.payloadLen = 0U;
+                snprintf(manifestCheck_.message,
+                         sizeof(manifestCheck_.message),
+                         "%s",
+                         err[0] ? err : "manifest check failed");
+            }
+        }
+        portEXIT_CRITICAL(&lock_);
+
+        if (ok) {
+            LOGI("Manifest check ready request=%lu bytes=%u",
+                 (unsigned long)manifestJob.requestId,
+                 (unsigned)payloadLen);
         } else {
-            LOGI("flow.io hardware reboot done");
+            LOGE("Manifest check failed request=%lu reason=%s",
+                 (unsigned long)manifestJob.requestId,
+                 err[0] ? err : "unknown");
         }
     } else {
         runJob_(job);

@@ -1,23 +1,21 @@
 {
   "translations": {
-    "cfgdocs.wifi.enabled.help": "Active ou désactive la connexion WiFi en mode station.",
-    "cfgdocs.wifi.enabled.label": "WiFi activé",
-    "cfgdocs.wifi.mdns.help": "Nom d'hôte mDNS diffusé sur le réseau local.",
-    "cfgdocs.wifi.mdns.label": "Nom mDNS",
-    "cfgdocs.wifi.pass.help": "Mot de passe WPA/WPA2 du réseau WiFi.",
-    "cfgdocs.wifi.pass.label": "Mot de passe WiFi",
-    "cfgdocs.wifi.ssid.help": "Nom du réseau WiFi auquel se connecter.",
+    "cfgdocs.wifi.enabled.help": "Active ou désactive la connexion réseau en mode station.",
+    "cfgdocs.wifi.enabled.label": "Réseau activé",
+    "cfgdocs.wifi.pass.help": "Mot de passe WPA/WPA2 du réseau.",
+    "cfgdocs.wifi.pass.label": "Mot de passe réseau",
+    "cfgdocs.wifi.ssid.help": "Nom du réseau auquel se connecter.",
     "cfgdocs.wifi.ssid.label": "SSID",
     "cfgmods.network.label": "network",
     "cfgmods.network.ethernet.label": "ethernet",
-    "cfgmods.network.wifi.label": "wifi",
+    "cfgmods.network.wifi.label": "réseau",
     "runtimeui.wifi.v01.display.activeText": "Connecte",
     "runtimeui.wifi.v01.display.inactiveText": "Deconnecte",
-    "runtimeui.wifi.v01.group": "WiFi",
-    "runtimeui.wifi.v01.label": "WiFi pret",
-    "runtimeui.wifi.v02.group": "WiFi",
+    "runtimeui.wifi.v01.group": "Réseau",
+    "runtimeui.wifi.v01.label": "Réseau prêt",
+    "runtimeui.wifi.v02.group": "Réseau",
     "runtimeui.wifi.v02.label": "Adresse IP",
-    "runtimeui.wifi.v03.group": "WiFi",
+    "runtimeui.wifi.v03.group": "Réseau",
     "runtimeui.wifi.v03.label": "Signal"
   }
 }

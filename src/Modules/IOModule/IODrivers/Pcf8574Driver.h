@@ -5,7 +5,7 @@
  */
 
 #include <stdint.h>
-#include "Modules/IOModule/IOBus/I2CBus.h"
+#include "Core/I2cBus.h"
 #include "Modules/IOModule/IODrivers/IODriver.h"
 
 class Pcf8574Driver : public IMaskOutputDriver {

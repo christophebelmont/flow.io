@@ -1,7 +1,7 @@
 [wokwi]
 version = 1
-firmware = '.pio/build/FlowIOS3Wokwi/wokwi-merged.bin'
-elf = '.pio/build/FlowIOS3Wokwi/firmware.elf'
+firmware = '.pio/build/WaveshareWokwi/wokwi-merged.bin'
+elf = '.pio/build/WaveshareWokwi/firmware.elf'
 chips = ["wokwi/ads1115.chip.json","wokwi/tca9554pwr.chip.json"]
 
 [[wifi]]

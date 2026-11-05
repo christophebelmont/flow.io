@@ -37,6 +37,7 @@ public:
 private:
     struct SystemConfig {
         char lang[8] = "fr";
+        char devicename[33] = "flowio";
     };
 
     enum RuntimeUiValueId : uint8_t {
@@ -51,12 +52,21 @@ private:
     const LogHubService* logHub = nullptr;
     const EventBusService* eventBusSvc_ = nullptr;
     EventBus* eventBus_ = nullptr;
+    ServiceRegistry* services_ = nullptr;
+    portMUX_TYPE restartMux_ = portMUX_INITIALIZER_UNLOCKED;
+    bool restartScheduled_ = false;
+    uint32_t restartDelayMs_ = 0U;
+    char restartReason_[24] = {0};
     SystemConfig cfgData_{};
     uint32_t localeGeneration_ = 1U;
 
     ConfigVariable<char,0> languageVar_{
         NVS_KEY(NvsKeys::System::Language), "lang", "system", ConfigType::CharArray,
         (char*)cfgData_.lang, ConfigPersistence::Persistent, sizeof(cfgData_.lang)
+    };
+    ConfigVariable<char,0> deviceNameVar_{
+        NVS_KEY(NvsKeys::System::DeviceName), "devicename", "system", ConfigType::CharArray,
+        (char*)cfgData_.devicename, ConfigPersistence::Persistent, sizeof(cfgData_.devicename)
     };
     LocaleService localeSvc_{
         ServiceBinding::bind<&SystemModule::localeLanguage_>,
@@ -67,6 +77,9 @@ private:
     static bool cmdPing(void* userCtx, const CommandRequest& req, char* reply, size_t replyLen);
     static bool cmdReboot(void* userCtx, const CommandRequest& req, char* reply, size_t replyLen);
     static bool cmdFactoryReset(void* userCtx, const CommandRequest& req, char* reply, size_t replyLen);
+    static void restartTaskStatic_(void* userCtx);
+    bool scheduleRestart_(uint32_t delayMs, const char* reason);
+    void notifyShutdownPending_();
     static void onEventStatic_(const Event& e, void* user);
     void onEvent_(const Event& e);
     bool normalizeLanguage_(bool bumpGenerationIfChanged);

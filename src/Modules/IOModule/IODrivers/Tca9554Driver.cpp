@@ -39,9 +39,17 @@ bool Tca9554Driver::beginPreserveHardwareState()
     if (!readReg_(kRegOutputPort, output)) return false;
 
     bootWasColdPowerOn_ = (config == 0xFF);
-    state_ = output;
-
     if (!writeReg_(kRegPolarityInversion, 0x00)) return false;
+
+    if (bootWasColdPowerOn_) {
+        // After a TCA9554 electrical reset, the output register default is not
+        // a retained latch. Keep cold boot safe even in preserve mode.
+        state_ = 0x00;
+        if (!writeReg_(kRegOutputPort, state_)) return false;
+    } else {
+        state_ = output;
+    }
+
     if (!writeReg_(kRegConfiguration, 0x00)) return false;
     return true;
 }

@@ -10,11 +10,6 @@
       "label_t": "cfgdocs.wifi.enabled.label",
       "help_t": "cfgdocs.wifi.enabled.help"
     },
-    "wifi/mdns": {
-      "type": "CharArray",
-      "label_t": "cfgdocs.wifi.mdns.label",
-      "help_t": "cfgdocs.wifi.mdns.help"
-    },
     "wifi/pass": {
       "type": "CharArray",
       "label_t": "cfgdocs.wifi.pass.label",

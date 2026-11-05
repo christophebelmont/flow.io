@@ -22,13 +22,15 @@ enum class ServiceId : uint8_t {
     Mqtt,
     Ha,
     Io,
-    StatusLeds,
     PoolDevice,
     WebInterface,
     FirmwareUpdate,
     NetworkAccess,
     FlowCfg,
     Locale,
+    ActivityLog,
+    I2cBus,
+    DomainStatus,
     Count
 };
 
@@ -61,13 +63,15 @@ constexpr const char* toString(ServiceId id)
         case ServiceId::Mqtt: return "mqtt";
         case ServiceId::Ha: return "ha";
         case ServiceId::Io: return "io";
-        case ServiceId::StatusLeds: return "status_leds";
         case ServiceId::PoolDevice: return "pooldev";
         case ServiceId::WebInterface: return "webinterface";
         case ServiceId::FirmwareUpdate: return "fwupdate";
         case ServiceId::NetworkAccess: return "network_access";
         case ServiceId::FlowCfg: return "flowcfg";
         case ServiceId::Locale: return "locale";
+        case ServiceId::ActivityLog: return "activitylog";
+        case ServiceId::I2cBus: return "i2c_bus";
+        case ServiceId::DomainStatus: return "domain_status";
         case ServiceId::Count: return "count";
     }
     return "unknown";

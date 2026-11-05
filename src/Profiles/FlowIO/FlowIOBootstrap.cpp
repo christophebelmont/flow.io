@@ -10,7 +10,6 @@
 #include "App/AppContext.h"
 #include "Board/BoardSpec.h"
 #include "Board/BoardSerialMap.h"
-#include "Core/ConfigMigrations.h"
 #include "Core/DataStore/DataStore.h"
 #include "Core/Log.h"
 #include "Core/LogModuleIds.h"
@@ -21,7 +20,7 @@
 #include "Core/WokwiDefaultOverrides.h"
 #include "Core/Services/IFlowCfg.h"
 #include "Domain/Pool/PoolBehaviors.h"
-#include "Domain/Pool/PoolBindings.h"
+#include "Domain/Pool/PoolIds.h"
 
 #undef snprintf
 #define snprintf(OUT, LEN, FMT, ...) \
@@ -32,13 +31,22 @@ namespace {
 using Profiles::FlowIO::ModuleInstances;
 I2CCfgServerModule* gI2cCfgServerForNetworkSnapshot = nullptr;
 
-const PoolDevicePreset* findPoolPresetByRole(const DomainSpec& domain, DomainRole role)
+const PoolDevicePreset* findPoolPresetById(const DomainSpec& domain, PoolDeviceId id)
 {
     for (uint8_t i = 0; i < domain.poolDeviceCount; ++i) {
         const PoolDevicePreset& preset = domain.poolDevices[i];
-        if (preset.role == role) return &preset;
+        if (preset.id == id) return &preset;
     }
     return nullptr;
+}
+
+IoSlotId findIoSlotForDomainSlot(const DomainSpec& domain, DomainSlotId id)
+{
+    for (uint8_t i = 0; i < domain.domainIoSlotBindingCount; ++i) {
+        const DomainIoSlotBinding& binding = domain.domainIoSlotBindings[i];
+        if (binding.domainSlot == id) return binding.ioSlot;
+    }
+    return IO_SLOT_INVALID;
 }
 
 void requireSetup(bool ok, const char* step)
@@ -152,23 +160,24 @@ void registerModules(AppContext& ctx, ModuleInstances& modules)
 
 uint8_t dependsOnMaskForPreset(const DomainSpec& domain, const PoolDevicePreset& preset)
 {
-    if (preset.dependsOnRole == DomainRole::None) return 0;
-    const PoolDevicePreset* dependency = findPoolPresetByRole(domain, preset.dependsOnRole);
+    if (preset.dependsOnDevice == POOL_DEVICE_INVALID) return 0;
+    const PoolDevicePreset* dependency = findPoolPresetById(domain, preset.dependsOnDevice);
     if (!dependency) return 0;
-    return (uint8_t)(1u << dependency->legacySlot);
+    return (uint8_t)(1u << dependency->id);
 }
 
 void configurePoolDevices(const AppContext& ctx, ModuleInstances& modules)
 {
     for (uint8_t i = 0; i < ctx.domain->poolDeviceCount; ++i) {
         const PoolDevicePreset& preset = ctx.domain->poolDevices[i];
-        const PoolIoBinding* compat = PoolBinding::ioBindingBySlot(preset.legacySlot);
-        requireSetup(compat != nullptr, "missing pool device compatibility binding");
+        const IoSlotId ioSlot = findIoSlotForDomainSlot(*ctx.domain, preset.commandSlot);
+        requireSetup(ioSlot != IO_SLOT_INVALID, "missing pool device IO slot binding");
 
         PoolDeviceDefinition def{};
         snprintf(def.label, sizeof(def.label), "%s", preset.displayName);
-        def.slot = preset.legacySlot;
-        def.ioId = compat->ioId;
+        def.slot = preset.id;
+        def.commandSlot = preset.commandSlot;
+        def.ioSlot = ioSlot;
         def.type = preset.poolDeviceType;
         def.flowLPerHour = preset.flowLPerHour;
         def.tankCapacityMl = preset.tankCapacityMl;
@@ -206,8 +215,6 @@ void setupProfile(AppContext& ctx)
 
     ctx.preferences.begin(NvsKeys::StorageNamespace, false);
     ctx.registry.setPreferences(ctx.preferences);
-    ctx.registry.runMigrations(CURRENT_CFG_VERSION, steps, MIGRATION_COUNT);
-
     registerModules(ctx, modules);
     modules.hmiModule.setRemoteUdpServer(&modules.hmiUdpServerModule);
     configureIoModule(ctx, modules);

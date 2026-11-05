@@ -1,5 +1,7 @@
 {
   "translations": {
+    "cfgdocs.system.devicename.help": "Nom utilisé pour l'affichage web et l'annonce mDNS.",
+    "cfgdocs.system.devicename.label": "Nom de l'appareil",
     "cfgdocs.system.lang.help": "Langue d'affichage de l'interface.",
     "cfgdocs.system.lang.label": "Langue",
     "cfgmods.system.label": "system",

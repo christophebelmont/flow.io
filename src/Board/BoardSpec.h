@@ -74,3 +74,8 @@ inline const EthernetW5500Spec* boardEthernetW5500(const BoardSpec& board)
 {
     return board.ethernetW5500;
 }
+
+inline const HmiBuzzerSpec* boardHmiBuzzer(const BoardSpec& board)
+{
+    return board.hmiBuzzer;
+}

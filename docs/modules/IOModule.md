@@ -2,12 +2,12 @@
 
 ## Rôle
 
-`IOModule` est la couche d'entrées/sorties du firmware `FlowIO`.
+`IOModule` est la couche d'entrées/sorties du firmware principal Waveshare.
 
 Le module regroupe actuellement:
 
 - l'inventaire des endpoints IO exposés aux autres modules
-- les drivers GPIO, ADS1115, DS18B20 et PCF8574
+- les drivers GPIO, ADS1115, DS18B20, TCA9554, MCP23017 et PCF8574
 - le scheduler d'acquisition
 - la persistance et l'application de la configuration IO
 - les snapshots runtime pour MQTT
@@ -16,21 +16,25 @@ Le module regroupe actuellement:
 
 Le service public exposé au reste du firmware est `IOServiceV2`.
 
+La cartographie complète du profil Waveshare est documentée dans
+[`docs/core/waveshare-io-map.md`](../core/waveshare-io-map.md), avec les tables
+`binding_port`, `io_slot` et `domain_slot`.
+
 Type: module actif.
 
 ## Dépendances
 
-En build `FlowIO`, les dépendances déclarées sont:
+En build Waveshare, les dépendances déclarées sont:
 
 - `loghub`
 - `datastore`
 - `mqtt`
 
-Le profil `FlowIO` lui associe en plus:
+Le profil Waveshare lui associe en plus:
 
 - les bus 1-Wire `oneWireWater` et `oneWireAir`
-- la table de ports physiques définie dans `src/Profiles/FlowIO/FlowIOIoLayout.h`
-- les définitions d'endpoints construites dans `src/Profiles/FlowIO/FlowIOIoAssembly.cpp`
+- la table de ports physiques définie dans `src/Profiles/Waveshare/WaveshareIoLayout.h`
+- les définitions d'endpoints construites dans `src/Profiles/Waveshare/WaveshareIoAssembly.cpp`
 
 ## Affinité et cadence
 
@@ -48,7 +52,6 @@ Jobs planifiés en interne:
 ## Services exposés
 
 - `io` -> `IOServiceV2`
-- `status_leds` -> `StatusLedsService`
 
 Fonctions principales de `IOServiceV2`:
 
@@ -65,16 +68,16 @@ Capacités compile-time actuelles dans `src/Modules/IOModule/IOModule.h`:
 
 | Capacité | Valeur |
 |---|---:|
-| entrées analogiques | 17 |
-| entrées digitales | 5 |
-| sorties digitales | 10 |
-| slots digitaux totaux | 15 |
+| entrées analogiques | 16 |
+| entrées digitales | 13 |
+| sorties digitales | 16 |
+| slots de configuration correspondants | 16 / 13 / 16 |
 
 Plages d'`IoId` utilisées:
 
-- sorties digitales: `IO_ID_DO_BASE .. IO_ID_DO_BASE + 9`
-- entrées digitales: `IO_ID_DI_BASE .. IO_ID_DI_BASE + 4`
-- entrées analogiques: `IO_ID_AI_BASE .. IO_ID_AI_BASE + 16`
+- sorties digitales: `IO_ID_DO_BASE .. IO_ID_DO_BASE + 15`
+- entrées digitales: `IO_ID_DI_BASE .. IO_ID_DI_BASE + 12`
+- entrées analogiques: `IO_ID_AI_BASE .. IO_ID_AI_BASE + 15`
 
 ## Backends physiques pris en charge
 
@@ -102,11 +105,11 @@ Les `IoBackend` visibles dans le service sont:
 
 ## Modèle de binding actuel
 
-Le module ne déduit pas seul le câblage métier. Le binding est fourni par le profil `FlowIO`.
+Le module ne déduit pas seul le câblage métier. Le binding est fourni par le profil Waveshare.
 
 ### Catalogue des ports physiques
 
-`src/Profiles/FlowIO/FlowIOIoLayout.h` déclare:
+`src/Profiles/Waveshare/WaveshareIoLayout.h` déclare:
 
 - les `PhysicalPortId`
 - la table `kBindingPorts`
@@ -118,63 +121,68 @@ Ports déclarés actuellement:
 
 - ADS interne: `PortAdsInternal0..3`
 - ADS externe différentiel: `PortAdsExternal0..1`
-- DS18B20: `PortDsWater`, `PortDsAir`
+- DS18B20: `PortOneWireWater`, `PortOneWireAir`
 - SHT40: `PortSht40Temp`, `PortSht40Humidity`
 - BMP280: `PortBmp280Temp`, `PortBmp280Pressure`
-- BME680: `PortBme680Temp`, `PortBme680Humidity`, `PortBme680Pressure`, `PortBme680Gas`
+- BME688 via driver BME680: `PortBme688Temp`, `PortBme688Humidity`, `PortBme688Pressure`, `PortBme688Gas`
 - INA226: `PortIna226ShuntMv`, `PortIna226BusV`, `PortIna226CurrentMa`, `PortIna226PowerMw`, `PortIna226LoadV`
-- entrées digitales GPIO: `PortDigitalIn1..4`
-- sorties relais GPIO: `PortRelay1..8`
-- sorties PCF8574: `PortPcf0Bit0..7`
+- entrées digitales intégrées: `PortDin0..7`
+- entrées d'extension: `PortMcpInGpa0..6`
+- sorties relais TCA9554: `PortExio1..8`
+- sorties d'extension: `PortMcpOutGpb0..7`
+- GPIO génériques déclarés pour les builds sans TFT
 
 ### Instanciation des endpoints
 
-`src/Profiles/FlowIO/FlowIOIoAssembly.cpp` lit le domaine actif et appelle:
+`src/Profiles/Waveshare/WaveshareIoAssembly.cpp` lit le domaine actif et appelle:
 
 - `defineAnalogInput`
 - `defineDigitalInput`
 - `defineDigitalOutput`
 
-Le profil `FlowIO` instancie aujourd'hui:
+Le profil Waveshare instancie aujourd'hui:
 
-- 17 entrées analogiques (`a00..a16`, dont `a06..a16` comme slots configurables supplémentaires)
-- 4 entrées digitales
-- 8 sorties digitales
+- 16 entrées analogiques (`a00..a15`)
+- 13 entrées digitales (`i00..i12`)
+- 16 sorties digitales (`d00..d15`)
 
-## Affectation actuelle des rôles `FlowIO`
+## Affectation actuelle des rôles Waveshare
 
 ### Entrées analogiques
 
 | Rôle par défaut | Port physique par défaut |
 |---|---|
-| `OrpSensor` | `PortAdsInternal0` |
-| `PhSensor` | `PortAdsInternal1` |
-| `PsiSensor` | `PortAdsInternal2` |
-| `SpareAnalog` | `PortAdsInternal3` |
-| `WaterTemp` | `PortDsWater` |
-| `AirTemp` | `PortDsAir` |
+| `SensorOrp` | `PortAdsInternal0` |
+| `SensorPh` | `PortAdsInternal1` |
+| `SensorPsi` | `PortAdsInternal2` |
+| `SensorSpareAnalog` | `PortAdsInternal3` |
+| `SensorWaterTemp` | `PortOneWireWater` |
+| `SensorAirTemp` | `PortOneWireAir` |
+| `SensorCurrent` | `PortIna226CurrentMa` |
+| `SensorVoltage` | `PortIna226BusV` |
 
 ### Entrées digitales
 
 | Rôle par défaut | Port physique par défaut | Mode |
 |---|---|---|
-| `PoolLevelSensor` | `PortDigitalIn1` | état |
-| `PhLevelSensor` | `PortDigitalIn2` | état |
-| `ChlorineLevelSensor` | `PortDigitalIn3` | état |
-| `WaterCounterSensor` | `PortDigitalIn4` | compteur, front montant, debounce `100000 us` |
+| `SensorPir` | `PortMcpInGpa0` | état |
+| `SensorPhLevel` | `PortMcpInGpa3` | état |
+| `SensorChlorineLevel` | `PortMcpInGpa4` | état |
+| `SensorPoolLevel` | `PortMcpInGpa5` | état |
+| `SensorWaterMeter` | `PortDin0` (optocoupleur GPIO4) | compteur, front montant, debounce `100000 us` |
 
 ### Sorties digitales
 
 | Rôle par défaut | Port physique par défaut |
 |---|---|
-| `FiltrationPump` | `PortRelay1` |
-| `PhPump` | `PortRelay2` |
-| `ChlorinePump` | `PortRelay3` |
-| `ChlorineGenerator` | `PortRelay4` |
-| `Robot` | `PortRelay5` |
-| `Lights` | `PortRelay6` |
-| `FillPump` | `PortRelay7` |
-| `WaterHeater` | `PortRelay8` |
+| `ActuatorFiltrationPump` | `PortExio1` |
+| `ActuatorPhPump` | `PortExio2` |
+| `ActuatorChlorinePump` | `PortExio3` |
+| `ActuatorRobot` | `PortExio4` |
+| `ActuatorFillPump` | `PortExio5` |
+| `ActuatorChlorineGenerator` | `PortExio6` |
+| éclairage `d06` (`Lights`) | `PortExio7` |
+| `ActuatorWaterHeater` | `PortExio8` |
 
 ## Configuration et NVS
 
@@ -196,10 +204,11 @@ Branches de configuration exposées par le module:
 Paramètres principaux:
 
 - activation module: `enabled`
-- bus I2C principal: `i2c_sda`, `i2c_scl`
+- initialisation du bus I2C principal partagé: `i2c_sda`, `i2c_scl`
 - polling: `ads_poll_ms`, `ds_poll_ms`, `digital_poll_ms`
 - ADS: adresses, gain, rate
-- PCF8574: enable, adresse, masque par défaut, logique active low
+- expanders PCF8574/TCA9554/MCP23017: activation, adresse et masque par instance `expanderXX`
+- inversion électrique éventuelle des sorties d'expander: propriété fixe du profil matériel, non configurable
 - traces: `trace_enabled`, `trace_period_ms`
 - calibration et précision des entrées analogiques
 - binding, `activeHigh`, `momentary`, `pulseMs` des sorties digitales
@@ -300,7 +309,7 @@ Les identifiants sont déclarés dans `IOModule::RuntimeUiValueId`.
 
 ## Home Assistant
 
-Le module IO n'enregistre pas seul toutes les entités Home Assistant. Dans le profil `FlowIO`, `src/Profiles/FlowIO/FlowIOIoAssembly.cpp` synchronise:
+Le module IO n'enregistre pas seul toutes les entités Home Assistant. Dans le profil Waveshare, `src/Profiles/Waveshare/WaveshareIoAssembly.cpp` synchronise:
 
 - les capteurs analogiques déclarés
 - les binary sensors ou sensors des entrées digitales
@@ -315,7 +324,7 @@ Cette synchronisation repose sur:
 ## Particularités de fonctionnement
 
 - les sorties peuvent être impulsionnelles (`momentary`)
-- le masque PCF8574 est exposé via `StatusLedsService`
+- les PCF8574 déclarés dans `expanderXX` sont réservés aux endpoints IO génériques
 - les compteurs digitaux peuvent être persistés en NVS
 - le module maintient `IoCycleInfo` pour exposer la liste des `IoId` modifiés sur le dernier cycle
 - les labels exposés par `endpointLabel()` viennent des définitions construites par le profil

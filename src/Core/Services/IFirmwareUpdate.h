@@ -1,19 +1,33 @@
 #pragma once
 /**
  * @file IFirmwareUpdate.h
- * @brief Firmware update service interface (Supervisor profile).
+ * @brief Firmware update service interface.
  */
 
 #include <stddef.h>
 #include <stdint.h>
 
-class Print;
-
 enum class FirmwareUpdateTarget : uint8_t {
-    FlowIO = 1,
     Nextion = 2,
-    Supervisor = 3,
+    Waveshare = 3,
     Spiffs = 4
+};
+
+enum class FirmwareManifestCheckState : uint8_t {
+    Idle = 0,
+    Queued,
+    Downloading,
+    Ready,
+    Error
+};
+
+struct FirmwareManifestCheckSnapshot {
+    uint32_t requestId = 0;
+    FirmwareManifestCheckState state = FirmwareManifestCheckState::Idle;
+    uint32_t updatedAtMs = 0;
+    size_t payloadLen = 0;
+    char manifestUrl[192] = {0};
+    char message[120] = {0};
 };
 
 struct FirmwareUpdateService {
@@ -21,8 +35,13 @@ struct FirmwareUpdateService {
     bool (*statusJson)(void* ctx, char* out, size_t outLen);
     bool (*isBusy)(void* ctx);
     bool (*configJson)(void* ctx, char* out, size_t outLen);
-    bool (*checkManifestJsonStream)(void* ctx, Print& out, char* errOut, size_t errOutLen);
-    bool (*manifestUrl)(void* ctx, char* out, size_t outLen, char* errOut, size_t errOutLen);
+    bool (*startManifestCheck)(void* ctx, uint32_t* requestIdOut, char* errOut, size_t errOutLen);
+    bool (*manifestCheckStatus)(void* ctx, uint32_t requestId, FirmwareManifestCheckSnapshot* out);
+    bool (*copyManifestResult)(void* ctx,
+                               uint32_t requestId,
+                               char* out,
+                               size_t outLen,
+                               size_t* copiedLenOut);
     bool (*setConfig)(void* ctx,
                       const char* updateHost,
                       const char* updatePath,

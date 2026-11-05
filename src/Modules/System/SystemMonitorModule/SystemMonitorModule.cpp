@@ -50,9 +50,9 @@ enum class MemoryPressureState : uint8_t {
 
 MemoryPressureState deriveMemoryPressureState_(const SystemStatsSnapshot& snap)
 {
-    const uint32_t freeBytes = snap.heap.freeBytes;
-    const uint32_t largestBytes = snap.heap.largestFreeBlock;
-    const uint8_t frag = snap.heap.fragPercent;
+    const uint32_t freeBytes = snap.heap.internalFreeBytes;
+    const uint32_t largestBytes = snap.heap.internalLargestFreeBlock;
+    const uint8_t frag = snap.heap.internalFragPercent;
 
     // Keep "shedding" below 20KB free heap, then tighten higher states to
     // reduce warning churn while preserving severe-state protection.
@@ -61,6 +61,39 @@ MemoryPressureState deriveMemoryPressureState_(const SystemStatsSnapshot& snap)
     if (freeBytes < 20000U && largestBytes < 10000U && frag > 35U) return MemoryPressureState::Shedding;
     if (freeBytes < 24000U && largestBytes < 14000U && frag > 28U) return MemoryPressureState::Constrained;
     return MemoryPressureState::Normal;
+}
+
+MemoryPressureState applyMemoryPressureHysteresis_(const SystemStatsSnapshot& snap,
+                                                   MemoryPressureState previous)
+{
+    const MemoryPressureState derived = deriveMemoryPressureState_(snap);
+    if ((uint8_t)derived >= (uint8_t)previous) return derived;
+
+    const uint32_t freeBytes = snap.heap.internalFreeBytes;
+    const uint32_t largestBytes = snap.heap.internalLargestFreeBlock;
+    const uint8_t frag = snap.heap.internalFragPercent;
+
+    // Escalation uses the strict thresholds above immediately. Recovery needs
+    // extra margin so short-lived heap allocations cannot make adjacent states
+    // alternate and emit a warning on every sysmon pass.
+    switch (previous) {
+    case MemoryPressureState::Panic:
+        if (freeBytes < 14000U && largestBytes < 6000U && frag > 50U) return previous;
+        break;
+    case MemoryPressureState::Critical:
+        if (freeBytes < 18000U && largestBytes < 8500U && frag > 40U) return previous;
+        break;
+    case MemoryPressureState::Shedding:
+        if (freeBytes < 24000U && largestBytes < 12000U && frag > 30U) return previous;
+        break;
+    case MemoryPressureState::Constrained:
+        if (freeBytes < 28000U && largestBytes < 16000U && frag > 22U) return previous;
+        break;
+    case MemoryPressureState::Normal:
+    default:
+        break;
+    }
+    return derived;
 }
 
 const char* memoryPressureStateStr_(MemoryPressureState st)
@@ -150,7 +183,46 @@ void SystemMonitorModule::init(ConfigStore& cfg, ServiceRegistry& services) {
     logHub  = services.get<LogHubService>(ServiceId::LogHub);
     haSvc_  = services.get<HAService>(ServiceId::Ha);
 
+#if defined(configUSE_TRACE_FACILITY) && (configUSE_TRACE_FACILITY == 1) && \
+    !defined(FLOW_PROFILE_MICRONOVA)
+#if defined(FLOW_PROFILE_WAVESHARE)
+    constexpr uint32_t taskSnapshotCaps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+    constexpr const char* taskSnapshotMemory = "PSRAM";
+#else
+    constexpr uint32_t taskSnapshotCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    constexpr const char* taskSnapshotMemory = "internal";
+#endif
+    taskStatusSnapshot_ = static_cast<TaskStatus_t*>(
+        heap_caps_calloc(kTaskStatusSnapshotCapacity, sizeof(TaskStatus_t), taskSnapshotCaps)
+    );
+    if (taskStatusSnapshot_) {
+        LOGI("Task snapshot allocated capacity=%u bytes=%lu memory=%s",
+             (unsigned)kTaskStatusSnapshotCapacity,
+             (unsigned long)(kTaskStatusSnapshotCapacity * sizeof(TaskStatus_t)),
+             taskSnapshotMemory);
+    } else {
+        LOGW("Task snapshot unavailable capacity=%u bytes=%lu memory=%s",
+             (unsigned)kTaskStatusSnapshotCapacity,
+             (unsigned long)(kTaskStatusSnapshotCapacity * sizeof(TaskStatus_t)),
+             taskSnapshotMemory);
+    }
+#endif
+
 #if FLOW_WEB_HEAP_FORENSICS
+#if defined(FLOW_PROFILE_WAVESHARE)
+    heapWatchSamples_ = static_cast<HeapWatchSample*>(
+        heap_caps_calloc(kHeapWatchSampleCount,
+                         sizeof(HeapWatchSample),
+                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+    );
+    if (heapWatchSamples_) {
+        LOGI("HeapWatch history allocated in PSRAM bytes=%lu",
+             (unsigned long)(kHeapWatchSampleCount * sizeof(HeapWatchSample)));
+    } else {
+        LOGW("HeapWatch history unavailable: PSRAM allocation failed bytes=%lu",
+             (unsigned long)(kHeapWatchSampleCount * sizeof(HeapWatchSample)));
+    }
+#endif
     const esp_err_t allocHookErr = heap_caps_register_failed_alloc_callback(&onHeapAllocFailed_);
     if (allocHookErr != ESP_OK) {
         LOGW("Heap alloc-fail hook registration failed err=%d", (int)allocHookErr);
@@ -256,21 +328,27 @@ void SystemMonitorModule::logHeapStats() {
     SystemStats::collect(snap);
 
     if (!logHub || !logHub->getStats) {
-        LOGD("Heap free=%lu min_free=%lu largest=%lu frag=%u%%",
+        LOGD("Heap total8 free=%lu min=%lu largest=%lu internal free=%lu min=%lu largest=%lu internal_frag=%u%%",
              (unsigned long)snap.heap.freeBytes,
              (unsigned long)snap.heap.minFreeBytes,
              (unsigned long)snap.heap.largestFreeBlock,
-             (unsigned int)snap.heap.fragPercent);
+             (unsigned long)snap.heap.internalFreeBytes,
+             (unsigned long)snap.heap.internalMinFreeBytes,
+             (unsigned long)snap.heap.internalLargestFreeBlock,
+             (unsigned int)snap.heap.internalFragPercent);
         return;
     }
 
     LogHubStatsSnapshot stats{};
     logHub->getStats(logHub->ctx, &stats);
-    LOGD("Heap free=%lu min_free=%lu largest=%lu frag=%u%% LogQ=%u/%u drop=%lu trunc=%lu",
+    LOGD("Heap total8 free=%lu min=%lu largest=%lu internal free=%lu min=%lu largest=%lu internal_frag=%u%% LogQ=%u/%u drop=%lu trunc=%lu",
          (unsigned long)snap.heap.freeBytes,
          (unsigned long)snap.heap.minFreeBytes,
          (unsigned long)snap.heap.largestFreeBlock,
-         (unsigned int)snap.heap.fragPercent,
+         (unsigned long)snap.heap.internalFreeBytes,
+         (unsigned long)snap.heap.internalMinFreeBytes,
+         (unsigned long)snap.heap.internalLargestFreeBlock,
+         (unsigned int)snap.heap.internalFragPercent,
          (unsigned)stats.peakQueued,
          (unsigned)stats.queueLen,
          (unsigned long)stats.droppedCount,
@@ -320,21 +398,25 @@ void SystemMonitorModule::logTaskStacks() {
 
 #if defined(configUSE_TRACE_FACILITY) && (configUSE_TRACE_FACILITY == 1)
     UBaseType_t liveTaskCount = uxTaskGetNumberOfTasks();
-    TaskStatus_t* liveTasks = nullptr;
     if (liveTaskCount == 0U) {
         LOGD("Stack none");
         return;
     }
-    if (liveTaskCount > 0U) {
-        liveTasks = static_cast<TaskStatus_t*>(pvPortMalloc(liveTaskCount * sizeof(TaskStatus_t)));
-    }
+    TaskStatus_t* const liveTasks = taskStatusSnapshot_;
     if (!liveTasks) {
-        LOGW("Stack snapshot unavailable (tasks=%u)", (unsigned)liveTaskCount);
+        LOGW("Stack snapshot unavailable (persistent buffer not allocated tasks=%u)",
+             (unsigned)liveTaskCount);
         return;
     }
-    liveTaskCount = uxTaskGetSystemState(liveTasks, liveTaskCount, nullptr);
+    if (liveTaskCount > kTaskStatusSnapshotCapacity) {
+        LOGW("Stack snapshot capacity exceeded tasks=%u capacity=%u",
+             (unsigned)liveTaskCount,
+             (unsigned)kTaskStatusSnapshotCapacity);
+        return;
+    }
+    liveTaskCount =
+        uxTaskGetSystemState(liveTasks, (UBaseType_t)kTaskStatusSnapshotCapacity, nullptr);
     if (liveTaskCount == 0U) {
-        vPortFree(liveTasks);
         LOGD("Stack none");
         return;
     }
@@ -363,7 +445,7 @@ void SystemMonitorModule::logTaskStacks() {
         const ModuleTaskSpec* specs = task->module->taskSpecs();
         const uint8_t taskCount = task->module->taskCount();
         if (!specs || task->taskIndex >= taskCount) continue;
-        const ModuleTaskSpec& spec = specs[task->taskIndex];
+        const ModuleTaskSpec spec = specs[task->taskIndex];
 
         UBaseType_t hw = 0;
 #if defined(configUSE_TRACE_FACILITY) && (configUSE_TRACE_FACILITY == 1)
@@ -394,15 +476,24 @@ void SystemMonitorModule::logTaskStacks() {
         continue;
 #endif
         hasTask = true;
-        const bool isLow = (hw < 300);
+        const bool isMqttWorker = task->module->moduleId() == ModuleId::Mqtt;
+        const bool isLow = isMqttWorker ? (hw < 1536U) : (hw < 300U);
 
         char entry[80];
-        const int ew = snprintf(entry, sizeof(entry), "%s/%s@c%ld=%u%s",
-                                toString(task->module->moduleId()),
-                                spec.name ? spec.name : "?",
-                                (long)spec.coreId,
-                                (unsigned)hw,
-                                isLow ? "!" : "");
+        const int ew = isMqttWorker
+            ? snprintf(entry, sizeof(entry), "%s/%s@c%ld size=%luB free_min=%uB%s",
+                       toString(task->module->moduleId()),
+                       spec.name ? spec.name : "?",
+                       (long)spec.coreId,
+                       (unsigned long)spec.stackSize,
+                       (unsigned)hw,
+                       isLow ? "!" : "")
+            : snprintf(entry, sizeof(entry), "%s/%s@c%ld=%u%s",
+                       toString(task->module->moduleId()),
+                       spec.name ? spec.name : "?",
+                       (long)spec.coreId,
+                       (unsigned)hw,
+                       isLow ? "!" : "");
         if (ew < 0) continue;
 
         const size_t entryLen = (size_t)ew;
@@ -445,24 +536,47 @@ void SystemMonitorModule::logTaskStacks() {
         if (removedEndedTasks > 0U) {
             LOGD("Stack pruned ended tasks=%u", (unsigned)removedEndedTasks);
         }
-#if defined(configUSE_TRACE_FACILITY) && (configUSE_TRACE_FACILITY == 1)
-        vPortFree(liveTasks);
-#endif
         return;
     }
 
     if (tasksOnLine > 0) {
         LOGD("Stack %s", line);
     }
+#if defined(configUSE_TRACE_FACILITY) && (configUSE_TRACE_FACILITY == 1)
+    for (UBaseType_t t = 0; t < liveTaskCount; ++t) {
+        const char* name = liveTasks[t].pcTaskName;
+        if (!name) continue;
+        if (strcmp(name, "async_tcp") != 0 &&
+            strcmp(name, "mqtt_task") != 0 &&
+            strcmp(name, "esp_mqtt_task") != 0) {
+            continue;
+        }
+        const UBaseType_t hw = (UBaseType_t)liveTasks[t].usStackHighWaterMark;
+        if (strcmp(name, "async_tcp") == 0) {
+            const uint32_t configuredBytes = (uint32_t)CONFIG_ASYNC_TCP_STACK_SIZE;
+            const uint32_t minFreeBytes = (uint32_t)hw;
+            const uint32_t maxUsedBytes =
+                (minFreeBytes < configuredBytes) ? (configuredBytes - minFreeBytes) : 0U;
+            LOGD("Stack external/%s size=%luB used_max=%luB free_min=%luB%s",
+                 name,
+                 (unsigned long)configuredBytes,
+                 (unsigned long)maxUsedBytes,
+                 (unsigned long)minFreeBytes,
+                 (minFreeBytes < 2048U) ? "!" : "");
+        } else {
+            LOGD("Stack external/%s free_min=%uB%s",
+                 name,
+                 (unsigned)hw,
+                 (hw < 1024U) ? "!" : "");
+        }
+    }
+#endif
     if (skippedInvalidHandles > 0U) {
         LOGW("Stack skipped invalid handles=%u", (unsigned)skippedInvalidHandles);
     }
     if (removedEndedTasks > 0U) {
         LOGD("Stack pruned ended tasks=%u", (unsigned)removedEndedTasks);
     }
-#if defined(configUSE_TRACE_FACILITY) && (configUSE_TRACE_FACILITY == 1)
-    vPortFree(liveTasks);
-#endif
 }
 
 void SystemMonitorModule::logTrackedBuffers()
@@ -531,11 +645,15 @@ void SystemMonitorModule::logTrackedBuffers()
 
 void SystemMonitorModule::appendHeapWatchSample_(const SystemStatsSnapshot& snap)
 {
+    if (!heapWatchSamples_) return;
     HeapWatchSample& sample = heapWatchSamples_[heapWatchWriteIndex_];
     sample.uptimeMs = snap.uptimeMs;
     sample.freeBytes = snap.heap.freeBytes;
     sample.minFreeBytes = snap.heap.minFreeBytes;
     sample.largestFreeBlock = snap.heap.largestFreeBlock;
+    sample.internalFreeBytes = snap.heap.internalFreeBytes;
+    sample.internalMinFreeBytes = snap.heap.internalMinFreeBytes;
+    sample.internalLargestFreeBlock = snap.heap.internalLargestFreeBlock;
 
     heapWatchWriteIndex_ = (heapWatchWriteIndex_ + 1U) % kHeapWatchSampleCount;
     if (heapWatchCount_ < kHeapWatchSampleCount) {
@@ -548,9 +666,9 @@ void SystemMonitorModule::armHeapWatchDump_(const SystemStatsSnapshot& snap, con
     heapWatchTripActive_ = true;
     heapWatchDumpPending_ = true;
     heapWatchTriggerMs_ = snap.uptimeMs;
-    heapWatchTriggerFreeBytes_ = snap.heap.freeBytes;
-    heapWatchTriggerMinFreeBytes_ = snap.heap.minFreeBytes;
-    heapWatchTriggerLargestFreeBlock_ = snap.heap.largestFreeBlock;
+    heapWatchTriggerFreeBytes_ = snap.heap.internalFreeBytes;
+    heapWatchTriggerMinFreeBytes_ = snap.heap.internalMinFreeBytes;
+    heapWatchTriggerLargestFreeBlock_ = snap.heap.internalLargestFreeBlock;
     heapWatchFrozenWriteIndex_ = heapWatchWriteIndex_;
     heapWatchFrozenCount_ = heapWatchCount_;
     snprintf(heapWatchTriggerReason_, sizeof(heapWatchTriggerReason_), "%s", reason ? reason : "-");
@@ -566,7 +684,7 @@ void SystemMonitorModule::armHeapWatchDump_(const SystemStatsSnapshot& snap, con
 
 void SystemMonitorModule::dumpHeapWatchWindow_() const
 {
-    if (heapWatchFrozenCount_ == 0U) {
+    if (!heapWatchSamples_ || heapWatchFrozenCount_ == 0U) {
         LOGW("HeapWatch window unavailable");
         return;
     }
@@ -580,11 +698,14 @@ void SystemMonitorModule::dumpHeapWatchWindow_() const
         const size_t idx = (startIndex + i) % kHeapWatchSampleCount;
         const HeapWatchSample& sample = heapWatchSamples_[idx];
         const long dtMs = (long)sample.uptimeMs - (long)heapWatchTriggerMs_;
-        LOGW("HeapWatch win dt=%ld free=%lu min=%lu largest=%lu",
+        LOGW("HeapWatch win dt=%ld total_free=%lu total_min=%lu total_largest=%lu internal_free=%lu internal_min=%lu internal_largest=%lu",
              dtMs,
              (unsigned long)sample.freeBytes,
              (unsigned long)sample.minFreeBytes,
-             (unsigned long)sample.largestFreeBlock);
+             (unsigned long)sample.largestFreeBlock,
+             (unsigned long)sample.internalFreeBytes,
+             (unsigned long)sample.internalMinFreeBytes,
+             (unsigned long)sample.internalLargestFreeBlock);
     }
 }
 
@@ -672,12 +793,13 @@ void SystemMonitorModule::pollHeapWatch_(uint32_t now)
     appendHeapWatchSample_(snap);
 
     if (heapWatchLastSeenMinFree_ == UINT32_MAX) {
-        heapWatchLastSeenMinFree_ = snap.heap.minFreeBytes;
+        heapWatchLastSeenMinFree_ = snap.heap.internalMinFreeBytes;
     }
 
-    const bool currentFreeTrip = snap.heap.freeBytes <= kHeapWatchTripFreeBytes;
+    const bool currentFreeTrip = snap.heap.internalFreeBytes <= kHeapWatchTripFreeBytes;
     const bool minLowWaterTrip =
-        snap.heap.minFreeBytes <= kHeapWatchTripFreeBytes && snap.heap.minFreeBytes < heapWatchLastSeenMinFree_;
+        snap.heap.internalMinFreeBytes <= kHeapWatchTripFreeBytes &&
+        snap.heap.internalMinFreeBytes < heapWatchLastSeenMinFree_;
 
     if (!heapWatchTripActive_ && !heapWatchDumpPending_) {
         if (currentFreeTrip) {
@@ -687,23 +809,23 @@ void SystemMonitorModule::pollHeapWatch_(uint32_t now)
         }
     }
 
-    if (snap.heap.minFreeBytes < heapWatchLastSeenMinFree_) {
-        heapWatchLastSeenMinFree_ = snap.heap.minFreeBytes;
+    if (snap.heap.internalMinFreeBytes < heapWatchLastSeenMinFree_) {
+        heapWatchLastSeenMinFree_ = snap.heap.internalMinFreeBytes;
     }
 
     if (heapWatchDumpPending_) {
-        const bool recovered = snap.heap.freeBytes >= kHeapWatchRecoverFreeBytes;
+        const bool recovered = snap.heap.internalFreeBytes >= kHeapWatchRecoverFreeBytes;
         const bool timeout = (uint32_t)(snap.uptimeMs - heapWatchTriggerMs_) >= kHeapWatchDumpDelayMs;
         if (recovered || timeout) {
             dumpHeapWatch_();
         }
     }
 
-    if (heapWatchTripActive_ && snap.heap.freeBytes >= kHeapWatchRecoverFreeBytes) {
-        LOGI("HeapWatch recovered free=%lu min=%lu largest=%lu",
-             (unsigned long)snap.heap.freeBytes,
-             (unsigned long)snap.heap.minFreeBytes,
-             (unsigned long)snap.heap.largestFreeBlock);
+    if (heapWatchTripActive_ && snap.heap.internalFreeBytes >= kHeapWatchRecoverFreeBytes) {
+        LOGI("HeapWatch recovered internal_free=%lu internal_min=%lu internal_largest=%lu",
+             (unsigned long)snap.heap.internalFreeBytes,
+             (unsigned long)snap.heap.internalMinFreeBytes,
+             (unsigned long)snap.heap.internalLargestFreeBlock);
         heapWatchTripActive_ = false;
     }
 }
@@ -719,13 +841,16 @@ void SystemMonitorModule::logPendingHeapAllocFailure_()
 
     SystemStatsSnapshot snap{};
     SystemStats::collect(snap);
-    LOGW("Heap alloc failed size=%lu caps=0x%08lx func=%s free=%lu min=%lu largest=%lu",
+    LOGW("Heap alloc failed size=%lu caps=0x%08lx func=%s total_free=%lu total_min=%lu total_largest=%lu internal_free=%lu internal_min=%lu internal_largest=%lu",
          (unsigned long)size,
          (unsigned long)caps,
          functionName ? functionName : "-",
          (unsigned long)snap.heap.freeBytes,
          (unsigned long)snap.heap.minFreeBytes,
-         (unsigned long)snap.heap.largestFreeBlock);
+         (unsigned long)snap.heap.largestFreeBlock,
+         (unsigned long)snap.heap.internalFreeBytes,
+         (unsigned long)snap.heap.internalMinFreeBytes,
+         (unsigned long)snap.heap.internalLargestFreeBlock);
 }
 
 void SystemMonitorModule::pollMemoryPressureReboot_(uint32_t now)
@@ -749,7 +874,8 @@ void SystemMonitorModule::pollMemoryPressureReboot_(uint32_t now)
 
     SystemStatsSnapshot snap{};
     SystemStats::collect(snap);
-    const MemoryPressureState state = deriveMemoryPressureState_(snap);
+    const MemoryPressureState state = applyMemoryPressureHysteresis_(
+        snap, (MemoryPressureState)memoryPressureState_);
     const uint8_t stateRaw = (uint8_t)state;
 
     if (stateRaw != memoryPressureState_) {
@@ -764,11 +890,11 @@ void SystemMonitorModule::pollMemoryPressureReboot_(uint32_t now)
         memoryPressureStateSinceMs_ = now;
         memoryPressureRebootIssued_ = false;
         if (!suppressTransitionLog) {
-            LOGW("Memory pressure -> %s free=%lu largest=%lu frag=%u%%%s",
+            LOGW("Memory pressure -> %s internal_free=%lu internal_largest=%lu internal_frag=%u%%%s",
                  memoryPressureStateStr_(state),
-                 (unsigned long)snap.heap.freeBytes,
-                 (unsigned long)snap.heap.largestFreeBlock,
-                 (unsigned int)snap.heap.fragPercent,
+                 (unsigned long)snap.heap.internalFreeBytes,
+                 (unsigned long)snap.heap.internalLargestFreeBlock,
+                 (unsigned int)snap.heap.internalFragPercent,
                  firmwareUpdateBusy ? " fwupdate=busy" : "");
         }
         return;
@@ -789,12 +915,12 @@ void SystemMonitorModule::pollMemoryPressureReboot_(uint32_t now)
     if (!shouldReboot) return;
 
     memoryPressureRebootIssued_ = true;
-    LOGE("Memory pressure persisted (%s %lums), reboot requested free=%lu largest=%lu frag=%u%%",
+    LOGE("Memory pressure persisted (%s %lums), reboot requested internal_free=%lu internal_largest=%lu internal_frag=%u%%",
          memoryPressureStateStr_(state),
          (unsigned long)heldMs,
-         (unsigned long)snap.heap.freeBytes,
-         (unsigned long)snap.heap.largestFreeBlock,
-         (unsigned int)snap.heap.fragPercent);
+         (unsigned long)snap.heap.internalFreeBytes,
+         (unsigned long)snap.heap.internalLargestFreeBlock,
+         (unsigned int)snap.heap.internalFragPercent);
     if (!cmdSvc_ && services_) {
         cmdSvc_ = services_->get<CommandService>(ServiceId::Command);
     }
@@ -972,14 +1098,22 @@ void SystemMonitorModule::buildHealthJson(char* out, size_t outLen) {
                 "\"free\":%lu,"
                 "\"min_free\":%lu,"
                 "\"largest\":%lu,"
-                "\"frag\":%u"
+                "\"frag\":%u,"
+                "\"internal_free\":%lu,"
+                "\"internal_min_free\":%lu,"
+                "\"internal_largest\":%lu,"
+                "\"internal_frag\":%u"
             "}"
         "}",
         (unsigned long long)snap.uptimeMs64,
         (unsigned long)snap.heap.freeBytes,
         (unsigned long)snap.heap.minFreeBytes,
         (unsigned long)snap.heap.largestFreeBlock,
-        (unsigned int)snap.heap.fragPercent
+        (unsigned int)snap.heap.fragPercent,
+        (unsigned long)snap.heap.internalFreeBytes,
+        (unsigned long)snap.heap.internalMinFreeBytes,
+        (unsigned long)snap.heap.internalLargestFreeBlock,
+        (unsigned int)snap.heap.internalFragPercent
     );
 }
 

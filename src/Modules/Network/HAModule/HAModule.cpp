@@ -35,29 +35,10 @@
 
 namespace {
 static constexpr uint8_t kHaCfgBranch = 1;
-struct HaDiscoveryCleanupEntry {
-    const char* component;
-    const char* objectSuffix;
-};
-static constexpr HaDiscoveryCleanupEntry kLegacyDiscoveryCleanupEntries[] = {
-    {"sensor", "sys_upt_s"},
-    {"button", "alm_ack_all"},
-    {"button", "alm_ack_slot_0"},
-    {"button", "alm_ack_slot_1"},
-    {"button", "alm_ack_slot_2"},
-    {"button", "alm_ack_slot_3"},
-    {"button", "alm_ack_slot_4"},
-    {"button", "alm_ack_slot_5"},
-    {"button", "alm_ack_slot_6"},
-    {"button", "alm_ack_slot_7"},
-};
 static constexpr MqttConfigRouteProducer::Route kHaCfgRoutes[] = {
     {1, {(uint8_t)ConfigModuleId::Ha, kHaCfgBranch}, "ha", "ha", (uint8_t)MqttPublishPriority::Normal, nullptr},
 };
 static constexpr const char* kHaDeviceConfigUrl = "http://flowio.local";
-static_assert(Limits::Ha::Capacity::MaxDiscoveryCleanups <=
-                  (uint8_t)(sizeof(kLegacyDiscoveryCleanupEntries) / sizeof(kLegacyDiscoveryCleanupEntries[0])),
-              "Board HA cleanup capacity exceeds built-in legacy cleanup entries");
 }
 
 static void buildAvailabilityField(const MqttService* mqttSvc_,
@@ -182,6 +163,12 @@ bool HAModule::addNumberSvc_(const HANumberEntry* entry)
     return addNumberEntry(*entry);
 }
 
+bool HAModule::addSelectSvc_(const HASelectEntry* entry)
+{
+    if (!entry) return false;
+    return addSelectEntry(*entry);
+}
+
 bool HAModule::addButtonSvc_(const HAButtonEntry* entry)
 {
     if (!entry) return false;
@@ -228,16 +215,17 @@ bool HAModule::ensureStorage_()
 {
 #if FLOW_HA_ONESHOT_DISCOVERY
     if (oneShotResourcesReleased_) return false;
-    if (sensors_ && binarySensors_ && switches_ && numbers_ && buttons_ && pendingBits_) return true;
+    if (sensors_ && binarySensors_ && switches_ && numbers_ && buttons_ && selects_ && pendingBits_) return true;
 
     if (!sensors_) sensors_ = new (std::nothrow) HASensorEntry[MAX_HA_SENSORS]{};
     if (!binarySensors_) binarySensors_ = new (std::nothrow) HABinarySensorEntry[MAX_HA_BINARY_SENSORS]{};
     if (!switches_) switches_ = new (std::nothrow) HASwitchEntry[MAX_HA_SWITCHES]{};
     if (!numbers_) numbers_ = new (std::nothrow) HANumberEntry[MAX_HA_NUMBERS]{};
     if (!buttons_) buttons_ = new (std::nothrow) HAButtonEntry[MAX_HA_BUTTONS]{};
+    if (!selects_) selects_ = new (std::nothrow) HASelectEntry[MAX_HA_SELECTS]{};
     if (!pendingBits_) pendingBits_ = new (std::nothrow) uint32_t[HA_PENDING_WORDS]{};
 
-    if (sensors_ && binarySensors_ && switches_ && numbers_ && buttons_ && pendingBits_) {
+    if (sensors_ && binarySensors_ && switches_ && numbers_ && buttons_ && selects_ && pendingBits_) {
         HA_BOOT_TRACE_D("ha boot trace: oneshot storage ready table_cap=%u pending_bytes=%u",
                         (unsigned)entityTableCapacityBytes_(),
                         (unsigned)(sizeof(uint32_t) * HA_PENDING_WORDS));
@@ -257,7 +245,8 @@ size_t HAModule::entityTableUsedBytes_() const
            (size_t)binarySensorCount_ * sizeof(HABinarySensorEntry) +
            (size_t)switchCount_ * sizeof(HASwitchEntry) +
            (size_t)numberCount_ * sizeof(HANumberEntry) +
-           (size_t)buttonCount_ * sizeof(HAButtonEntry);
+           (size_t)buttonCount_ * sizeof(HAButtonEntry) +
+           (size_t)selectCount_ * sizeof(HASelectEntry);
 }
 
 size_t HAModule::entityTableCapacityBytes_() const
@@ -266,7 +255,8 @@ size_t HAModule::entityTableCapacityBytes_() const
            (size_t)MAX_HA_BINARY_SENSORS * sizeof(HABinarySensorEntry) +
            (size_t)MAX_HA_SWITCHES * sizeof(HASwitchEntry) +
            (size_t)MAX_HA_NUMBERS * sizeof(HANumberEntry) +
-           (size_t)MAX_HA_BUTTONS * sizeof(HAButtonEntry);
+           (size_t)MAX_HA_BUTTONS * sizeof(HAButtonEntry) +
+           (size_t)MAX_HA_SELECTS * sizeof(HASelectEntry);
 }
 
 void HAModule::releaseOneShotResources_()
@@ -281,18 +271,21 @@ void HAModule::releaseOneShotResources_()
     delete[] switches_;
     delete[] numbers_;
     delete[] buttons_;
+    delete[] selects_;
     delete[] pendingBits_;
     sensors_ = nullptr;
     binarySensors_ = nullptr;
     switches_ = nullptr;
     numbers_ = nullptr;
     buttons_ = nullptr;
+    selects_ = nullptr;
     pendingBits_ = nullptr;
     sensorCount_ = 0;
     binarySensorCount_ = 0;
     switchCount_ = 0;
     numberCount_ = 0;
     buttonCount_ = 0;
+    selectCount_ = 0;
     startupReady_ = false;
     published_ = true;
     oneShotCompleted_ = true;
@@ -447,6 +440,42 @@ bool HAModule::addButtonEntry(const HAButtonEntry& entry)
         return false;
     }
     buttons_[buttonCount_++] = entry;
+    BufferUsageTracker::note(TrackedBufferId::HaEntityTables,
+                             entityTableUsedBytes_(),
+                             entityTableCapacityBytes_(),
+                             entry.objectSuffix,
+                             nullptr);
+    requestAutoconfigRefresh();
+    return true;
+}
+
+bool HAModule::addSelectEntry(const HASelectEntry& entry)
+{
+    if (oneShotCompleted_ || !ensureStorage_()) return false;
+    if (!entry.ownerId || !entry.objectSuffix || !entry.name || !entry.stateTopicSuffix ||
+        !entry.valueTemplate || !entry.commandTopicSuffix || !entry.commandTemplate ||
+        !entry.optionsJson) {
+        return false;
+    }
+
+    for (uint8_t i = 0; i < selectCount_; ++i) {
+        if (strcmp(selects_[i].ownerId, entry.ownerId) == 0 &&
+            strcmp(selects_[i].objectSuffix, entry.objectSuffix) == 0) {
+            selects_[i] = entry;
+            requestAutoconfigRefresh();
+            return true;
+        }
+    }
+
+    if (selectCount_ >= MAX_HA_SELECTS) {
+        LOGW("HA select table full (%u/%u) reject=%s/%s",
+             (unsigned)selectCount_,
+             (unsigned)MAX_HA_SELECTS,
+             entry.ownerId ? entry.ownerId : "?",
+             entry.objectSuffix ? entry.objectSuffix : "?");
+        return false;
+    }
+    selects_[selectCount_++] = entry;
     BufferUsageTracker::note(TrackedBufferId::HaEntityTables,
                              entityTableUsedBytes_(),
                              entityTableCapacityBytes_(),
@@ -737,6 +766,66 @@ bool HAModule::publishNumber(const char* objectId, const char* name,
     return publishDiscovery("number", objectId, buildCtx);
 }
 
+bool HAModule::publishSelect(const char* objectId, const char* name,
+                             const char* stateTopic, const char* valueTemplate,
+                             const char* commandTopic, const char* commandTemplate,
+                             const char* optionsJson,
+                             const char* icon,
+                             const char* entityCategory,
+                             MqttBuildContext* outCtx)
+{
+    if (!outCtx) return false;
+    MqttBuildContext& buildCtx = *outCtx;
+    if (!objectId || !name || !stateTopic || !valueTemplate || !commandTopic ||
+        !commandTemplate || !optionsJson) {
+        return false;
+    }
+    char defaultEntityId[224] = {0};
+    if (!buildDefaultEntityId("select", objectId, defaultEntityId, sizeof(defaultEntityId))) return false;
+    char uniqueId[256] = {0};
+    if (!buildUniqueId(objectId, name, uniqueId, sizeof(uniqueId))) return false;
+    char availabilityField[384] = {0};
+    buildAvailabilityField(mqttSvc_, availabilityField, sizeof(availabilityField));
+    char entityCategoryField[48] = {0};
+    if (entityCategory && entityCategory[0] != '\0') {
+        snprintf(entityCategoryField, sizeof(entityCategoryField), ",\"ent_cat\":\"%s\"", entityCategory);
+    }
+
+    if (icon && icon[0] != '\0') {
+        if (!formatChecked(buildCtx.payload, buildCtx.payloadCapacity,
+                 "{\"name\":\"%s\",\"obj_id\":\"%s\",\"def_ent_id\":\"%s\",\"uniq_id\":\"%s\","
+                 "\"stat_t\":\"%s\",\"val_tpl\":\"%s\",\"cmd_t\":\"%s\",\"cmd_tpl\":\"%s\","
+                 "\"options\":%s,\"ic\":\"%s\"%s%s,"
+                 "\"o\":{\"name\":\"%s\"},"
+                 "\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
+                 "\"mf\":\"%s\",\"mdl\":\"%s\",\"sw\":\"%s\",\"cu\":\"%s\"}}",
+                 name, objectId, defaultEntityId, uniqueId,
+                 stateTopic, valueTemplate, commandTopic, commandTemplate,
+                 optionsJson, icon, entityCategoryField, availabilityField,
+                 originName_, deviceIdent_, deviceName_, cfgData_.vendor, cfgData_.model, FirmwareVersion::Full, kHaDeviceConfigUrl)) {
+            LOGW("HA select payload truncated object=%s", objectId);
+            return false;
+        }
+    } else {
+        if (!formatChecked(buildCtx.payload, buildCtx.payloadCapacity,
+                 "{\"name\":\"%s\",\"obj_id\":\"%s\",\"def_ent_id\":\"%s\",\"uniq_id\":\"%s\","
+                 "\"stat_t\":\"%s\",\"val_tpl\":\"%s\",\"cmd_t\":\"%s\",\"cmd_tpl\":\"%s\","
+                 "\"options\":%s%s%s,"
+                 "\"o\":{\"name\":\"%s\"},"
+                 "\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
+                 "\"mf\":\"%s\",\"mdl\":\"%s\",\"sw\":\"%s\",\"cu\":\"%s\"}}",
+                 name, objectId, defaultEntityId, uniqueId,
+                 stateTopic, valueTemplate, commandTopic, commandTemplate,
+                 optionsJson, entityCategoryField, availabilityField,
+                 originName_, deviceIdent_, deviceName_, cfgData_.vendor, cfgData_.model, FirmwareVersion::Full, kHaDeviceConfigUrl)) {
+            LOGW("HA select payload truncated object=%s", objectId);
+            return false;
+        }
+    }
+
+    return publishDiscovery("select", objectId, buildCtx);
+}
+
 bool HAModule::publishButton(const char* objectId, const char* name,
                              const char* commandTopic, const char* payloadPress,
                              const char* entityCategory, const char* icon,
@@ -894,12 +983,13 @@ uint16_t HAModule::entityCount_() const
            (uint16_t)binarySensorCount_ +
            (uint16_t)switchCount_ +
            (uint16_t)numberCount_ +
+           (uint16_t)selectCount_ +
            (uint16_t)buttonCount_;
 }
 
 uint16_t HAModule::messageCount_() const
 {
-    return (uint16_t)(entityCount_() + MAX_HA_DISCOVERY_CLEANUPS);
+    return entityCount_();
 }
 
 bool HAModule::isPending_(uint16_t messageId) const
@@ -930,10 +1020,9 @@ void HAModule::markAllPending_()
     for (uint16_t i = 0; i < count; ++i) {
         setPending_(i, true);
     }
-    HA_BOOT_TRACE_D("ha boot trace: mark all pending messages=%u entities=%u cleanups=%u",
+    HA_BOOT_TRACE_D("ha boot trace: mark all pending messages=%u entities=%u",
                     (unsigned)count,
-                    (unsigned)entityCount_(),
-                    (unsigned)MAX_HA_DISCOVERY_CLEANUPS);
+                    (unsigned)entityCount_());
 }
 
 bool HAModule::anyPending_() const
@@ -949,7 +1038,7 @@ bool HAModule::enqueuePending_(MqttPublishPriority prio)
 {
     if (oneShotCompleted_) return false;
     if (!mqttSvc_ || !mqttSvc_->enqueue) return false;
-    if (!startupReady_) return false;
+    if (!discoveryReady_()) return false;
 
     const uint16_t count = messageCount_();
     constexpr uint8_t kFlags = (uint8_t)MqttEnqueueFlags::SilentRejectLog;
@@ -965,6 +1054,14 @@ bool HAModule::enqueuePending_(MqttPublishPriority prio)
     }
     HA_BOOT_TRACE_D("ha boot trace: enqueue skipped (no pending)");
     return false;
+}
+
+bool HAModule::discoveryReady_() const
+{
+    if (!startupReady_) return false;
+    if (!dsSvc_ || !dsSvc_->store) return false;
+    const DataStore& ds = *dsSvc_->store;
+    return networkReady(ds) && mqttReady(ds);
 }
 
 MqttBuildResult HAModule::producerBuildStatic_(void* ctx, uint16_t messageId, MqttBuildContext& buildCtx)
@@ -987,7 +1084,7 @@ void HAModule::producerDroppedStatic_(void* ctx, uint16_t messageId)
 
 bool HAModule::buildEntityMessage_(uint16_t messageId, MqttBuildContext& buildCtx)
 {
-    if (!sensors_ || !binarySensors_ || !switches_ || !numbers_ || !buttons_) return false;
+    if (!sensors_ || !binarySensors_ || !switches_ || !numbers_ || !buttons_ || !selects_) return false;
     bool ok = false;
     uint16_t cursor = 0;
 
@@ -1030,11 +1127,23 @@ bool HAModule::buildEntityMessage_(uint16_t messageId, MqttBuildContext& buildCt
                     }
                 } else {
                     cursor = (uint16_t)(cursor + numberCount_);
-                    if (messageId < (uint16_t)(cursor + buttonCount_)) {
-                        const HAButtonEntry& e = buttons_[messageId - cursor];
+                    if (messageId < (uint16_t)(cursor + selectCount_)) {
+                        const HASelectEntry& e = selects_[messageId - cursor];
                         if (buildObjectId(e.objectSuffix, objectIdBuf_, sizeof(objectIdBuf_))) {
+                            mqttSvc_->formatTopic(mqttSvc_->ctx, e.stateTopicSuffix, stateTopicBuf_, sizeof(stateTopicBuf_));
                             mqttSvc_->formatTopic(mqttSvc_->ctx, e.commandTopicSuffix, commandTopicBuf_, sizeof(commandTopicBuf_));
-                            ok = publishButton(objectIdBuf_, e.name, commandTopicBuf_, e.payloadPress, e.entityCategory, e.icon, &buildCtx);
+                            ok = publishSelect(objectIdBuf_, e.name, stateTopicBuf_, e.valueTemplate,
+                                               commandTopicBuf_, e.commandTemplate, e.optionsJson,
+                                               e.icon, e.entityCategory, &buildCtx);
+                        }
+                    } else {
+                        cursor = (uint16_t)(cursor + selectCount_);
+                        if (messageId < (uint16_t)(cursor + buttonCount_)) {
+                            const HAButtonEntry& e = buttons_[messageId - cursor];
+                            if (buildObjectId(e.objectSuffix, objectIdBuf_, sizeof(objectIdBuf_))) {
+                                mqttSvc_->formatTopic(mqttSvc_->ctx, e.commandTopicSuffix, commandTopicBuf_, sizeof(commandTopicBuf_));
+                                ok = publishButton(objectIdBuf_, e.name, commandTopicBuf_, e.payloadPress, e.entityCategory, e.icon, &buildCtx);
+                            }
                         }
                     }
                 }
@@ -1043,22 +1152,6 @@ bool HAModule::buildEntityMessage_(uint16_t messageId, MqttBuildContext& buildCt
     }
 
     if (!ok) return false;
-    return true;
-}
-
-bool HAModule::buildLegacyCleanupMessage_(uint16_t cleanupId, MqttBuildContext& buildCtx)
-{
-    if (cleanupId >= (uint16_t)(sizeof(kLegacyDiscoveryCleanupEntries) / sizeof(kLegacyDiscoveryCleanupEntries[0]))) {
-        return false;
-    }
-    const HaDiscoveryCleanupEntry& cleanup = kLegacyDiscoveryCleanupEntries[cleanupId];
-    if (!buildObjectId(cleanup.objectSuffix, objectIdBuf_, sizeof(objectIdBuf_))) return false;
-    if (!publishDiscovery(cleanup.component, objectIdBuf_, buildCtx)) return false;
-    if (buildCtx.payload && buildCtx.payloadCapacity > 0U) {
-        buildCtx.payload[0] = '\0';
-    }
-    buildCtx.payloadLen = 0U;
-    buildCtx.allowEmptyPayload = true;
     return true;
 }
 
@@ -1082,13 +1175,8 @@ MqttBuildResult HAModule::buildMessage_(uint16_t messageId, MqttBuildContext& bu
                     (unsigned)messageId,
                     (unsigned)entityCount,
                     (unsigned)messageCount_());
-    if (messageId < entityCount) {
-        if (!buildEntityMessage_(messageId, buildCtx)) return MqttBuildResult::PermanentError;
-        return MqttBuildResult::Ready;
-    }
-    if (!buildLegacyCleanupMessage_((uint16_t)(messageId - entityCount), buildCtx)) {
-        return MqttBuildResult::PermanentError;
-    }
+    if (messageId >= entityCount) return MqttBuildResult::NoLongerNeeded;
+    if (!buildEntityMessage_(messageId, buildCtx)) return MqttBuildResult::PermanentError;
     return MqttBuildResult::Ready;
 }
 
@@ -1103,6 +1191,9 @@ void HAModule::onMessagePublished_(uint16_t messageId)
     HA_BOOT_TRACE_D("ha boot trace: published message=%u done=%d",
                     (unsigned)messageId,
                     done ? 1 : 0);
+#if !FLOW_HA_ONESHOT_DISCOVERY
+    if (done) markBootLogCaptureCompleteAfterDiscovery_();
+#endif
 }
 
 void HAModule::onMessageDropped_(uint16_t messageId)
@@ -1112,9 +1203,20 @@ void HAModule::onMessageDropped_(uint16_t messageId)
     if (dsSvc_ && dsSvc_->store) {
         setHaAutoconfigPublished(*dsSvc_->store, done);
     }
+    published_ = done;
     HA_BOOT_TRACE_I("ha boot trace: dropped message=%u done=%d",
                     (unsigned)messageId,
                     done ? 1 : 0);
+#if !FLOW_HA_ONESHOT_DISCOVERY
+    if (done) markBootLogCaptureCompleteAfterDiscovery_();
+#endif
+}
+
+void HAModule::markBootLogCaptureCompleteAfterDiscovery_()
+{
+#if FLOW_ENABLE_BOOT_LOG_CAPTURE
+    markBootLogCaptureComplete();
+#endif
 }
 
 void HAModule::onEventStatic(const Event& e, void* user)
@@ -1135,7 +1237,7 @@ void HAModule::onEvent(const Event& e)
         HA_BOOT_TRACE_D("ha boot trace: event wifi_ready=%d mqtt_ready=%d",
                         networkReady(*dsSvc_->store) ? 1 : 0,
                         mqttReady(*dsSvc_->store) ? 1 : 0);
-        if (networkReady(*dsSvc_->store) && mqttReady(*dsSvc_->store)) {
+        if (discoveryReady_()) {
             (void)enqueuePending_(MqttPublishPriority::Low);
         }
         return;
@@ -1145,7 +1247,7 @@ void HAModule::onEvent(const Event& e)
         HA_BOOT_TRACE_D("ha boot trace: event mqtt_ready=%d wifi_ready=%d",
                         mqttReady(*dsSvc_->store) ? 1 : 0,
                         networkReady(*dsSvc_->store) ? 1 : 0);
-        if (networkReady(*dsSvc_->store) && mqttReady(*dsSvc_->store)) {
+        if (discoveryReady_()) {
             (void)enqueuePending_(MqttPublishPriority::Low);
         }
         return;
@@ -1169,6 +1271,7 @@ void HAModule::loop()
     if (published_ && !anyPending_()) {
         LOGI("HA one-shot discovery complete, releasing resources");
         HA_BOOT_TRACE_I("ha boot trace: loop detected completion, deleting task");
+        markBootLogCaptureCompleteAfterDiscovery_();
         releaseOneShotResources_();
         vTaskDelete(nullptr);
     }

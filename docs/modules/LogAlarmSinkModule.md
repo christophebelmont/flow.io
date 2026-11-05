@@ -69,6 +69,8 @@ Dans les deux cas:
 - `on_delay_ms = 0`
 - `off_delay_ms = 1000`
 - `repeat_ms = 10000`
+- `activityLogEnabled = false` afin que ces alarmes techniques ne polluent pas
+  le journal d'activité utilisateur
 
 ## Thread-safety
 

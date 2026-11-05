@@ -10,10 +10,14 @@ Type: module passif.
 
 - `loghub`
 - `cmd`
+- `config`
+- `eventbus`
 
 ## Services consommés
 
 - `cmd` pour enregistrer les handlers
+- `config` pour exposer la configuration système
+- `eventbus` pour réagir aux changements de configuration
 - `loghub` pour logging
 
 ## Services exposés
@@ -22,7 +26,9 @@ Aucun.
 
 ## Config / NVS
 
-Aucune variable `ConfigStore`.
+Module config: `system` (`moduleId = ConfigModuleId::System`, branche locale `1`)
+- `lang` (`sys_lang`)
+- `devicename` (`sys_dname`), défaut `flowio`, utilisé par l'interface web et les annonces DHCP/mDNS ; en DHCP, la valeur par défaut est annoncée sous la forme unique `FlowIO-XXXXXX`
 
 ## Commandes
 
@@ -38,4 +44,4 @@ Aucune variable `ConfigStore`.
 
 ## EventBus / DataStore / MQTT
 
-Aucun direct.
+- abonnement `ConfigChanged` pour normaliser la langue à chaud

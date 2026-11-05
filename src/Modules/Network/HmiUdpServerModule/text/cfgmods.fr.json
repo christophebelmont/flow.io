@@ -4,5 +4,7 @@
     "locale": "fr",
     "version": 1
   },
-  "docs": {}
+  "docs": {
+    "hmi/nextion_udp": {}
+  }
 }

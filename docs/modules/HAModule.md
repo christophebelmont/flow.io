@@ -37,16 +37,17 @@ Type: module actif (event-driven par notification task).
 
 ## Capacités statiques
 
-Capacités compile-time actuelles dans `src/Modules/Network/HAModule/HAModule.h`:
+Capacités compile-time du profil Waveshare, résolues depuis
+`src/Board/WaveshareBoard.h` via `Limits::Ha::Capacity`:
 
 | Type d'entité | Capacité |
 |---|---:|
-| sensors | 40 |
-| binary sensors | 6 |
-| switches | 14 |
-| numbers | 14 |
+| sensors | 48 |
+| binary sensors | 16 |
+| switches | 16 |
+| numbers | 30 |
 | buttons | 24 |
-| cleanups discovery | 9 |
+| selects | 6 |
 
 ## Config / NVS
 

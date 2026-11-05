@@ -6,6 +6,23 @@
 #define LOG_MODULE_ID ((LogModuleId)LogModuleIdValue::HmiUdpServerModule)
 #include "Core/ModuleLog.h"
 
+namespace {
+
+static bool versionMajorEquals_(const char* version, uint8_t expected)
+{
+    if (!version || version[0] < '0' || version[0] > '9') return false;
+    uint16_t major = 0U;
+    size_t pos = 0U;
+    while (version[pos] >= '0' && version[pos] <= '9') {
+        major = (uint16_t)(major * 10U + (uint16_t)(version[pos] - '0'));
+        if (major > 99U) return false;
+        ++pos;
+    }
+    return pos > 0U && version[pos] == '.' && major == expected;
+}
+
+} // namespace
+
 void HmiUdpServerModule::init(ConfigStore& cfg, ServiceRegistry& services)
 {
     cfg.registerVar(tokenVar_);
@@ -44,6 +61,11 @@ bool HmiUdpServerModule::consumeFullRefreshRequested()
     const bool requested = fullRefreshRequested_;
     fullRefreshRequested_ = false;
     return requested;
+}
+
+bool HmiUdpServerModule::isLegacyV2() const
+{
+    return displayVersionDetected_ && versionMajorEquals_(displayVersion_, 2U);
 }
 
 bool HmiUdpServerModule::sendHomeText(HmiHomeTextField field, const char* text)
@@ -415,7 +437,7 @@ void HmiUdpServerModule::markDisplayOffline_(const char* reason, bool clearPendi
     displayOnline_ = false;
     displaySleeping_ = false;
     displayVersionDetected_ = false;
-    displayVersion_ = 0U;
+    displayVersion_[0] = '\0';
     clearReliableQueue_(clearPending);
     if (wasOnline) {
         LOGI("HMI UDP display offline reason=%s", reason && reason[0] ? reason : "unknown");
@@ -514,7 +536,7 @@ void HmiUdpServerModule::handlePacket_(const HmiUdpHeader& header, const uint8_t
                 displayOnline_ = false;
                 displaySleeping_ = false;
                 displayVersionDetected_ = false;
-                displayVersion_ = 0U;
+                displayVersion_[0] = '\0';
                 return;
             }
             const bool haveDisplayVersion = hello &&
@@ -523,18 +545,25 @@ void HmiUdpServerModule::handlePacket_(const HmiUdpHeader& header, const uint8_t
                                          (hello->flags & HMI_UDP_HELLO_FLAG_NEXTION_SLEEPING) != 0U;
             const bool wasOnline = displayOnline_;
             const bool previousVersionDetected = displayVersionDetected_;
-            const uint32_t previousVersion = displayVersion_;
+            char previousVersion[HMI_DISPLAY_VERSION_TEXT_MAX]{};
+            strncpy(previousVersion, displayVersion_, sizeof(previousVersion) - 1U);
+            previousVersion[sizeof(previousVersion) - 1U] = '\0';
             const bool freshDisplaySession = wasOnline && header.ack == 0U;
             displayVersionDetected_ = haveDisplayVersion;
-            displayVersion_ = haveDisplayVersion ? hello->nextionVersion : 0U;
+            if (haveDisplayVersion) {
+                strncpy(displayVersion_, hello->nextionVersion, sizeof(displayVersion_) - 1U);
+                displayVersion_[sizeof(displayVersion_) - 1U] = '\0';
+            } else {
+                displayVersion_[0] = '\0';
+            }
             const bool versionChanged = previousVersionDetected != displayVersionDetected_ ||
-                                        (displayVersionDetected_ && previousVersion != displayVersion_);
+                                        (displayVersionDetected_ && strcmp(previousVersion, displayVersion_) != 0);
             const uint16_t fcdFw = hello ? hello->displayFw : 0U;
             const uint16_t fcdProto = hello ? hello->protoVersion : 0U;
             if (!wasOnline || versionChanged) {
                 if (displayVersionDetected_) {
-                    LOGI("HMI UDP Flow Connect Display detected Nextion display version=%lu fcd_fw=%u proto=%u",
-                         (unsigned long)displayVersion_,
+                    LOGI("HMI UDP Flow Connect Display detected Nextion display version=%s fcd_fw=%u proto=%u",
+                         displayVersion_,
                          (unsigned)fcdFw,
                          (unsigned)fcdProto);
                 } else {

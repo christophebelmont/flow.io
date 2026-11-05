@@ -7,7 +7,7 @@
 #include <INA226_WE.h>
 #include <stdint.h>
 
-#include "Modules/IOModule/IOBus/I2CBus.h"
+#include "Core/I2cBus.h"
 #include "Modules/IOModule/IODrivers/IODriver.h"
 
 struct Ina226DriverConfig {

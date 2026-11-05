@@ -108,6 +108,14 @@ def _merge_translations(base: Dict[str, str], overlay: Dict[str, str]) -> Dict[s
     return out
 
 
+def _merge_doc_entry(base: dict, overlay: dict) -> dict:
+    out = dict(base or {})
+    for key, value in (overlay or {}).items():
+        if isinstance(key, str):
+            out[key] = value
+    return out
+
+
 def _load_text_i18n_payload(path: Path) -> Dict[str, str]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -169,7 +177,8 @@ def main() -> int:
             continue
         for key, value in docs.items():
             if isinstance(value, dict):
-                docs_map[str(key)] = value
+                clean_key = str(key)
+                docs_map[clean_key] = _merge_doc_entry(docs_map.get(clean_key, {}), value)
 
     combined_meta = _merge_meta(_normalized_meta(cfgdocs), _normalized_meta(cfgmods))
 

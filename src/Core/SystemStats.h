@@ -11,6 +11,10 @@ struct HeapStats {
     uint32_t minFreeBytes;        // lowest free 8-bit heap observed since boot
     uint32_t largestFreeBlock;    // heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)
     uint8_t fragPercent;          // 0..100 estimated fragmentation
+    uint32_t internalFreeBytes;        // free internal 8-bit capable RAM
+    uint32_t internalMinFreeBytes;     // lowest internal free RAM observed since boot
+    uint32_t internalLargestFreeBlock; // largest contiguous internal 8-bit block
+    uint8_t internalFragPercent;       // 0..100 estimated internal fragmentation
 };
 
 /** @brief Full system snapshot used by monitoring. */

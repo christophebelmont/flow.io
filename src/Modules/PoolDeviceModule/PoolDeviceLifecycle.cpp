@@ -6,33 +6,41 @@
 #include "PoolDeviceModule.h"
 #include "Core/BufferUsageTracker.h"
 #include "Core/MqttTopics.h"
-#include "Domain/Pool/PoolBindings.h"
+#include "Domain/Pool/PoolIds.h"
 #include "Domain/Pool/PoolDeviceSlots.h"
 #define LOG_MODULE_ID ((LogModuleId)LogModuleIdValue::PoolDeviceModule)
 #include "Core/ModuleLog.h"
+#include <esp_heap_caps.h>
 #include <new>
 
 namespace {
 static constexpr uint8_t kPoolDeviceCfgProducerId = 48;
 static constexpr const char* kPoolDeviceCfgTopicBase = "cfg/pdm";
-static constexpr const char* kPoolDeviceCfgRuntimeTopicBase = "cfg/pdmrt";
 static constexpr uint8_t kPoolDeviceCfgBranchBase = 1;
-static constexpr uint8_t kPoolDeviceCfgRuntimeBranchBase = (uint8_t)(kPoolDeviceCfgBranchBase + POOL_DEVICE_MAX);
 static constexpr uint8_t kTimeCfgBranch = 1;
 static constexpr uint16_t kCfgMsgBasePdm = 1;
-static constexpr uint16_t kCfgMsgBasePdmrt = 2;
 static constexpr uint16_t kCfgMsgPdmSlotBase = 16;
-static constexpr uint16_t kCfgMsgPdmrtSlotBase = 32;
 
-template <size_t Rows, size_t Cols>
-size_t charTableUsage_(const char (&table)[Rows][Cols])
+template <typename T>
+T* allocPsramArray_(size_t count)
 {
-    size_t total = 0U;
-    for (size_t row = 0; row < Rows; ++row) {
-        const size_t len = strnlen(table[row], Cols);
-        if (len > 0U) total += len + 1U;
+    void* mem = heap_caps_malloc(sizeof(T) * count, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!mem) mem = heap_caps_malloc(sizeof(T) * count, MALLOC_CAP_8BIT);
+    if (!mem) return nullptr;
+
+    T* out = static_cast<T*>(mem);
+    for (size_t i = 0; i < count; ++i) {
+        new (&out[i]) T();
     }
-    return total;
+    return out;
+}
+
+template <size_t Cols>
+char (*allocPsramCharTable_(size_t rows))[Cols]
+{
+    void* mem = heap_caps_calloc(rows, Cols, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!mem) mem = heap_caps_calloc(rows, Cols, MALLOC_CAP_8BIT);
+    return static_cast<char (*)[Cols]>(mem);
 }
 
 static constexpr uint8_t poolDeviceCfgBranchFromSlot_(uint8_t slot)
@@ -40,11 +48,65 @@ static constexpr uint8_t poolDeviceCfgBranchFromSlot_(uint8_t slot)
     return (slot < POOL_DEVICE_MAX) ? (uint8_t)(kPoolDeviceCfgBranchBase + slot) : 0;
 }
 
-static constexpr uint8_t poolDeviceCfgRuntimeBranchFromSlot_(uint8_t slot)
-{
-    return (slot < POOL_DEVICE_MAX) ? (uint8_t)(kPoolDeviceCfgRuntimeBranchBase + slot) : 0;
-}
 } // namespace
+
+bool PoolDeviceModule::ensureStorage_()
+{
+    if (!stateMutex_) {
+        stateMutex_ = xSemaphoreCreateRecursiveMutexStatic(&stateMutexBuf_);
+    }
+
+    if (runtimePersistBuf_ && slots_ && cfgEnabledVar_ && cfgDependsVar_ && cfgFlowVar_ &&
+        cfgTankCapVar_ && cfgTankInitVar_ && cfgMaxUptimeVar_) {
+        return stateMutex_ != nullptr;
+    }
+
+    if (!runtimePersistBuf_) {
+        runtimePersistBuf_ = allocPsramCharTable_<RUNTIME_PERSIST_BUF_LEN>(POOL_DEVICE_MAX);
+    }
+    if (!slots_) slots_ = allocPsramArray_<PoolDeviceSlot>(POOL_DEVICE_MAX);
+    if (!cfgEnabledVar_) cfgEnabledVar_ = allocPsramArray_<ConfigVariable<bool,0>>(POOL_DEVICE_MAX);
+    if (!cfgDependsVar_) cfgDependsVar_ = allocPsramArray_<ConfigVariable<uint8_t,0>>(POOL_DEVICE_MAX);
+    if (!cfgFlowVar_) cfgFlowVar_ = allocPsramArray_<ConfigVariable<float,0>>(POOL_DEVICE_MAX);
+    if (!cfgTankCapVar_) cfgTankCapVar_ = allocPsramArray_<ConfigVariable<float,0>>(POOL_DEVICE_MAX);
+    if (!cfgTankInitVar_) cfgTankInitVar_ = allocPsramArray_<ConfigVariable<float,0>>(POOL_DEVICE_MAX);
+    if (!cfgMaxUptimeVar_) cfgMaxUptimeVar_ = allocPsramArray_<ConfigVariable<int32_t,0>>(POOL_DEVICE_MAX);
+
+    const bool ok = stateMutex_ && runtimePersistBuf_ && slots_ && cfgEnabledVar_ && cfgDependsVar_ && cfgFlowVar_ &&
+                    cfgTankCapVar_ && cfgTankInitVar_ && cfgMaxUptimeVar_;
+    if (ok) {
+        LOGI("PoolDevice scalable storage ready slots=%u persist_bytes=%u",
+             (unsigned)POOL_DEVICE_MAX,
+             (unsigned)runtimePersistCapacity_());
+    } else {
+        LOGE("PoolDevice scalable storage allocation failed");
+    }
+    return ok;
+}
+
+bool PoolDeviceModule::lockState_(TickType_t timeoutTicks) const
+{
+    if (!stateMutex_) return false;
+    return xSemaphoreTakeRecursive(stateMutex_, timeoutTicks) == pdTRUE;
+}
+
+void PoolDeviceModule::unlockState_() const
+{
+    if (stateMutex_) {
+        (void)xSemaphoreGiveRecursive(stateMutex_);
+    }
+}
+
+size_t PoolDeviceModule::runtimePersistUsage_() const
+{
+    if (!runtimePersistBuf_) return 0U;
+    size_t total = 0U;
+    for (uint8_t row = 0; row < POOL_DEVICE_MAX; ++row) {
+        const size_t len = strnlen(runtimePersistBuf_[row], RUNTIME_PERSIST_BUF_LEN);
+        if (len > 0U) total += len + 1U;
+    }
+    return total;
+}
 
 void PoolDeviceModule::onEventStatic_(const Event& e, void* user)
 {
@@ -98,15 +160,24 @@ void PoolDeviceModule::onEvent_(const Event& e)
 void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
 {
     constexpr uint8_t kCfgModuleId = (uint8_t)ConfigModuleId::PoolDevice;
+    if (!ensureStorage_()) return;
+
     cfgStore_ = &cfg;
+    cfgSvc_ = services.get<ConfigStoreService>(ServiceId::ConfigStore);
     logHub_ = services.get<LogHubService>(ServiceId::LogHub);
     mqttSvc_ = services.get<MqttService>(ServiceId::Mqtt);
     ioSvc_ = services.get<IOServiceV2>(ServiceId::Io);
+    timeSvc_ = services.get<TimeService>(ServiceId::Time);
     if (!services.add(ServiceId::PoolDevice, &poolSvc_)) {
         LOGE("service registration failed: %s", toString(ServiceId::PoolDevice));
     }
+    domainStatusProvider_.bindServices(ioSvc_, &poolSvc_);
+    if (!services.add(ServiceId::DomainStatus, &domainStatusProvider_.service())) {
+        LOGE("service registration failed: %s", toString(ServiceId::DomainStatus));
+    }
     cmdSvc_ = services.get<CommandService>(ServiceId::Command);
     haSvc_ = services.get<HAService>(ServiceId::Ha);
+    activityLogSvc_ = services.get<ActivityLogService>(ServiceId::ActivityLog);
     const EventBusService* ebSvc = services.get<EventBusService>(ServiceId::EventBus);
     eventBus_ = ebSvc ? ebSvc->bus : nullptr;
     const DataStoreService* dsSvc = services.get<DataStoreService>(ServiceId::DataStore);
@@ -122,12 +193,11 @@ void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
         eventBus_->subscribe(EventId::ConfigChanged, &PoolDeviceModule::onEventStatic_, this);
     }
 
-    // Each slot owns one config branch and one runtime-persist branch.
+    // Each slot owns one config branch; runtime metrics use ConfigStore runtime blob APIs.
     for (uint8_t i = 0; i < POOL_DEVICE_MAX; ++i) {
         PoolDeviceSlot& s = slots_[i];
         if (!s.used) continue;
         const uint8_t localBranchId = poolDeviceCfgBranchFromSlot_(i);
-        const uint8_t runtimeBranchId = poolDeviceCfgRuntimeBranchFromSlot_(i);
 
         const PoolDeviceSlotDescriptor& slot = PoolDeviceSlots::kSlots[i];
 
@@ -184,15 +254,6 @@ void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
         cfgMaxUptimeVar_[i].persistence = ConfigPersistence::Persistent;
         cfgMaxUptimeVar_[i].size = 0;
         cfg.registerVar(cfgMaxUptimeVar_[i], kCfgModuleId, localBranchId);
-
-        cfgRuntimeVar_[i].nvsKey = slot.runtimeKey;
-        cfgRuntimeVar_[i].jsonName = "metrics_blob";
-        cfgRuntimeVar_[i].moduleName = slot.runtimeModuleName;
-        cfgRuntimeVar_[i].type = ConfigType::CharArray;
-        cfgRuntimeVar_[i].value = runtimePersistBuf_[i];
-        cfgRuntimeVar_[i].persistence = ConfigPersistence::Persistent;
-        cfgRuntimeVar_[i].size = sizeof(runtimePersistBuf_[i]);
-        cfg.registerVar(cfgRuntimeVar_[i], kCfgModuleId, runtimeBranchId);
     }
 
     if (cmdSvc_ && cmdSvc_->registerHandler) {
@@ -202,7 +263,7 @@ void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
         cmdSvc_->registerHandler(cmdSvc_->ctx, "pooldevice.uptime.reset_all", cmdPoolResetUptimeAll_, this);
     }
     if (haSvc_ && haSvc_->addSensor) {
-        if (slots_[PoolBinding::kDeviceSlotChlorinePump].used) {
+        if (slots_[PoolIds::DeviceChlorinePump].used) {
             const HASensorEntry s0{
                 "pooldev", "pd_chl_pmp_upt", "Pump uptime Chlorine",
                 "rt/pdm/metrics/pd2", "{{ value_json.running.day_s | int(0) }}",
@@ -216,7 +277,7 @@ void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
             };
             (void)haSvc_->addSensor(haSvc_->ctx, &s0b);
         }
-        if (slots_[PoolBinding::kDeviceSlotPhPump].used) {
+        if (slots_[PoolIds::DevicePhPump].used) {
             const HASensorEntry s1{
                 "pooldev", "pd_ph_pmp_upt", "Pump uptime pH",
                 "rt/pdm/metrics/pd1", "{{ value_json.running.day_s | int(0) }}",
@@ -230,7 +291,7 @@ void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
             };
             (void)haSvc_->addSensor(haSvc_->ctx, &s1b);
         }
-        if (slots_[PoolBinding::kDeviceSlotFillPump].used) {
+        if (slots_[PoolIds::DeviceFillPump].used) {
             const HASensorEntry s2{
                 "pooldev", "pd_fill_upt_mn", "Pump uptime Fill",
                 "rt/pdm/metrics/pd4", "{{ ((value_json.running.day_s | float(0)) / 60) | round(0) | int(0) }}",
@@ -238,7 +299,7 @@ void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
             };
             (void)haSvc_->addSensor(haSvc_->ctx, &s2);
         }
-        if (slots_[PoolBinding::kDeviceSlotFiltrationPump].used) {
+        if (slots_[PoolIds::DeviceFiltrationPump].used) {
             const HASensorEntry s3{
                 "pooldev", "pd_flt_upt_mn", "Pump uptime Filtration",
                 "rt/pdm/metrics/pd0", "{{ ((value_json.running.day_s | float(0)) / 60) | round(0) | int(0) }}",
@@ -246,7 +307,7 @@ void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
             };
             (void)haSvc_->addSensor(haSvc_->ctx, &s3);
         }
-        if (slots_[PoolBinding::kDeviceSlotChlorineGenerator].used) {
+        if (slots_[PoolIds::DeviceChlorineGenerator].used) {
             const HASensorEntry s4{
                 "pooldev", "pd_chl_gen_upt", "Pump uptime Chlorine Generator",
                 "rt/pdm/metrics/pd5", "{{ ((value_json.running.day_s | float(0)) / 60) | round(0) | int(0) }}",
@@ -291,7 +352,7 @@ void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
             };
             (void)haSvc_->addNumber(haSvc_->ctx, &n2);
         }
-        if (slots_[PoolBinding::kDeviceSlotPhPump].used) {
+        if (slots_[PoolIds::DevicePhPump].used) {
             const HANumberEntry n3{
                 "pooldev", "pd1_max_upt", "Max Uptime pH Pump",
                 "cfg/pdm/pd1", "{{ ((value_json.max_uptime_day_s | float(0)) / 60) | round(0) | int(0) }}",
@@ -300,7 +361,7 @@ void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
             };
             (void)haSvc_->addNumber(haSvc_->ctx, &n3);
         }
-        if (slots_[PoolBinding::kDeviceSlotChlorinePump].used) {
+        if (slots_[PoolIds::DeviceChlorinePump].used) {
             const HANumberEntry n4{
                 "pooldev", "pd2_max_upt", "Max Uptime Chlorine Pump",
                 "cfg/pdm/pd2", "{{ ((value_json.max_uptime_day_s | float(0)) / 60) | round(0) | int(0) }}",
@@ -309,7 +370,7 @@ void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
             };
             (void)haSvc_->addNumber(haSvc_->ctx, &n4);
         }
-        if (slots_[PoolBinding::kDeviceSlotFillPump].used) {
+        if (slots_[PoolIds::DeviceFillPump].used) {
             const HANumberEntry n4b{
                 "pooldev", "pd4_max_upt", "Max Uptime Fill Pump",
                 "cfg/pdm/pd4", "{{ ((value_json.max_uptime_day_s | float(0)) / 60) | round(0) | int(0) }}",
@@ -318,7 +379,7 @@ void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
             };
             (void)haSvc_->addNumber(haSvc_->ctx, &n4b);
         }
-        if (slots_[PoolBinding::kDeviceSlotChlorineGenerator].used) {
+        if (slots_[PoolIds::DeviceChlorineGenerator].used) {
             const HANumberEntry n5{
                 "pooldev", "pd5_max_upt", "Max Uptime Chlorine Generator",
                 "cfg/pdm/pd5", "{{ ((value_json.max_uptime_day_s | float(0)) / 60) | round(0) | int(0) }}",
@@ -329,7 +390,7 @@ void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
         }
     }
     if (haSvc_ && haSvc_->addButton) {
-        if (slots_[PoolBinding::kDeviceSlotPhPump].used) {
+        if (slots_[PoolIds::DevicePhPump].used) {
             const HAButtonEntry refillPhTank{
                 "pooldev",
                 "pd_refill_ph",
@@ -341,7 +402,7 @@ void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
             };
             (void)haSvc_->addButton(haSvc_->ctx, &refillPhTank);
         }
-        if (slots_[PoolBinding::kDeviceSlotChlorinePump].used) {
+        if (slots_[PoolIds::DeviceChlorinePump].used) {
             const HAButtonEntry refillChlorineTank{
                 "pooldev",
                 "pd_refill_chl",
@@ -353,7 +414,7 @@ void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
             };
             (void)haSvc_->addButton(haSvc_->ctx, &refillChlorineTank);
         }
-        if (slots_[PoolBinding::kDeviceSlotFiltrationPump].used) {
+        if (slots_[PoolIds::DeviceFiltrationPump].used) {
             const HAButtonEntry resetFiltrationUptime{
                 "pooldev",
                 "pd_reset_upt_flt",
@@ -365,7 +426,7 @@ void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
             };
             (void)haSvc_->addButton(haSvc_->ctx, &resetFiltrationUptime);
         }
-        if (slots_[PoolBinding::kDeviceSlotPhPump].used) {
+        if (slots_[PoolIds::DevicePhPump].used) {
             const HAButtonEntry resetPhUptime{
                 "pooldev",
                 "pd_reset_upt_ph",
@@ -377,7 +438,7 @@ void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
             };
             (void)haSvc_->addButton(haSvc_->ctx, &resetPhUptime);
         }
-        if (slots_[PoolBinding::kDeviceSlotChlorinePump].used) {
+        if (slots_[PoolIds::DeviceChlorinePump].used) {
             const HAButtonEntry resetChlorineUptime{
                 "pooldev",
                 "pd_reset_upt_chl",
@@ -389,7 +450,7 @@ void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
             };
             (void)haSvc_->addButton(haSvc_->ctx, &resetChlorineUptime);
         }
-        if (slots_[PoolBinding::kDeviceSlotFillPump].used) {
+        if (slots_[PoolIds::DeviceFillPump].used) {
             const HAButtonEntry resetFillUptime{
                 "pooldev",
                 "pd_reset_upt_fill",
@@ -401,7 +462,7 @@ void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
             };
             (void)haSvc_->addButton(haSvc_->ctx, &resetFillUptime);
         }
-        if (slots_[PoolBinding::kDeviceSlotChlorineGenerator].used) {
+        if (slots_[PoolIds::DeviceChlorineGenerator].used) {
             const HAButtonEntry resetGeneratorUptime{
                 "pooldev",
                 "pd_reset_upt_chl_gen",
@@ -431,7 +492,7 @@ void PoolDeviceModule::init(ConfigStore& cfg, ServiceRegistry& services)
     }
     BufferUsageTracker::note(TrackedBufferId::PoolDeviceSlots,
                              (size_t)count * sizeof(PoolDeviceSlot),
-                             sizeof(slots_),
+                             (size_t)POOL_DEVICE_MAX * sizeof(PoolDeviceSlot),
                              "init",
                              nullptr);
     LOGI("PoolDevice module ready (devices=%u)", (unsigned)count);
@@ -448,13 +509,6 @@ void PoolDeviceModule::onConfigLoaded(ConfigStore&, ServiceRegistry& services)
          (uint8_t)MqttPublishPriority::Low,
          &PoolDeviceModule::buildCfgBasePdmStatic_,
          kPoolDeviceCfgTopicBase},
-        {kCfgMsgBasePdmrt,
-         {(uint8_t)ConfigModuleId::PoolDevice, ConfigBranchRef::UnknownLocalBranch},
-         nullptr,
-         "",
-         (uint8_t)MqttPublishPriority::Low,
-         &PoolDeviceModule::buildCfgBasePdmrtStatic_,
-         kPoolDeviceCfgRuntimeTopicBase},
 #define FLOW_POOLDEVICE_CFG_ROUTES(SLOT) \
         {(uint16_t)(kCfgMsgPdmSlotBase + (SLOT)), \
          {(uint8_t)ConfigModuleId::PoolDevice, poolDeviceCfgBranchFromSlot_(SLOT)}, \
@@ -462,14 +516,7 @@ void PoolDeviceModule::onConfigLoaded(ConfigStore&, ServiceRegistry& services)
          PoolDeviceSlots::kSlots[SLOT].id, \
          (uint8_t)MqttPublishPriority::Normal, \
          nullptr, \
-         kPoolDeviceCfgTopicBase}, \
-        {(uint16_t)(kCfgMsgPdmrtSlotBase + (SLOT)), \
-         {(uint8_t)ConfigModuleId::PoolDevice, poolDeviceCfgRuntimeBranchFromSlot_(SLOT)}, \
-         PoolDeviceSlots::kSlots[SLOT].runtimeModuleName, \
-         PoolDeviceSlots::kSlots[SLOT].id, \
-         (uint8_t)MqttPublishPriority::Normal, \
-         nullptr, \
-         kPoolDeviceCfgRuntimeTopicBase}
+         kPoolDeviceCfgTopicBase}
         FLOW_POOLDEVICE_CFG_ROUTES(0),
         FLOW_POOLDEVICE_CFG_ROUTES(1),
         FLOW_POOLDEVICE_CFG_ROUTES(2),
@@ -478,6 +525,14 @@ void PoolDeviceModule::onConfigLoaded(ConfigStore&, ServiceRegistry& services)
         FLOW_POOLDEVICE_CFG_ROUTES(5),
         FLOW_POOLDEVICE_CFG_ROUTES(6),
         FLOW_POOLDEVICE_CFG_ROUTES(7),
+        FLOW_POOLDEVICE_CFG_ROUTES(8),
+        FLOW_POOLDEVICE_CFG_ROUTES(9),
+        FLOW_POOLDEVICE_CFG_ROUTES(10),
+        FLOW_POOLDEVICE_CFG_ROUTES(11),
+        FLOW_POOLDEVICE_CFG_ROUTES(12),
+        FLOW_POOLDEVICE_CFG_ROUTES(13),
+        FLOW_POOLDEVICE_CFG_ROUTES(14),
+        FLOW_POOLDEVICE_CFG_ROUTES(15),
 #undef FLOW_POOLDEVICE_CFG_ROUTES
     };
     static_assert((sizeof(kPoolDeviceCfgRoutes) / sizeof(kPoolDeviceCfgRoutes[0])) <= MqttConfigRouteProducer::MaxRoutes,
@@ -498,27 +553,35 @@ void PoolDeviceModule::onConfigLoaded(ConfigStore&, ServiceRegistry& services)
     for (uint8_t i = 0; i < POOL_DEVICE_MAX; ++i) {
         PoolDeviceSlot& s = slots_[i];
         if (!s.used) continue;
+        (void)loadPersistedMetrics_(i, s);
         if (runtimePersistBuf_[i][0] != '\0') {
             BufferUsageTracker::note(TrackedBufferId::PoolDeviceRuntimePersistTable,
-                                     charTableUsage_(runtimePersistBuf_),
-                                     sizeof(runtimePersistBuf_),
+                                     runtimePersistUsage_(),
+                                     runtimePersistCapacity_(),
                                      s.id,
                                      runtimePersistBuf_[i]);
         }
-        (void)loadPersistedMetrics_(i, s);
     }
     requestPeriodReconcile_();
 }
 
 void PoolDeviceModule::loop()
 {
+    if (!lockState_(pdMS_TO_TICKS(500))) {
+        LOGW("PoolDevice loop skipped: state lock timeout");
+        vTaskDelay(pdMS_TO_TICKS(200));
+        return;
+    }
+
     if (!runtimeReady_) {
         if (!configureRuntime_()) {
+            unlockState_();
             vTaskDelay(pdMS_TO_TICKS(250));
             return;
         }
     }
 
     tickDevices_(millis());
+    unlockState_();
     vTaskDelay(pdMS_TO_TICKS(200));
 }

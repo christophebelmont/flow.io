@@ -14,6 +14,7 @@
 #include <HardwareSerial.h>
 #include <ESPAsyncWebServer.h>
 #include <freertos/queue.h>
+#include <memory>
 #include "Core/EventBus/EventBus.h"
 
 #ifndef FLOW_ENABLE_WEB_SERIAL_TERMINAL
@@ -25,6 +26,9 @@
 #endif
 
 struct BoardSpec;
+#if defined(FLOW_PROFILE_WAVESHARE)
+struct WebJsonBuffer;
+#endif
 
 class WebInterfaceModule : public Module {
 public:
@@ -35,7 +39,7 @@ public:
     const char* taskName() const override { return "webinterface"; }
     BaseType_t taskCore() const override { return 0; }
     uint16_t taskStackSize() const override {
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         return 4096;
 #else
         return 4096;
@@ -45,7 +49,7 @@ public:
     const ModuleTaskSpec* taskSpecs() const override { return singleLoopTaskSpec(); }
 
     uint8_t dependencyCount() const override {
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         // Keep AP provisioning web startup independent from heavy app modules.
         return 2;
 #elif defined(FLOW_PROFILE_MICRONOVA)
@@ -57,14 +61,14 @@ public:
     ModuleId dependency(uint8_t i) const override {
         if (i == 0) return ModuleId::LogHub;
         if (i == 1) return ModuleId::Wifi;
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         return ModuleId::Unknown;
 #else
         if (i == 2) return ModuleId::EventBus;
         if (i == 3) return ModuleId::DataStore;
         if (i == 4) return ModuleId::Command;
         if (i == 5) return ModuleId::Hmi;
-#if !defined(FLOW_PROFILE_MICRONOVA) && !defined(FLOW_PROFILE_FLOWIOS3)
+#if !defined(FLOW_PROFILE_MICRONOVA) && !defined(FLOW_PROFILE_WAVESHARE)
         if (i == 6) return ModuleId::I2cCfgClient;
 #endif
         return ModuleId::Unknown;
@@ -73,7 +77,7 @@ public:
 
     void init(ConfigStore& cfg, ServiceRegistry& services) override;
     bool canStart(ConfigStore&, ServiceRegistry& services) override {
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         const NetworkAccessService* net = services.get<NetworkAccessService>(ServiceId::NetworkAccess);
         if (!net || !net->mode) return false;
         const NetworkAccessMode mode = net->mode(net->ctx);
@@ -85,7 +89,7 @@ public:
     }
     void onStart(ConfigStore& cfg, ServiceRegistry& services) override;
     uint32_t startDelayMs() const override {
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         return 3000U;
 #else
         return Limits::Boot::WebInterfaceStartDelayMs;
@@ -117,6 +121,7 @@ private:
     void handleUpdateRequest_(AsyncWebServerRequest* request, FirmwareUpdateTarget target);
     bool isWebReachable_() const;
     bool getNetworkIp_(char* out, size_t len, NetworkAccessMode* modeOut) const;
+    const char* networkTransport_(NetworkAccessMode mode) const;
 
     // WebSocket transport
     void onWsLogEvent_(AsyncWebSocket* server,
@@ -154,6 +159,9 @@ private:
                                       uint16_t total);
     void dumpBootLogCapture_(AsyncWebSocketClient* client);
     void sendBootLogHttpResponse_(AsyncWebServerRequest* request, bool statusOnly);
+    void sendActivityLogHttpResponse_(AsyncWebServerRequest* request, bool statusOnly);
+    void emitConfigActivity_(const char* contextLabel, const char* modulesLabel, uint16_t fieldCount);
+    void emitConfigPatchActivity_(const char* contextLabel, const char* patchJson);
     bool initLocalLogQueue_();
     void freeLocalLogQueue_();
 
@@ -171,6 +179,10 @@ private:
     void scheduleReboot_(uint32_t delayMs, const char* reason);
     uint8_t wsActiveSource_() const;
     void setWsActiveSource_(uint8_t source);
+#if defined(FLOW_PROFILE_WAVESHARE)
+    void refreshIoResponseCaches_();
+    void sendIoResponseCache_(AsyncWebServerRequest* request, bool topology);
+#endif
 
     HardwareSerial& uart_ = Serial2;
     uint32_t uartBaud_ = 115200U;
@@ -184,6 +196,7 @@ private:
     const LogHubService* logHub_ = nullptr;
     const LogSinkRegistryService* logSinkReg_ = nullptr;
     const BootLogCaptureService* bootLogCapture_ = nullptr;
+    const ActivityLogService* activityLog_ = nullptr;
     const TimeService* timeSvc_ = nullptr;
     const WifiService* wifiSvc_ = nullptr;
     const CommandService* cmdSvc_ = nullptr;
@@ -216,7 +229,7 @@ private:
     static constexpr UBaseType_t kLocalLogQueueLen = 6;
     static constexpr size_t kRuntimeValuesBodyMax = 512U;
     static constexpr size_t kRuntimeValuesJsonDocCapacity = 768U;
-#elif defined(FLOW_PROFILE_FLOWIOS3)
+#elif defined(FLOW_PROFILE_WAVESHARE)
     static constexpr UBaseType_t kLocalLogQueueLen = 128;
     static_assert(kLocalLogQueueLen == 128, "flow.io wslog queue must keep 128 lines");
     static constexpr size_t kRuntimeValuesBodyMax = 4096U;
@@ -235,9 +248,14 @@ private:
 
     char lineBuf_[kLineBufferSize] = {0};
     size_t lineLen_ = 0;
+#if defined(FLOW_PROFILE_WAVESHARE)
+    char* runtimeValuesBodyScratch_ = nullptr;
+#else
     char runtimeValuesBodyScratchLocal_[kRuntimeValuesBodyMax + 1U] = {0};
     char* runtimeValuesBodyScratch_ = runtimeValuesBodyScratchLocal_;
+#endif
     bool runtimeValuesBodyScratchInPsram_ = false;
+    bool runtimeValuesBodyScratchOwned_ = false;
     portMUX_TYPE runtimeValuesBodyMux_ = portMUX_INITIALIZER_UNLOCKED;
     volatile bool runtimeValuesBodyBusy_ = false;
     uint32_t wsFlowConnectCount_ = 0;
@@ -260,6 +278,20 @@ private:
     uint8_t wsSource_ = 0; // 0=supervisor local logs, 1=flow serial logs
     mutable portMUX_TYPE healthMux_ = portMUX_INITIALIZER_UNLOCKED;
     WebInterfaceHealth health_{};
+
+#if defined(FLOW_PROFILE_WAVESHARE)
+    std::shared_ptr<WebJsonBuffer> ioTopologyResponse_;
+    std::shared_ptr<WebJsonBuffer> ioRuntimeResponse_;
+    std::shared_ptr<WebJsonBuffer> ioRuntimeSpareResponse_;
+    void* ioResponseSnapshot_ = nullptr;
+    portMUX_TYPE ioResponseMux_ = portMUX_INITIALIZER_UNLOCKED;
+    uint32_t ioTopologyChangeGeneration_ = 1U;
+    uint32_t ioTopologyBuiltGeneration_ = 0U;
+    uint32_t ioTopologyRevision_ = 0U;
+    uint32_t ioLastTopologyBuildMs_ = 0U;
+    uint32_t ioLastRuntimeBuildMs_ = 0U;
+    uint32_t ioLastResponseBuildAttemptMs_ = 0U;
+#endif
 
     WebInterfaceService webInterfaceSvc_{
         ServiceBinding::bind<&WebInterfaceModule::setPaused_>,

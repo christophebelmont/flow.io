@@ -2,6 +2,8 @@
   "translations": {
     "cfgdocs.time.enabled.help": "Active ou désactive la synchronisation horaire NTP.",
     "cfgdocs.time.enabled.label": "Synchronisation horaire active",
+    "cfgdocs.time.manual_time.help": "Heure manuelle a ecrire dans le RTC Nextion au format YYYY-MM-DD HH:MM:SS.",
+    "cfgdocs.time.manual_time.label": "Heure manuelle Nextion",
     "cfgdocs.time.scheduler.slots_blob.help": "Configuration sérialisée des slots du scheduler.",
     "cfgdocs.time.scheduler.slots_blob.label": "Blob planning",
     "cfgdocs.time.server1.help": "Serveur utilisé pour la synchronisation de l'heure.",

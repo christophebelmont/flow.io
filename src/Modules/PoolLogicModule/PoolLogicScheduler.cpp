@@ -76,12 +76,7 @@ bool PoolLogicModule::currentFiltrationWindowActive_(uint8_t startHour, uint8_t 
     if (!localtime_r(&now, &localNow)) return false;
 
     const uint16_t minuteOfDay = (uint16_t)((localNow.tm_hour * 60) + localNow.tm_min);
-    const uint16_t startMinute = (uint16_t)(((startHour < 24U) ? startHour : 23U) * 60U);
-    const uint16_t stopMinute = (uint16_t)(((stopHour < 24U) ? stopHour : 23U) * 60U);
-
-    activeOut = (stopMinute <= startMinute)
-        ? (minuteOfDay >= startMinute || minuteOfDay < stopMinute)
-        : (minuteOfDay >= startMinute && minuteOfDay < stopMinute);
+    activeOut = isFiltrationWindowActiveAtMinute(startHour, stopHour, minuteOfDay);
     return true;
 }
 
@@ -190,11 +185,46 @@ bool PoolLogicModule::recalcAndApplyFiltrationWindow_(uint8_t* startHourOut,
              (double)waterTemp,
              (unsigned)startHour,
              (unsigned)stopHour);
+        char detail[128] = {0};
+        snprintf(detail,
+                 sizeof(detail),
+                 "Température eau %.2f °C, durée %u h, plage %02u:00-%02u:00.",
+                 (double)waterTemp,
+                 (unsigned)duration,
+                 (unsigned)startHour,
+                 (unsigned)stopHour);
+        emitActivity_(ActivityCode::PoolLogicFiltrationWindowCalculated,
+                      ActivitySource::Scheduler,
+                      ActivitySeverity::Info,
+                      ActivityRole::Filtration,
+                      ActivityState::None,
+                      ActivityReason::Scheduler,
+                      filtrationDeviceSlot_,
+                      "Plage de filtration recalculée",
+                      detail,
+                      "schedule");
     } else {
         LOGI("Filtration duration=%uh water=unavailable start=%uh stop=%uh",
              (unsigned)duration,
              (unsigned)startHour,
              (unsigned)stopHour);
+        char detail[128] = {0};
+        snprintf(detail,
+                 sizeof(detail),
+                 "Température eau indisponible, durée %u h, plage %02u:00-%02u:00.",
+                 (unsigned)duration,
+                 (unsigned)startHour,
+                 (unsigned)stopHour);
+        emitActivity_(ActivityCode::PoolLogicFiltrationWindowCalculated,
+                      ActivitySource::Scheduler,
+                      ActivitySeverity::Warning,
+                      ActivityRole::Filtration,
+                      ActivityState::None,
+                      ActivityReason::Scheduler,
+                      filtrationDeviceSlot_,
+                      "Plage de filtration recalculée",
+                      detail,
+                      "schedule");
     }
     return true;
 }

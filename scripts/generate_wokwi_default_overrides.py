@@ -59,10 +59,6 @@ SPECS: List[Tuple[str, str, str, str, str]] = [
     ("io_scl", "FLOW_WIRDEF_IO_SCL", "profile", "int32", "22"),
     ("io_aiad", "FLOW_WIRDEF_IO_AIAD", "profile", "uint8", "0x48u"),
     ("io_aead", "FLOW_WIRDEF_IO_AEAD", "profile", "uint8", "0x49u"),
-    ("io_pcfen", "FLOW_WIRDEF_IO_PCFEN", "profile", "bool", "true"),
-    ("io_pcfad", "FLOW_WIRDEF_IO_PCFAD", "profile", "uint8", "0x20u"),
-    ("io_pcfmk", "FLOW_WIRDEF_IO_PCFMK", "profile", "uint8", "0u"),
-    ("io_pcfal", "FLOW_WIRDEF_IO_PCFAL", "profile", "bool", "true"),
 
     # IO analog wiring defaults (a0..a5)
     ("io_a0s", "FLOW_WIRDEF_IO_A0S", "profile", "uint8", "IO_SRC_ADS_INTERNAL_SINGLE"),

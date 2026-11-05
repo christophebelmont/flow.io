@@ -255,7 +255,7 @@ bool ModuleManager::startModule_(uint8_t orderedIdx, ConfigStore& cfg, ServiceRe
         }
 
         for (uint8_t taskIndex = 0; taskIndex < declaredTaskCount; ++taskIndex) {
-            const ModuleTaskSpec& spec = specs[taskIndex];
+            const ModuleTaskSpec spec = specs[taskIndex];
             if (!isValidTaskSpec(spec)) {
                 Log::error(LOG_MODULE_ID, "invalid task spec module=%s index=%u",
                            toString(module->moduleId()),

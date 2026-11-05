@@ -10,7 +10,7 @@ inline constexpr MqttCapacitySpec kMicronovaMqttCapacity{5712, 2, 2, 4, 20, 12, 
 inline constexpr MqttBufferSpec kMicronovaMqttBuffers{
     64, 32, 32, 15, 15, 160, 160, 160, 96, 512, 384, 512, 2048, 32, 128, 32
 };
-inline constexpr HaCapacitySpec kMicronovaHaCapacity{16, 4, 6, 6, 16, 9};
+inline constexpr HaCapacitySpec kMicronovaHaCapacity{24, 4, 8, 12, 16, 4};
 
 inline constexpr UartSpec kMicronovaBoardRev1Uarts[] = {
     // {name, uartIndex, rxPin, txPin, baud, primary, enableRxPin}

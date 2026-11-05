@@ -8,7 +8,7 @@ Couche domaine actionneurs piscine:
 - applique une limite de runtime journalier par slot (`max_uptime_day_s`)
 - synchronise état réel I/O et état désiré
 - comptabilise runtime (jour/semaine/mois/total) et volumes injectés
-- persiste les métriques runtime dans `ConfigStore` (`pdmrt/pdN.metrics_blob`)
+- persiste les métriques runtime via les blobs runtime NVS du `ConfigStore`
 - expose snapshots runtime pour publication MQTT
 
 Type: module actif.
@@ -55,7 +55,6 @@ Codes retour: `POOLDEV_SVC_OK`, `...UNKNOWN_SLOT`, `...NOT_READY`, `...DISABLED`
 Branches config (modèle 8/8):
 - `moduleId = ConfigModuleId::PoolDevice`
 - branches locales métier: `1..8` (`pdm/pd0..pd7`)
-- branches locales runtime persistant: `9..16` (`pdmrt/pd0..pd7`)
 
 Clés persistantes (format):
 - `pd%uen` -> `enabled`
@@ -64,9 +63,9 @@ Clés persistantes (format):
 - `pd%utc` -> `tank_cap_ml`
 - `pd%uti` -> `tank_init_ml`
 - `pd%umu` -> `max_uptime_day_s`
-- `pd%urt` -> `metrics_blob` (runtime persistant)
+- `pd%urt` -> blob NVS runtime interne (non exposé dans l'arbre config)
 
-Format `metrics_blob`:
+Format du blob runtime persistant:
 - `v1,<running_day_ms>,<running_week_ms>,<running_month_ms>,<running_total_ms>,<inj_day_ml>,<inj_week_ml>,<inj_month_ml>,<inj_total_ml>,<tank_ml>,<day_key>,<week_key>,<month_key>`
 
 ## Commandes
@@ -122,7 +121,7 @@ Objectif:
 - reset uniquement sur changement de période (jour/semaine/mois)
 
 Mécanisme:
-- chargement au boot (`onConfigLoaded`) depuis `metrics_blob`
+- chargement au boot (`onConfigLoaded`) depuis le blob runtime NVS
 - reconcile de période basé horloge locale + config `time.week_start_mon`
 - reset ciblé quand marqueur période (`dayKey/weekKey/monthKey`) change
 - persistance conditionnelle:
@@ -185,8 +184,6 @@ Publication assurée par le producteur runtime intégré à `MQTTModule` (`Runti
 Publication autoportée via `MqttConfigRouteProducer` local au module:
 - agrégat métier: `cfg/pdm`
 - détail métier par slot: `cfg/pdm/pdN`
-- agrégat runtime persistant: `cfg/pdmrt`
-- détail runtime persistant par slot: `cfg/pdmrt/pdN`
 
 Le module garde localement:
 - le mapping changement config -> `messageId`

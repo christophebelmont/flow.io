@@ -101,14 +101,23 @@ Le remplacement dynamique d'un service pendant l'exécution n'est pas utilisé d
 | `Mqtt` | `mqtt` | `MqttService` |
 | `Ha` | `ha` | `HAService` |
 | `Io` | `io` | `IOServiceV2` |
-| `StatusLeds` | `status_leds` | `StatusLedsService` |
 | `PoolDevice` | `pooldev` | `PoolDeviceService` |
 | `WebInterface` | `webinterface` | `WebInterfaceService` |
 | `FirmwareUpdate` | `fwupdate` | `FirmwareUpdateService` |
 | `NetworkAccess` | `network_access` | `NetworkAccessService` |
 | `FlowCfg` | `flowcfg` | `FlowCfgRemoteService` |
+| `I2cBus` | `i2c_bus` | `I2cBusService` |
 
 La présence effective d'un service dépend du profil compilé et des modules enregistrés par ce profil.
+
+`I2cBusService` fait exception à cette dernière règle: il est porté par
+`AppContext` et enregistré par le bootstrap avant l'initialisation des modules.
+Il expose l'instance unique du bus I2C principal afin que plusieurs modules,
+notamment `IOModule` et `HMIModule`, partagent le même contrôleur et la même
+synchronisation. À ce stade, `IOModule` reste responsable d'appliquer les
+broches configurées lorsqu'un périphérique IO I2C est nécessaire. Si le bus
+n'est pas encore initialisé, `HMIModule` peut l'initialiser avec les broches et
+la fréquence déclarées par la carte avant d'accéder à son panneau LED dédié.
 
 ## Contrats principaux
 
@@ -207,10 +216,6 @@ Quand un module consomme le store, le service reste l'interface à privilégier.
 - lecture des valeurs
 - écriture des sorties digitales
 - lecture du dernier cycle IO
-
-### `StatusLedsService`
-
-- lecture et écriture du masque de LEDs logiques
 
 ### `PoolDeviceService`
 

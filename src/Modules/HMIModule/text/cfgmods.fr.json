@@ -8,14 +8,8 @@
     "hmi": {
       "label_t": "cfgmods.hmi.label"
     },
-    "hmi/leds": {
-      "label_t": "cfgmods.hmi.leds.label"
-    },
-    "hmi/nextion": {
-      "label_t": "cfgmods.hmi.nextion.label"
-    },
-    "hmi/venice": {
-      "label_t": "cfgmods.hmi.venice.label"
-    }
+    "hmi/leds": {},
+    "hmi/nextion": {},
+    "hmi/venice": {}
   }
 }

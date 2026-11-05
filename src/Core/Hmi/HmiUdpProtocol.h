@@ -11,7 +11,7 @@
 
 static constexpr uint8_t HMI_UDP_MAGIC0 = 'F';
 static constexpr uint8_t HMI_UDP_MAGIC1 = 'H';
-static constexpr uint8_t HMI_UDP_VERSION = 6;
+static constexpr uint8_t HMI_UDP_VERSION = 7;
 
 static constexpr uint16_t HMI_UDP_PORT = 42110;
 static constexpr size_t HMI_UDP_MAX_PACKET = 512;
@@ -67,7 +67,7 @@ struct HmiUdpHelloPayload {
     uint32_t tokenCrc;
     uint16_t displayFw;
     uint16_t protoVersion;
-    uint32_t nextionVersion;
+    char nextionVersion[HMI_DISPLAY_VERSION_TEXT_MAX];
     uint8_t flags;
 };
 

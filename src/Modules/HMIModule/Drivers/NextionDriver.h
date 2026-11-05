@@ -9,9 +9,15 @@
 #include <Arduino.h>
 
 struct NextionDriverConfig {
+#ifdef FLOW_BOARD_WAVESHARE_ESP32_S3
+    HardwareSerial* serial = &Serial2;
+    int8_t rxPin = 44;
+    int8_t txPin = 43;
+#else
     HardwareSerial* serial = &Serial2;
     int8_t rxPin = 16;
     int8_t txPin = 17;
+#endif
     uint32_t baud = 115200;
     uint32_t minRenderGapMs = 120;
     uint16_t displayVersionReadTimeoutMs = 180U;
@@ -48,8 +54,8 @@ public:
     bool renderConfigMenu(const ConfigMenuView& view) override;
     bool refreshConfigMenuValues(const ConfigMenuView& view) override;
     bool hasDisplayVersion() const override { return versionDetected_; }
-    uint32_t displayVersion() const override { return displayVersion_; }
-    bool isLegacyV2() const override { return versionDetected_ && displayVersion_ == 2U; }
+    const char* displayVersion() const override { return displayVersion_; }
+    bool isLegacyV2() const override;
     bool detectDisplayVersion(uint16_t timeoutMs = 0U, bool force = false);
     bool configureSleep(uint16_t noTouchSeconds, bool wakeOnTouch, bool wakeOnSerial);
     bool refreshSleepState(uint16_t timeoutMs = 0U);
@@ -77,7 +83,7 @@ private:
     bool started_ = false;
     bool pageReady_ = false;
     bool versionDetected_ = false;
-    uint32_t displayVersion_ = 0U;
+    char displayVersion_[HMI_DISPLAY_VERSION_TEXT_MAX]{};
     uint32_t lastRenderMs_ = 0;
     bool sleeping_ = false;
 
@@ -109,6 +115,8 @@ private:
     bool sendText_(const char* objectName, const char* value);
     bool readNumber_(const char* expr, uint32_t& value, uint16_t timeoutMs);
     bool readNumberResponse_(uint32_t& value, uint16_t timeoutMs);
+    bool readText_(const char* expr, char* out, size_t outLen, uint16_t timeoutMs);
+    bool readTextResponse_(char* out, size_t outLen, uint16_t timeoutMs);
     const char* homeTextObjectName_(HmiHomeTextField field) const;
     const char* homeGaugeObjectName_(HmiHomeGaugeField field) const;
     void sanitizeText_(char* out, size_t outLen, const char* in) const;

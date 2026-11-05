@@ -4,41 +4,36 @@
 
 namespace PoolBehaviors {
 
-inline const DomainIoBinding* bindingByRole(DomainRole role)
+inline const DomainSlotPreset* domainSlotById(DomainSlotId id)
 {
-    for (uint8_t i = 0; i < PoolDomain::kPoolDomain.ioBindingCount; ++i) {
-        const DomainIoBinding& binding = PoolDomain::kPoolDomain.ioBindings[i];
-        if (binding.role == role) return &binding;
+    for (uint8_t i = 0; i < PoolDomain::kPoolDomain.domainSlotCount; ++i) {
+        const DomainSlotPreset& preset = PoolDomain::kPoolDomain.domainSlots[i];
+        if (preset.id == id) return &preset;
     }
     return nullptr;
 }
 
-inline const DomainIoBinding* bindingBySignal(BoardSignal signal)
+inline IoSlotId ioSlotForDomainSlot(DomainSlotId id)
 {
-    for (uint8_t i = 0; i < PoolDomain::kPoolDomain.ioBindingCount; ++i) {
-        const DomainIoBinding& binding = PoolDomain::kPoolDomain.ioBindings[i];
-        if (binding.signal == signal) return &binding;
+    for (uint8_t i = 0; i < PoolDomain::kPoolDomain.domainIoSlotBindingCount; ++i) {
+        const DomainIoSlotBinding& binding = PoolDomain::kPoolDomain.domainIoSlotBindings[i];
+        if (binding.domainSlot == id) return binding.ioSlot;
     }
-    return nullptr;
+    return IO_SLOT_INVALID;
 }
 
-inline const PoolDevicePreset* poolDeviceByRole(DomainRole role)
+inline const PoolDevicePreset* poolDeviceById(PoolDeviceId id)
 {
     for (uint8_t i = 0; i < PoolDomain::kPoolDomain.poolDeviceCount; ++i) {
         const PoolDevicePreset& preset = PoolDomain::kPoolDomain.poolDevices[i];
-        if (preset.role == role) return &preset;
+        if (preset.id == id) return &preset;
     }
     return nullptr;
 }
 
-inline const DomainSensorPreset* sensorByRole(DomainRole role)
+inline IoId ioIdForDomainSlot(DomainSlotId id)
 {
-    for (uint8_t i = 0; i < PoolDomain::kPoolDomain.sensorCount; ++i) {
-        const DomainSensorPreset& preset = PoolDomain::kPoolDomain.sensors[i];
-        if (preset.role == role) return &preset;
-    }
-    return nullptr;
+    return ioIdFromSlot(ioSlotForDomainSlot(id));
 }
 
 }  // namespace PoolBehaviors
-

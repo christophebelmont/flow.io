@@ -15,7 +15,11 @@
 #include "Core/Services/Services.h"
 #include "Core/CommandRegistry.h"
 #include "Core/ConfigTypes.h"
+#include "Core/Services/ITime.h"
+#include "Domain/DomainStatusServiceProvider.h"
+#include "Domain/DomainTypes.h"
 #include "Modules/PoolDeviceModule/PoolDeviceModuleDataModel.h"
+#include <freertos/semphr.h>
 
 enum PoolDeviceType : uint8_t {
     POOL_DEVICE_FILTRATION = 0,
@@ -26,8 +30,10 @@ enum PoolDeviceType : uint8_t {
 struct PoolDeviceDefinition {
     char label[24] = {0};
     uint8_t slot = 0xFF;
-    /** Required IOServiceV2 digital output id bound to this pool device. */
-    IoId ioId = IO_ID_INVALID;
+    /** Optional domain actuator slot used by this pool device command path. */
+    DomainSlotId commandSlot = DOMAIN_SLOT_INVALID;
+    /** Generic IO output slot driven by this pool device. */
+    IoSlotId ioSlot = IO_SLOT_INVALID;
     uint8_t type = POOL_DEVICE_RELAY_STD;
     bool enabled = true;
     float flowLPerHour = 0.0f;     // used for dosing volumes
@@ -60,9 +66,9 @@ public:
     void init(ConfigStore& cfg, ServiceRegistry& services) override;
     void onConfigLoaded(ConfigStore& cfg, ServiceRegistry& services) override;
     void loop() override;
-    uint16_t taskStackSize() const override { return 2560; }
+    uint16_t taskStackSize() const override { return 4096; }
     uint32_t startDelayMs() const override {
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         return 5000U;
 #else
         return 0U;
@@ -70,6 +76,10 @@ public:
     }
 
     bool defineDevice(const PoolDeviceDefinition& def);
+    void configureDomainStatus(const DomainSpec& domain,
+                               bool (*bindingPortExists)(uint16_t bindingPort)) {
+        domainStatusProvider_.configure(domain, bindingPortExists);
+    }
     const char* deviceLabel(uint8_t idx) const;
     uint8_t runtimeSnapshotCount() const override;
     const char* runtimeSnapshotSuffix(uint8_t idx) const override;
@@ -91,17 +101,19 @@ private:
     static constexpr uint8_t RESET_PENDING_MONTH = (1u << 2);
     static constexpr uint32_t RUNTIME_PERSIST_INTERVAL_MS = 60000U;
     static constexpr uint32_t MIN_VALID_EPOCH_SEC = 1609459200U; // 2021-01-01
+    static constexpr size_t RUNTIME_PERSIST_BUF_LEN = 192U;
 
     struct PoolDeviceSlot {
         bool used = false;
         const char* id = nullptr;  // stable runtime id: pdN
         PoolDeviceDefinition def{};
-        /** Cached hardware endpoint id (copied from definition at registration). */
+        /** Cached IOServiceV2 endpoint id derived from the generic IO slot. */
         IoId ioId = IO_ID_INVALID;
 
         bool desiredOn = false;
         bool actualOn = false;
         uint8_t blockReason = POOL_DEVICE_BLOCK_NONE;
+        bool runtimePublishable = false;
 
         uint32_t lastTickMs = 0;
         uint64_t runningMsDay = 0;
@@ -165,10 +177,9 @@ private:
     // Runtime
     bool configureRuntime_();
     static MqttBuildResult buildCfgBasePdmStatic_(void* ctx, uint16_t messageId, MqttBuildContext& buildCtx);
-    static MqttBuildResult buildCfgBasePdmrtStatic_(void* ctx, uint16_t messageId, MqttBuildContext& buildCtx);
     MqttBuildResult buildCfgBasePdm_(MqttBuildContext& buildCtx);
-    MqttBuildResult buildCfgBasePdmrt_(MqttBuildContext& buildCtx);
     bool snapshotRouteFromIndex_(uint8_t snapshotIdx, uint8_t& slotIdxOut, bool& metricsOut) const;
+    bool slotRuntimePublishable_(uint8_t slotIdx) const;
     bool buildStateSnapshot_(uint8_t slotIdx, char* out, size_t len, uint32_t& maxTsOut) const;
     bool buildMetricsSnapshot_(uint8_t slotIdx, char* out, size_t len, uint32_t& maxTsOut) const;
     static const char* blockReasonStr_(uint8_t reason);
@@ -184,23 +195,44 @@ private:
     bool handlePoolResetUptimeAll_(const CommandRequest& req, char* reply, size_t replyLen);
     bool resetUptimeSlot_(uint8_t slot);
     uint8_t resetUptimeAll_();
+    void emitActivity_(ActivityCode code,
+                       ActivitySource source,
+                       ActivitySeverity severity,
+                       ActivityRole role,
+                       ActivityState state,
+                       ActivityReason reason,
+                       uint8_t slot,
+                       const char* title,
+                       const char* detail,
+                       const char* icon) const;
+    void emitAutoModeDisabledByManualActivity_(ActivityRole role, uint8_t slot, const char* autoLabel) const;
+    ActivityRole activityRoleForSlot_(uint8_t slot) const;
+    bool ensureStorage_();
+    bool lockState_(TickType_t timeoutTicks = pdMS_TO_TICKS(200)) const;
+    void unlockState_() const;
+    size_t runtimePersistUsage_() const;
+    size_t runtimePersistCapacity_() const { return (size_t)POOL_DEVICE_MAX * RUNTIME_PERSIST_BUF_LEN; }
 
     // State and configuration storage
     bool runtimeReady_ = false;
     bool writesEnabled_ = false;
     portMUX_TYPE resetMux_ = portMUX_INITIALIZER_UNLOCKED;
+    mutable StaticSemaphore_t stateMutexBuf_{};
+    mutable SemaphoreHandle_t stateMutex_ = nullptr;
     uint8_t resetPendingMask_ = 0;
     bool periodReconcilePending_ = true;
 
-    char runtimePersistBuf_[POOL_DEVICE_MAX][192]{};
-    PoolDeviceSlot slots_[POOL_DEVICE_MAX]{};
+    char (*runtimePersistBuf_)[RUNTIME_PERSIST_BUF_LEN] = nullptr;
+    PoolDeviceSlot* slots_ = nullptr;
 
     // Services and shared runtime integrations
     const LogHubService* logHub_ = nullptr;
     const IOServiceV2* ioSvc_ = nullptr;
+    const TimeService* timeSvc_ = nullptr;
     const CommandService* cmdSvc_ = nullptr;
     const MqttService* mqttSvc_ = nullptr;
     const HAService* haSvc_ = nullptr;
+    const ActivityLogService* activityLogSvc_ = nullptr;
     PoolDeviceService poolSvc_{
         ServiceBinding::bind<&PoolDeviceModule::activeCount_>,
         ServiceBinding::bind<&PoolDeviceModule::svcMetaImpl_>,
@@ -211,16 +243,17 @@ private:
         ServiceBinding::bind<&PoolDeviceModule::svcRefillTankImpl_>,
         this
     };
+    DomainStatusServiceProvider domainStatusProvider_{};
     EventBus* eventBus_ = nullptr;
     DataStore* dataStore_ = nullptr;
     ConfigStore* cfgStore_ = nullptr;
+    const ConfigStoreService* cfgSvc_ = nullptr;
     MqttConfigRouteProducer* cfgMqttPub_ = nullptr;
 
-    ConfigVariable<bool,0> cfgEnabledVar_[POOL_DEVICE_MAX]{};
-    ConfigVariable<uint8_t,0> cfgDependsVar_[POOL_DEVICE_MAX]{};
-    ConfigVariable<float,0> cfgFlowVar_[POOL_DEVICE_MAX]{};
-    ConfigVariable<float,0> cfgTankCapVar_[POOL_DEVICE_MAX]{};
-    ConfigVariable<float,0> cfgTankInitVar_[POOL_DEVICE_MAX]{};
-    ConfigVariable<int32_t,0> cfgMaxUptimeVar_[POOL_DEVICE_MAX]{};
-    ConfigVariable<char,0> cfgRuntimeVar_[POOL_DEVICE_MAX]{};
+    ConfigVariable<bool,0>* cfgEnabledVar_ = nullptr;
+    ConfigVariable<uint8_t,0>* cfgDependsVar_ = nullptr;
+    ConfigVariable<float,0>* cfgFlowVar_ = nullptr;
+    ConfigVariable<float,0>* cfgTankCapVar_ = nullptr;
+    ConfigVariable<float,0>* cfgTankInitVar_ = nullptr;
+    ConfigVariable<int32_t,0>* cfgMaxUptimeVar_ = nullptr;
 };

@@ -13,6 +13,7 @@
 namespace {
 
 static constexpr uint8_t NEXTION_FF = 0xFF;
+static constexpr uint8_t NEXTION_RSP_STRING = 0x70;
 static constexpr uint8_t NEXTION_RSP_NUMBER = 0x71;
 static constexpr uint8_t NEXTION_RSP_PAGE = 0x66;
 static constexpr uint8_t NEXTION_RSP_TOUCH = 0x65;
@@ -66,8 +67,42 @@ static constexpr const char* PhGaugePercent = "vapHPercent";
 static constexpr const char* OrpGaugePercent = "vaOrpPercent";
 static constexpr const char* StateBits = "globals.vaStates";
 static constexpr const char* AlarmBits = "globals.vaAlarms";
-static constexpr const char* DisplayVersionExpr = "globals.vaVersion.val";
+static constexpr const char* DisplayVersionExpr = "globals.vaVersion.txt";
 } // namespace NextionObject
+
+static bool versionMajorEquals_(const char* version, uint8_t expected)
+{
+    if (!version || version[0] < '0' || version[0] > '9') return false;
+    uint16_t major = 0U;
+    size_t pos = 0U;
+    while (version[pos] >= '0' && version[pos] <= '9') {
+        major = (uint16_t)(major * 10U + (uint16_t)(version[pos] - '0'));
+        if (major > 99U) return false;
+        ++pos;
+    }
+    return pos > 0U && version[pos] == '.' && major == expected;
+}
+
+static bool isVersionTextValid_(const char* version)
+{
+    if (!version) return false;
+    uint8_t part = 0U;
+    uint8_t digits = 0U;
+    for (size_t i = 0U; version[i] != '\0'; ++i) {
+        const char c = version[i];
+        if (c >= '0' && c <= '9') {
+            if (++digits > 2U) return false;
+            continue;
+        }
+        if (c == '.' && digits > 0U && part < 2U) {
+            ++part;
+            digits = 0U;
+            continue;
+        }
+        return false;
+    }
+    return part == 2U && digits > 0U;
+}
 
 static bool isAlarmRowKey_(const char* key)
 {
@@ -96,7 +131,7 @@ bool NextionDriver::begin()
     started_ = true;
     pageReady_ = false;
     versionDetected_ = false;
-    displayVersion_ = 0U;
+    displayVersion_[0] = '\0';
     lastRenderMs_ = 0;
     sleeping_ = false;
     customFrameActive_ = false;
@@ -342,6 +377,11 @@ bool NextionDriver::publishHomeAlarmBits(uint32_t alarmBits)
     return sendNum_(NextionObject::AlarmBits, alarmBits);
 }
 
+bool NextionDriver::isLegacyV2() const
+{
+    return versionDetected_ && versionMajorEquals_(displayVersion_, 2U);
+}
+
 bool NextionDriver::publishV2Needles(const NextionV2NeedlePublish& publish)
 {
     if (!started_ || !isLegacyV2()) return false;
@@ -404,6 +444,68 @@ bool NextionDriver::readNumberResponse_(uint32_t& value, uint16_t timeoutMs)
     return false;
 }
 
+bool NextionDriver::readTextResponse_(char* out, size_t outLen, uint16_t timeoutMs)
+{
+    if (!out || outLen == 0U) return false;
+    out[0] = '\0';
+    if (!started_ || !cfg_.serial) return false;
+
+    char frame[HMI_DISPLAY_VERSION_TEXT_MAX]{};
+    uint8_t len = 0U;
+    uint8_t ffCount = 0U;
+    bool stringFrame = false;
+    const uint32_t start = millis();
+
+    while ((uint32_t)(millis() - start) < (uint32_t)timeoutMs) {
+        while (cfg_.serial->available() > 0) {
+            const int rb = cfg_.serial->read();
+            if (rb < 0) break;
+            const uint8_t b = (uint8_t)rb;
+
+            if (b == NEXTION_FF) {
+                ++ffCount;
+                if (ffCount >= 3U) {
+                    if (stringFrame) {
+                        frame[len] = '\0';
+                        strncpy(out, frame, outLen - 1U);
+                        out[outLen - 1U] = '\0';
+                        return true;
+                    }
+                    len = 0U;
+                    ffCount = 0U;
+                    stringFrame = false;
+                }
+                continue;
+            }
+
+            if (ffCount > 0U) {
+                len = 0U;
+                ffCount = 0U;
+                stringFrame = false;
+            }
+
+            if (!stringFrame) {
+                if (b == NEXTION_RSP_STRING) {
+                    stringFrame = true;
+                    len = 0U;
+                }
+                continue;
+            }
+
+            if (len + 1U < sizeof(frame)) {
+                frame[len++] = (char)b;
+            } else {
+                len = 0U;
+                ffCount = 0U;
+                stringFrame = false;
+            }
+        }
+        delay(1);
+    }
+
+    return false;
+}
+
 bool NextionDriver::readNumber_(const char* expr, uint32_t& value, uint16_t timeoutMs)
 {
     if (!started_ || !cfg_.serial || !expr || expr[0] == '\0') return false;
@@ -423,15 +525,36 @@ bool NextionDriver::readNumber_(const char* expr, uint32_t& value, uint16_t time
     return readNumberResponse_(value, timeoutMs);
 }
 
+bool NextionDriver::readText_(const char* expr, char* out, size_t outLen, uint16_t timeoutMs)
+{
+    if (!started_ || !cfg_.serial || !expr || expr[0] == '\0' || !out || outLen == 0U) return false;
+
+    while (cfg_.serial->available() > 0) {
+        (void)cfg_.serial->read();
+    }
+    customFrameActive_ = false;
+    customExpectedLen_ = 0U;
+    customLen_ = 0U;
+    pageResponseActive_ = false;
+    pageResponseLen_ = 0U;
+    touchResponseActive_ = false;
+    touchResponseLen_ = 0U;
+
+    if (!sendCmdFmt_("get %s", expr)) return false;
+    return readTextResponse_(out, outLen, timeoutMs);
+}
+
 bool NextionDriver::detectDisplayVersion(uint16_t timeoutMs, bool force)
 {
     if (versionDetected_ && !force) return true;
 
-    uint32_t detected = 0U;
+    char detected[HMI_DISPLAY_VERSION_TEXT_MAX]{};
     const uint16_t effectiveTimeout = timeoutMs != 0U ? timeoutMs : cfg_.displayVersionReadTimeoutMs;
-    if (!readNumber_(NextionObject::DisplayVersionExpr, detected, effectiveTimeout)) return false;
+    if (!readText_(NextionObject::DisplayVersionExpr, detected, sizeof(detected), effectiveTimeout)) return false;
+    if (!isVersionTextValid_(detected)) return false;
 
-    displayVersion_ = detected;
+    strncpy(displayVersion_, detected, sizeof(displayVersion_) - 1U);
+    displayVersion_[sizeof(displayVersion_) - 1U] = '\0';
     versionDetected_ = true;
     return true;
 }

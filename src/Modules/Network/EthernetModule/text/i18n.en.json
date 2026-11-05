@@ -1,7 +1,7 @@
 {
   "locale": "en",
   "translations": {
-    "cfgdocs.ethernet.enabled.help": "Enable or disable the W5500 Ethernet interface. When Ethernet is active, WiFi station and AP provisioning stay disabled.",
+    "cfgdocs.ethernet.enabled.help": "Enable or disable the W5500 Ethernet interface. When Ethernet is active, it has priority; WiFi station and then AP provisioning are used as fallback if Ethernet does not get an IP.",
     "cfgdocs.ethernet.enabled.label": "Ethernet enabled"
   }
 }

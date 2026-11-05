@@ -7,6 +7,7 @@
 
 #include "Core/BufferUsageTracker.h"
 #include "Core/MqttTopics.h"
+#include "Modules/Network/MQTTModule/MQTTRuntime.h"
 
 #include <esp_heap_caps.h>
 #include <esp_err.h>
@@ -210,6 +211,9 @@ void MQTTModule::onConnect_(bool)
 
     retryCount_ = 0;
     retryDelayMs_ = Limits::Mqtt::Backoff::MinMs;
+    if (dataStore_) {
+        setMqttRuntimeFullSnapshotPublished(*dataStore_, false);
+    }
     setState_(MQTTState::Connected);
 
     (void)enqueue(ProducerIdStatus, StatusMsgOnline, MqttPublishPriority::High, 0);

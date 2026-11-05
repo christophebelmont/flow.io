@@ -1,0 +1,10 @@
+{
+  "_meta": {
+    "generated": true,
+    "locale": "fr",
+    "version": 1
+  },
+  "docs": {
+    "hmi/buzzer": {}
+  }
+}

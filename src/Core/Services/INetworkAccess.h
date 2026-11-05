@@ -18,6 +18,6 @@ struct NetworkAccessService {
     NetworkAccessMode (*mode)(void* ctx);
     bool (*getIP)(void* ctx, char* out, size_t len);
     bool (*notifyWifiConfigChanged)(void* ctx);
+    bool (*notifyShutdownPending)(void* ctx);
     void* ctx;
 };
-

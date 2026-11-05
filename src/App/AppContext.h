@@ -3,8 +3,10 @@
 #include <Preferences.h>
 
 #include "Core/ConfigStore.h"
+#include "Core/I2cBus.h"
 #include "Core/ModuleManager.h"
 #include "Core/ServiceRegistry.h"
+#include "Core/Services/II2cBus.h"
 
 struct BoardSpec;
 struct DomainSpec;
@@ -17,6 +19,8 @@ struct AppContext {
     ConfigStore registry{};
     ModuleManager moduleManager{};
     ServiceRegistry services{};
+    I2CBus primaryI2cBus{};
+    I2cBusService primaryI2cBusService{&primaryI2cBus};
     const FirmwareProfile* profile = nullptr;
     const BoardSpec* board = nullptr;
     const DomainSpec* domain = nullptr;

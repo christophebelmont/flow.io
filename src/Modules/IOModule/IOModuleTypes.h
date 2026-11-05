@@ -9,8 +9,13 @@
 #include "Core/Services/IIO.h"
 #include "Core/WokwiDefaultOverrides.h"
 
-typedef uint16_t PhysicalPortId;
-constexpr PhysicalPortId IO_PORT_INVALID = 0xFFFFu;
+typedef uint16_t BindingPointId;
+typedef BindingPointId PhysicalPortId;
+typedef uint8_t IOExpanderId;
+constexpr BindingPointId BINDING_POINT_NONE = 0u;
+constexpr PhysicalPortId IO_PORT_INVALID = BINDING_POINT_NONE;
+constexpr IOExpanderId IO_EXPANDER_INVALID = 0xFFu;
+constexpr uint8_t IO_MAX_EXPANDERS = 4u;
 
 struct IOModuleConfig {
     bool enabled = FLOW_WIRDEF_IO_EN;
@@ -23,23 +28,34 @@ struct IOModuleConfig {
     uint8_t adsExternalAddr = FLOW_WIRDEF_IO_AEAD;
     int32_t adsGain = FLOW_MODDEF_IO_AGAI;
     int32_t adsRate = FLOW_MODDEF_IO_ARAT;
-    bool sht40Enabled = false;
+    bool sht40Enabled =
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+        true;
+#else
+        false;
+#endif
     uint8_t sht40Address = 0x44;
     int32_t sht40PollMs = 2000;
-    bool bmp280Enabled = false;
+    bool bmp280Enabled =
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+        true;
+#else
+        false;
+#endif
     uint8_t bmp280Address = 0x76;
     int32_t bmp280PollMs = 1000;
-    bool bme680Enabled = false;
+    bool bme680Enabled = true;
     uint8_t bme680Address = 0x77;
     int32_t bme680PollMs = 2000;
-    bool ina226Enabled = false;
+    bool ina226Enabled =
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+        true;
+#else
+        false;
+#endif
     uint8_t ina226Address = 0x40;
     int32_t ina226PollMs = 500;
     float ina226ShuntOhms = 0.1f;
-    bool pcfEnabled = FLOW_WIRDEF_IO_PCFEN;
-    uint8_t pcfAddress = FLOW_WIRDEF_IO_PCFAD;
-    uint8_t pcfMaskDefault = FLOW_WIRDEF_IO_PCFMK;
-    bool pcfActiveLow = FLOW_WIRDEF_IO_PCFAL;
     bool traceEnabled = FLOW_MODDEF_IO_TREN;
     int32_t tracePeriodMs = FLOW_MODDEF_IO_TRMS;
 };
@@ -71,14 +87,41 @@ enum IOBindingPortKind : uint8_t {
     IO_PORT_KIND_SHT40 = 9,
     IO_PORT_KIND_BMP280 = 10,
     IO_PORT_KIND_BME680 = 11,
-    IO_PORT_KIND_TCA9554_OUTPUT = 12
+    IO_PORT_KIND_TCA9554_OUTPUT = 12,
+    IO_PORT_KIND_MCP23017_OUTPUT = 13,
+    IO_PORT_KIND_MCP23017_INPUT = 14
+};
+
+enum IOExpanderKind : uint8_t {
+    IO_EXPANDER_KIND_NONE = 0,
+    IO_EXPANDER_KIND_PCF8574 = 1,
+    IO_EXPANDER_KIND_TCA9554 = 2,
+    IO_EXPANDER_KIND_MCP23017 = 3
+};
+
+struct IOExpanderSpec {
+    IOExpanderId expanderId = IO_EXPANDER_INVALID;
+    uint8_t kind = IO_EXPANDER_KIND_NONE;
+    bool enabled = false;
+    uint8_t address = 0;
+    uint8_t maskDefault = 0;
+    /** Fixed board-level output inversion; not user-configurable. */
+    bool outputsInverted = false;
+};
+
+struct IOExpanderConfig {
+    bool enabled = false;
+    uint8_t address = 0;
+    uint8_t maskDefault = 0;
 };
 
 struct IOBindingPortSpec {
     PhysicalPortId portId = IO_PORT_INVALID;
     uint8_t kind = IO_PORT_KIND_NONE;
-    uint8_t param0 = 0;
-    uint8_t param1 = 0;
+    uint8_t channel = 0;
+    IOExpanderId expanderId = IO_EXPANDER_INVALID;
+    // Physical marking exposed by the board/profile (for example GPIO04, GPA0 or EXIO1).
+    const char* boardLabel = nullptr;
 };
 
 typedef void (*IOAnalogValueCallback)(void* ctx, float value);
@@ -158,7 +201,7 @@ struct IODigitalInputSlotConfig {
     uint8_t pullMode = IO_PULL_NONE;
     uint8_t mode = IO_DIGITAL_INPUT_STATE;
     uint8_t edgeMode = IO_EDGE_RISING;
-    uint32_t counterDebounceUs = 0;
+    int32_t counterDebounceUs = 0;
     float c0 = 1.0f;
     float counterTotal = 0.0f;
     int32_t precision = 0;

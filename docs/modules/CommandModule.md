@@ -47,9 +47,9 @@ Commandes que les modules tentent d'enregistrer selon le profil compilé:
 - `pooldevice.uptime.reset_all`
 - `poollogic.filtration.write`, `poollogic.filtration.recalc`
 - `poollogic.auto_mode.set`, `poollogic.auto_mode.toggle`
-- `poollogic.ph_auto_mode.set/toggle`, `poollogic.orp_auto_mode.set/toggle`, `poollogic.winter_mode.set/toggle`
+- `poollogic.ph_auto_mode.set/toggle`, `poollogic.dis_auto_mode.set/toggle`, `poollogic.winter_mode.set/toggle`
 - `poollogic.filtration.toggle`
-- `poollogic.ph_pump.write/toggle`, `poollogic.orp_pump.write/toggle`
+- `poollogic.ph_pump.write/toggle`, `poollogic.dis_pump.write/toggle`
 - `poollogic.lights.write/toggle`
 - `poollogic.robot.write/toggle`, `poollogic.heater.write/toggle`
 - `poollogic.chlorine_generator.write/toggle`
@@ -66,3 +66,5 @@ Alias pris en charge a l'execution (sans enregistrement dedie):
 - `poollogic.light.toggle` -> `poollogic.lights.toggle`
 - `poollogic.swg.write` -> `poollogic.chlorine_generator.write`
 - `poollogic.swg.toggle` -> `poollogic.chlorine_generator.toggle`
+- `poollogic.orp_auto_mode.set/toggle` -> `poollogic.dis_auto_mode.set/toggle`
+- `poollogic.orp_pump.write/toggle` -> `poollogic.dis_pump.write/toggle`

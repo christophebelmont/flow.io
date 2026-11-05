@@ -44,9 +44,9 @@ bool RemoteHmiUdpDriver::hasDisplayVersion() const
     return udpServer_ && udpServer_->hasDisplayVersion();
 }
 
-uint32_t RemoteHmiUdpDriver::displayVersion() const
+const char* RemoteHmiUdpDriver::displayVersion() const
 {
-    return udpServer_ ? udpServer_->displayVersion() : 0U;
+    return udpServer_ ? udpServer_->displayVersion() : "";
 }
 
 bool RemoteHmiUdpDriver::isLegacyV2() const

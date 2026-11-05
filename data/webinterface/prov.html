@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="icon" type="image/svg+xml" href="/webinterface/favicon.svg" />
-  <title>flow.io - WiFi</title>
+  <title>flow.io - Réseau</title>
   <link rel="stylesheet" href="/webinterface/app-core.css" />
   <style>
     body.provisioning-page{background:var(--md-bg);color:var(--md-on-surface);}
@@ -45,7 +45,7 @@
       <div class="prov-section">
         <div class="prov-head">
           <div>
-            <h1 class="prov-title">Configuration WiFi</h1>
+            <h1 class="prov-title">Configuration réseau</h1>
             <p class="prov-subtitle">Selectionnez le reseau a utiliser, puis validez pour enregistrer la configuration.</p>
           </div>
           <div class="wifi-section-toggle">
@@ -61,7 +61,7 @@
         <div class="form-grid">
           <div class="field">
             <label for="provWifiSsid">SSID</label>
-            <input id="provWifiSsid" autocomplete="off" maxlength="32" placeholder="Nom du reseau WiFi" />
+            <input id="provWifiSsid" autocomplete="off" maxlength="32" placeholder="Nom du reseau" />
           </div>
           <div class="field">
             <label for="provWifiSsidList">Reseaux detectes</label>
@@ -75,7 +75,7 @@
           <div class="field full">
             <label for="provWifiPass">Mot de passe</label>
             <div class="password-wrap">
-              <input id="provWifiPass" type="password" autocomplete="current-password" maxlength="64" placeholder="Mot de passe WiFi" />
+              <input id="provWifiPass" type="password" autocomplete="current-password" maxlength="64" placeholder="Mot de passe reseau" />
               <button id="provTogglePass" class="password-toggle" type="button" aria-label="Afficher le mot de passe" aria-pressed="false">Voir</button>
             </div>
           </div>

@@ -6,16 +6,18 @@
 #include <Arduino.h>  // micros(), millis()
 #include <stdio.h>
 #include "Core/BufferUsageTracker.h"
+#include "Core/EventBus/EventPayloads.h"
 #include "Core/Log.h"
 
 #define LOG_MODULE_ID ((LogModuleId)LogModuleIdValue::CoreEventBus)
 
 #if EVENTBUS_PROFILE
-static uint32_t g_lastWarnMs = 0;
-static bool canWarnNow() {
+static uint32_t g_lastDispatchWarnMs = 0;
+static uint32_t g_lastHandlerWarnMs = 0;
+static bool canWarnNow(uint32_t& lastWarnMs) {
     uint32_t now = millis();
-    if ((uint32_t)(now - g_lastWarnMs) < EVENTBUS_WARN_MIN_INTERVAL_MS) return false;
-    g_lastWarnMs = now;
+    if ((uint32_t)(now - lastWarnMs) < EVENTBUS_WARN_MIN_INTERVAL_MS) return false;
+    lastWarnMs = now;
     return true;
 }
 #endif
@@ -80,7 +82,6 @@ const char* EventBus::subRejectReasonStr_(uint8_t reason)
 }
 
 bool EventBus::post(EventId id, const void* payload, size_t len, ModuleId producer) {
-    (void)producer;
     if (_queue == nullptr) {
         portENTER_CRITICAL(&_statsMux);
         ++_postDropTotal;
@@ -104,6 +105,7 @@ bool EventBus::post(EventId id, const void* payload, size_t len, ModuleId produc
 
     QueuedEvent qe;
     qe.id = id;
+    qe.producer = producer;
     qe.len = static_cast<uint8_t>(len);
     if (len > 0 && payload != nullptr) {
         memcpy(qe.data, payload, len);
@@ -112,6 +114,9 @@ bool EventBus::post(EventId id, const void* payload, size_t len, ModuleId produc
     /// non-blocking send (0 ticks) to keep real-time constraints
     BaseType_t ok = xQueueSend(_queue, &qe, 0);
     const UBaseType_t queued = _queue ? uxQueueMessagesWaiting(_queue) : 0U;
+    uint32_t dropBurst = 0U;
+    uint32_t dropTotal = 0U;
+    uint32_t winDropCount = 0U;
     portENTER_CRITICAL(&_statsMux);
     if (ok == pdTRUE) {
         ++_postOkTotal;
@@ -121,8 +126,28 @@ bool EventBus::post(EventId id, const void* payload, size_t len, ModuleId produc
         ++_winDropCount;
         ++_winCurrentDropBurst;
         if (_winCurrentDropBurst > _winMaxDropBurst) _winMaxDropBurst = _winCurrentDropBurst;
+        dropBurst = _winCurrentDropBurst;
+        dropTotal = _postDropTotal;
+        winDropCount = _winDropCount;
     }
     portEXIT_CRITICAL(&_statsMux);
+    if (ok != pdTRUE && (dropBurst <= 8U || (dropBurst % 16U) == 0U)) {
+        uint16_t dataKey = 0U;
+        if (id == EventId::DataChanged && qe.len >= sizeof(DataChangedPayload)) {
+            const DataChangedPayload* p = reinterpret_cast<const DataChangedPayload*>(qe.data);
+            dataKey = p->id;
+        }
+        Log::warn(LOG_MODULE_ID,
+                  "post drop event=%u producer=%u data_key=%u queue=%u/%u burst=%lu win_drops=%lu drop_total=%lu",
+                  (unsigned)id,
+                  (unsigned)producer,
+                  (unsigned)dataKey,
+                  (unsigned)queued,
+                  (unsigned)QUEUE_LENGTH,
+                  (unsigned long)dropBurst,
+                  (unsigned long)winDropCount,
+                  (unsigned long)dropTotal);
+    }
     BufferUsageTracker::note(TrackedBufferId::EventBusRuntime,
                              (size_t)_count * sizeof(Subscriber) + (size_t)queued * sizeof(QueuedEvent),
                              (size_t)QUEUE_LENGTH * sizeof(QueuedEvent) + sizeof(_subs),
@@ -132,7 +157,6 @@ bool EventBus::post(EventId id, const void* payload, size_t len, ModuleId produc
 }
 
 bool EventBus::postFromISR(EventId id, const void* payload, size_t len, ModuleId producer) {
-    (void)producer;
     if (_queue == nullptr) {
         portENTER_CRITICAL_ISR(&_statsMux);
         ++_postDropTotal;
@@ -158,6 +182,7 @@ bool EventBus::postFromISR(EventId id, const void* payload, size_t len, ModuleId
 
     QueuedEvent qe;
     qe.id = id;
+    qe.producer = producer;
     qe.len = static_cast<uint8_t>(len);
     if (len > 0 && payload != nullptr) {
         memcpy(qe.data, payload, len);
@@ -366,6 +391,7 @@ void EventBus::dispatch(uint16_t maxEvents) {
 
 #if EVENTBUS_PROFILE
     const uint32_t tDispatch0 = micros();
+    const UBaseType_t queuedBefore = uxQueueMessagesWaiting(_queue);
     uint16_t dispatched = 0;
 #endif
 
@@ -385,8 +411,15 @@ void EventBus::dispatch(uint16_t maxEvents) {
 
 #if EVENTBUS_PROFILE
     const uint32_t dt = (uint32_t)(micros() - tDispatch0);
-    if (dispatched > 0 && dt > EVENTBUS_DISPATCH_WARN_US && canWarnNow()) {
-        Log::warn(LOG_MODULE_ID,"dispatch slow: %u events dt=%lu us", (unsigned)dispatched, (unsigned long)dt);
+    if (dispatched > 0 && dt > EVENTBUS_DISPATCH_WARN_US && canWarnNow(g_lastDispatchWarnMs)) {
+        const UBaseType_t queuedAfter = uxQueueMessagesWaiting(_queue);
+        Log::warn(LOG_MODULE_ID,
+                  "dispatch slow: events=%u dt=%lu us queue=%u->%u/%u",
+                  (unsigned)dispatched,
+                  (unsigned long)dt,
+                  (unsigned)queuedBefore,
+                  (unsigned)queuedAfter,
+                  (unsigned)QUEUE_LENGTH);
     }
 #endif
 }
@@ -408,12 +441,19 @@ void EventBus::dispatchOne(const QueuedEvent& qe) {
 
 #if EVENTBUS_PROFILE
             const uint32_t dt = (uint32_t)(micros() - t0);
-            if (dt > EVENTBUS_HANDLER_WARN_US && canWarnNow()) {
-                Log::warn(LOG_MODULE_ID,"slow handler: event=%u cb=%p user=%p dt=%lu us",
-                     (unsigned)qe.id,
-                     (void*)_subs[i].cb,
-                     _subs[i].user,
-                     (unsigned long)dt);
+            if (dt > EVENTBUS_HANDLER_WARN_US && canWarnNow(g_lastHandlerWarnMs)) {
+                const UBaseType_t queuedAfter = _queue ? uxQueueMessagesWaiting(_queue) : 0U;
+                Log::warn(LOG_MODULE_ID,
+                          "slow handler: event=%u producer=%u sub=%u/%u cb=%p user=%p dt=%lu us queue=%u/%u",
+                          (unsigned)qe.id,
+                          (unsigned)qe.producer,
+                          (unsigned)i,
+                          (unsigned)_count,
+                          (void*)_subs[i].cb,
+                          _subs[i].user,
+                          (unsigned long)dt,
+                          (unsigned)queuedAfter,
+                          (unsigned)QUEUE_LENGTH);
             }
 #endif
         }

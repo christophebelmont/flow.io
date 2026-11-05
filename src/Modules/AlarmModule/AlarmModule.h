@@ -22,7 +22,7 @@ public:
     BaseType_t taskCore() const override { return 1; }
     uint16_t taskStackSize() const override { return 2560; }
     UBaseType_t taskStackCaps() const override {
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         return MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
 #else
         return Module::taskStackCaps();
@@ -93,6 +93,7 @@ private:
     int16_t findSlotById_(AlarmId id) const;
     int16_t findFreeSlot_() const;
     void emitAlarmEvent_(EventId id, AlarmId alarmId) const;
+    void emitAlarmActivity_(ActivityCode code, AlarmId alarmId);
     void noteAlarmNotified_(AlarmId id, uint32_t nowMs);
     uint8_t takeDueAlarmReminderIds_(AlarmId* out, uint8_t max, uint32_t nowMs);
     static bool delayReached_(uint32_t sinceMs, uint32_t delayMs, uint32_t nowMs);
@@ -118,6 +119,7 @@ private:
     EventBus* eventBus_ = nullptr;
     const CommandService* cmdSvc_ = nullptr;
     const HAService* haSvc_ = nullptr;
+    const ActivityLogService* activityLogSvc_ = nullptr;
     bool haEntitiesRegistered_ = false;
 
     bool enabled_ = true;

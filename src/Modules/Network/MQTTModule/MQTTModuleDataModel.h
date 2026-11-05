@@ -9,6 +9,7 @@
 /** @brief MQTT runtime status. */
 struct MQTTRuntimeData {
     bool mqttReady = false;
+    bool runtimeFullSnapshotPublished = false;
     uint32_t rxDrop = 0;
     uint32_t parseFail = 0;
     uint32_t handlerFail = 0;

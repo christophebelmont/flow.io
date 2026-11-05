@@ -7,13 +7,27 @@
 class RuntimeProducer {
 public:
     static constexpr uint8_t ProducerId = 4;
+    using InitialFullSnapshotCallback = void (*)(void* ctx);
 
-    void configure(const MqttService* mqttSvc);
+    struct DataChangeStats {
+        uint8_t routeCount = 0;
+        uint8_t checked = 0;
+        uint8_t matched = 0;
+        uint8_t enqueueOk = 0;
+        uint8_t enqueueFail = 0;
+        uint8_t pendingAlready = 0;
+        uint32_t enqueueUs = 0;
+    };
+
+    void configure(const MqttService* mqttSvc,
+                   InitialFullSnapshotCallback initialFullSnapshotCb = nullptr,
+                   void* initialFullSnapshotCtx = nullptr);
     bool registerProvider(const IRuntimeSnapshotProvider* provider);
     void rebuildRoutes();
+    uint8_t routeCount() const { return routeCount_; }
 
     void onConnected();
-    void onDataChanged(DataKey key);
+    DataChangeStats onDataChanged(DataKey key);
 
     MqttBuildResult buildMessage(uint16_t messageId, MqttBuildContext& ctx);
     void onMessagePublished(uint16_t messageId);
@@ -40,10 +54,17 @@ private:
     const IRuntimeSnapshotProvider* providers_[MaxProviders] = {};
     uint8_t providerCount_ = 0;
 
-    Route routes_[Limits::MaxRuntimeRoutes] = {};
+    Route* routes_ = nullptr;
     uint8_t routeCount_ = 0;
+    bool initialFullSnapshotActive_ = false;
+    bool* initialFullSnapshotDone_ = nullptr;
+    uint8_t initialFullSnapshotRemaining_ = 0;
+    InitialFullSnapshotCallback initialFullSnapshotCb_ = nullptr;
+    void* initialFullSnapshotCtx_ = nullptr;
 
+    bool ensureStorage_();
     void markRoutePending_(uint8_t idx, bool force);
-    void enqueueRoute_(uint8_t idx);
+    bool enqueueRoute_(uint8_t idx);
+    void completeInitialFullSnapshotRoute_(uint8_t idx);
+    void notifyInitialFullSnapshotComplete_();
 };
-

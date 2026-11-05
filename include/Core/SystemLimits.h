@@ -29,7 +29,7 @@ constexpr size_t JsonConfigApplyBuf = JsonCfgBuf;
 /** @brief Maximum number of registered config variables in `ConfigStore` metadata table.
  *  Sized for current FlowIO/Supervisor profiles with additional headroom for local TFT
  *  sensor/alarm slots, dashboard/LCD and PoolLogic extensions while staying bounded. */
-constexpr size_t MaxConfigVars = 480;
+constexpr size_t MaxConfigVars = 768;
 /** @brief Maximum NVS key length (without null terminator) enforced by `ConfigTypes::NVS_KEY`. */
 constexpr size_t MaxNvsKeyLen = 15;
 /** @brief FreeRTOS log queue length used by `LogHub` (`LogHubModule::init`).
@@ -39,13 +39,16 @@ constexpr uint16_t LogQueueLen = 256;
  *  Sized to absorb startup bursts while limiting DRAM usage. */
 constexpr uint8_t EventQueueLen = 40;
 /** @brief Maximum number of EventBus subscribers (`EventBus::MAX_SUBSCRIBERS`). */
-constexpr uint8_t EventSubscribersMax = 50;
+#ifndef FLOW_EVENT_SUBSCRIBERS_MAX
+#define FLOW_EVENT_SUBSCRIBERS_MAX 50
+#endif
+constexpr uint8_t EventSubscribersMax = FLOW_EVENT_SUBSCRIBERS_MAX;
 
 /** @brief Core runtime limits shared by the module framework. */
 namespace Core {
 namespace Capacity {
 /** @brief Maximum number of modules registered in `ModuleManager`. */
-constexpr size_t MaxModules = 25;
+constexpr size_t MaxModules = 28;
 /** @brief Maximum number of declared tasks tracked by `ModuleManager`. */
 constexpr size_t MaxModuleTasks = 32;
 }  // namespace Capacity
@@ -65,7 +68,11 @@ constexpr uint32_t LoopDelayMs = 10;
 namespace Config {
 namespace Capacity {
 /** @brief Maximum number of unique config branches returned by `ConfigStore::listModules`. */
-constexpr uint8_t ModuleListMax = 96;
+constexpr uint8_t ModuleListMax = 160;
+/** @brief FreeRTOS queue length for serialized ConfigStore persistence requests. */
+constexpr uint8_t PersistenceQueueLen = 16;
+/** @brief Maximum runtime blob payload length accepted by ConfigStore async persistence. */
+constexpr size_t RuntimeBlobAsyncMax = 192;
 }  // namespace Capacity
 }  // namespace Config
 
@@ -199,7 +206,7 @@ constexpr uint8_t JitterPct = 15;
 
 }  // namespace Mqtt
 /** @brief Maximum number of runtime MQTT routes stored in the runtime mux (`RuntimeProducer`). */
-constexpr uint8_t MaxRuntimeRoutes = 56;
+constexpr uint8_t MaxRuntimeRoutes = 112;
 /** @brief Default momentary digital output pulse duration in ms (`IOModule`). */
 constexpr uint16_t MomentaryPulseMs = 500;
 /** @brief Default periodic trace interval for ORP/pH/PSI calc logs (`IOModule`, `trace_period_ms`). */
@@ -215,6 +222,17 @@ constexpr uint8_t MaxDigitalOutputs = BoardCapacityProfile::kIoCapacity.digitalO
 constexpr uint8_t AnalogConfigSlots = BoardCapacityProfile::kIoCapacity.analogConfigSlots;
 constexpr uint8_t DigitalInputConfigSlots = BoardCapacityProfile::kIoCapacity.digitalInputConfigSlots;
 constexpr uint8_t DigitalOutputConfigSlots = BoardCapacityProfile::kIoCapacity.digitalOutputConfigSlots;
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+constexpr uint8_t MaxDomainSlots = 20;
+constexpr uint8_t MaxDomainIoSlotBindings = 20;
+// pd07 remains the water-heater device; eight indices are therefore required
+// even though the Waveshare domain has seven typed pool-device presets.
+constexpr uint8_t MaxPoolDevices = 8;
+#else
+constexpr uint8_t MaxDomainSlots = 24;
+constexpr uint8_t MaxDomainIoSlotBindings = 24;
+constexpr uint8_t MaxPoolDevices = 16;
+#endif
 
 static_assert(MaxAnalogEndpoints > 0, "IO analogEndpoints must be at least 1");
 static_assert(MaxDigitalInputs > 0, "IO digitalInputs must be at least 1");
@@ -225,6 +243,9 @@ static_assert(DigitalOutputConfigSlots >= 8, "IO digitalOutputConfigSlots must k
 static_assert(AnalogConfigSlots >= MaxAnalogEndpoints, "analog config slots must cover runtime analog endpoints");
 static_assert(DigitalInputConfigSlots >= MaxDigitalInputs, "digital input config slots must cover runtime inputs");
 static_assert(DigitalOutputConfigSlots >= MaxDigitalOutputs, "digital output config slots must cover runtime outputs");
+static_assert(MaxDomainSlots > 0, "domain slot capacity must be non-zero");
+static_assert(MaxDomainIoSlotBindings >= MaxDomainSlots, "domain IO binding capacity must cover domain slots");
+static_assert(MaxPoolDevices > 0, "pool device capacity must be non-zero");
 }  // namespace Io
 
 /** @brief Alarm engine compile-time capacities and defaults. */
@@ -244,7 +265,7 @@ namespace Wifi {
 /** @brief Maximum number of scanned networks retained for provisioning UIs. */
 #if defined(FLOW_PROFILE_FLOW_CONNECT_DISPLAY)
 constexpr uint8_t MaxScanResults = 8;
-#elif defined(FLOW_PROFILE_FLOWIOS3)
+#elif defined(FLOW_PROFILE_WAVESHARE)
 constexpr uint8_t MaxScanResults = 12;
 #else
 constexpr uint8_t MaxScanResults = 24;
@@ -254,7 +275,7 @@ namespace Buffers {
 /** @brief JSON document/output buffer used for WiFi scan status snapshots. */
 #if defined(FLOW_PROFILE_FLOW_CONNECT_DISPLAY)
 constexpr size_t ScanStatusJson = 1536;
-#elif defined(FLOW_PROFILE_FLOWIOS3)
+#elif defined(FLOW_PROFILE_WAVESHARE)
 constexpr size_t ScanStatusJson = 4096;
 #else
 constexpr size_t ScanStatusJson = 3072;
@@ -303,14 +324,14 @@ constexpr uint8_t MaxBinarySensors = BoardCapacityProfile::kHaCapacity.binarySen
 constexpr uint8_t MaxSwitches = BoardCapacityProfile::kHaCapacity.switches;
 constexpr uint8_t MaxNumbers = BoardCapacityProfile::kHaCapacity.numbers;
 constexpr uint8_t MaxButtons = BoardCapacityProfile::kHaCapacity.buttons;
-constexpr uint8_t MaxDiscoveryCleanups = BoardCapacityProfile::kHaCapacity.discoveryCleanups;
+constexpr uint8_t MaxSelects = BoardCapacityProfile::kHaCapacity.selects;
 
 static_assert(MaxSensors > 0, "HA sensors capacity must be at least 1");
 static_assert(MaxBinarySensors > 0, "HA binarySensors capacity must be at least 1");
 static_assert(MaxSwitches > 0, "HA switches capacity must be at least 1");
 static_assert(MaxNumbers > 0, "HA numbers capacity must be at least 1");
 static_assert(MaxButtons > 0, "HA buttons capacity must be at least 1");
-static_assert(MaxDiscoveryCleanups > 0, "HA cleanup capacity must be at least 1");
+static_assert(MaxSelects > 0, "HA selects capacity must be at least 1");
 }  // namespace Capacity
 
 namespace Timing {

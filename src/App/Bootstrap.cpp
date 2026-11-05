@@ -1,6 +1,7 @@
 #include "App/Bootstrap.h"
 
 #include "App/BuildFlags.h"
+#include "Core/Services/IHmi.h"
 #include "Core/Services/ILogger.h"
 
 #ifndef FLOW_ENABLE_BOOT_LOG_CAPTURE
@@ -11,8 +12,8 @@
 #include "Profiles/FlowIO/FlowIOProfile.h"
 #endif
 
-#if FLOW_BUILD_IS_FLOWIOS3
-#include "Profiles/FlowIOS3/FlowIOS3Profile.h"
+#if FLOW_BUILD_IS_WAVESHARE
+#include "Profiles/Waveshare/WaveshareProfile.h"
 #endif
 
 #if FLOW_BUILD_IS_SUPERVISOR
@@ -33,14 +34,19 @@ AppContext gContext{};
 bool gStarted = false;
 #if FLOW_ENABLE_BOOT_LOG_CAPTURE
 bool gBootLogCaptureCompleteMarked = false;
+
+bool bootLogCaptureWaitsForHaDiscovery()
+{
+    return gContext.services.has(ServiceId::Ha);
+}
 #endif
 
 const FirmwareProfile& resolveProfile()
 {
 #if FLOW_BUILD_IS_FLOWIO
     return Profiles::FlowIO::profile();
-#elif FLOW_BUILD_IS_FLOWIOS3
-    return Profiles::FlowIOS3::profile();
+#elif FLOW_BUILD_IS_WAVESHARE
+    return Profiles::Waveshare::profile();
 #elif FLOW_BUILD_IS_SUPERVISOR
     return Profiles::Supervisor::profile();
 #elif FLOW_BUILD_IS_FLOW_CONNECT_DISPLAY
@@ -61,6 +67,7 @@ void markBootLogCaptureCompleteIfReady()
 {
     if (gBootLogCaptureCompleteMarked) return;
     if (!gContext.moduleManager.startupComplete()) return;
+    if (bootLogCaptureWaitsForHaDiscovery()) return;
 
     markBootLogCaptureComplete();
     gBootLogCaptureCompleteMarked = true;
@@ -78,11 +85,16 @@ void run()
     gContext.identity = &profile.identity;
     gContext.supervisorRuntime = profile.supervisorRuntime;
 
+    (void)gContext.services.add(ServiceId::I2cBus, &gContext.primaryI2cBusService);
+
     if (profile.setup) {
         profile.setup(gContext);
     }
 
     gContext.bootCompleted = true;
+    if (const HmiService* hmi = gContext.services.get<HmiService>(ServiceId::Hmi)) {
+        if (hmi->setBootComplete) hmi->setBootComplete(hmi->ctx);
+    }
     gStarted = true;
 #if FLOW_ENABLE_BOOT_LOG_CAPTURE
     markBootLogCaptureCompleteIfReady();

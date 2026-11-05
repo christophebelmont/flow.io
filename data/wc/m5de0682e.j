@@ -1,1 +1,1 @@
-{"ok":true,"module":"io/drivers/ads1115_int","docs":{"io/drivers/ads1115_int/address":{"display_format":"hex"}},"meta":{}}
+{"ok":true,"module":"io/drivers/ads1115_int","docs":{"io/drivers/ads1115_int/address":{"type":"UInt8","label_t":"cfgdocs.io.drivers.ads1115_int.address.label","help_t":"cfgdocs.io.drivers.ads1115_int.address.help","display_format":"hex","label":"Adresse ADS interne","label_i18n":"cfgdocs.io.drivers.ads1115_int.address.label","help":"Adresse I2C du convertisseur ADS1115 interne.","help_i18n":"cfgdocs.io.drivers.ads1115_int.address.help"}},"meta":{}}

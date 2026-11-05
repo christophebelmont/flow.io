@@ -75,3 +75,16 @@ bool computeFiltrationWindowDeterministic(const FiltrationWindowInput& in, Filtr
     out.stopHour = (uint8_t)stop;
     return true;
 }
+
+bool isFiltrationWindowActiveAtMinute(uint8_t startHour, uint8_t stopHour, uint16_t minuteOfDay)
+{
+    const uint16_t clampedMinute = (minuteOfDay < 1440U) ? minuteOfDay : 1439U;
+    const uint16_t startMinute = (uint16_t)(((startHour < 24U) ? startHour : 23U) * 60U);
+    const uint16_t stopMinute = (uint16_t)(((stopHour < 24U) ? stopHour : 23U) * 60U);
+
+    if (startMinute == stopMinute) return false;
+
+    return (stopMinute <= startMinute)
+        ? (clampedMinute >= startMinute || clampedMinute < stopMinute)
+        : (clampedMinute >= startMinute && clampedMinute < stopMinute);
+}

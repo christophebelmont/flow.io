@@ -15,10 +15,11 @@
       "label_t": "cfgdocs.tft.s3.auto_off_60s.label",
       "help_t": "cfgdocs.tft.s3.auto_off_60s.help"
     },
-    "tft/s3/motion_gpio": {
-      "type": "Int32",
-      "label_t": "cfgdocs.tft.s3.motion_gpio.label",
-      "help_t": "cfgdocs.tft.s3.motion_gpio.help"
+    "tft/s3/motion_io_id": {
+      "type": "UInt16",
+      "label_t": "cfgdocs.tft.s3.motion_io_id.label",
+      "help_t": "cfgdocs.tft.s3.motion_io_id.help",
+      "enum_set": "flowio_logical_input_digital"
     },
     "tft/s3/sensors/slot00/color_id": {
       "type": "UInt8",

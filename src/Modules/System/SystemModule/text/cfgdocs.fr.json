@@ -5,6 +5,11 @@
     "version": 1
   },
   "docs": {
+    "system/devicename": {
+      "type": "CharArray",
+      "label_t": "cfgdocs.system.devicename.label",
+      "help_t": "cfgdocs.system.devicename.help"
+    },
     "system/lang": {
       "type": "CharArray",
       "label_t": "cfgdocs.system.lang.label",

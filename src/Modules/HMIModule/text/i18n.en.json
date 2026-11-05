@@ -1,17 +1,16 @@
 {
   "locale": "en",
   "translations": {
-    "cfgdocs.hmi.leds.enabled.help": "Activate front LEDs on some flow.io/Poolmaster boards.",
+    "cfgdocs.hmi.leds.enabled.help": "Enable the front LED panel driven by the dedicated PCF8574A at I2C address 0x3C.",
     "cfgdocs.hmi.leds.enabled.label": "LEDs enabled",
+    "cfgdocs.hmi.leds.waveshare_enabled.help": "Enable the Waveshare WS2812 LED.",
+    "cfgdocs.hmi.leds.waveshare_enabled.label": "Waveshare LED enabled",
     "cfgdocs.hmi.nextion.enabled.help": "Activate locally connected Nextion screen (serial port).",
     "cfgdocs.hmi.nextion.enabled.label": "Nextion enabled",
     "cfgdocs.hmi.venice.enabled.help": "Enable periodic water temperature transmission to a compatible TFA Venice device.",
     "cfgdocs.hmi.venice.enabled.label": "Venice RF433 enabled",
     "cfgdocs.hmi.venice.tx_gpio.help": "Venice RF433 transmitter GPIO.",
     "cfgdocs.hmi.venice.tx_gpio.label": "Venice Transmitter GPIO",
-    "cfgmods.hmi.label": "display",
-    "cfgmods.hmi.leds.label": "Front LEDs",
-    "cfgmods.hmi.nextion.label": "Nextion",
-    "cfgmods.hmi.venice.label": "Venice RF433"
+    "cfgmods.hmi.label": "hmi"
   }
 }

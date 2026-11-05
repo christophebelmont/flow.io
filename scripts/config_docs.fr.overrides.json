@@ -1,19 +1,19 @@
 {
   "wifi/enabled": {
-    "label": "WiFi activé",
-    "help": "Active ou désactive la connexion WiFi en mode station."
+    "label": "Réseau activé",
+    "help": "Active ou désactive la connexion réseau en mode station."
   },
   "wifi/ssid": {
     "label": "SSID",
-    "help": "Nom du réseau WiFi auquel se connecter."
+    "help": "Nom du réseau auquel se connecter."
   },
   "wifi/pass": {
-    "label": "Mot de passe WiFi",
-    "help": "Mot de passe WPA/WPA2 du réseau WiFi."
+    "label": "Mot de passe réseau",
+    "help": "Mot de passe WPA/WPA2 du réseau."
   },
-  "wifi/mdns": {
-    "label": "Nom mDNS",
-    "help": "Nom d'hôte mDNS diffusé sur le réseau local."
+  "system/devicename": {
+    "label": "Nom de l'appareil",
+    "help": "Nom utilisé pour l'affichage web et l'annonce mDNS."
   },
   "mqtt/host": {
     "label": "Hôte MQTT",
@@ -63,11 +63,11 @@
     "label": "Préfixe des entités Home Assistant",
     "help": "Préfixe appliqué aux object_id Home Assistant: <prefix>_<entité>. Si vide, seul le nom de l'entité est utilisé."
   },
-  "poollogic/pid/ph_setpoint": {
+  "poollogic/ph/ph_setpoint": {
     "label": "Consigne pH",
     "help": "Valeur cible de pH pour la régulation."
   },
-  "poollogic/pid/orp_setpoint": {
+  "poollogic/chlorine/dis_setpoint": {
     "label": "Consigne ORP",
     "help": "Valeur cible ORP pour la régulation chlore."
   },

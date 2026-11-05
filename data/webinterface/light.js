@@ -73,18 +73,18 @@ function renderWifiScan(data) {
 
 function updateScanStatus(data) {
   if (!data || data.ok !== true) {
-    scanStatus("Scan Wi-Fi indisponible.");
+    scanStatus("Scan réseau indisponible.");
     return;
   }
   const running = !!data.running || !!data.requested;
   const count = Number.isFinite(data.count) ? data.count : 0;
   const total = Number.isFinite(data.total_found) ? data.total_found : count;
   if (running) {
-    scanStatus("Scan Wi-Fi en cours...");
+    scanStatus("Scan réseau en cours...");
     return;
   }
   scanStatus(count > 0
-    ? "Scan Wi-Fi terminé : " + count + " réseaux affichés (" + total + " détectés)."
+    ? "Scan réseau terminé : " + count + " réseaux affichés (" + total + " détectés)."
     : "Aucun réseau visible détecté.");
 }
 
@@ -97,7 +97,7 @@ async function refreshWifiScan(trigger) {
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: form({ force: "1" })
       });
-      scanStatus("Scan Wi-Fi lancé...");
+      scanStatus("Scan réseau lancé...");
     }
 
     let data = null;
@@ -121,7 +121,7 @@ async function refreshWifiScan(trigger) {
       scanTimer = setTimeout(() => refreshWifiScan(false), 1200);
     }
   } catch (err) {
-    scanStatus("Erreur scan Wi-Fi: " + err.message);
+    scanStatus("Erreur scan réseau: " + err.message);
   }
 }
 
@@ -142,7 +142,7 @@ async function loadAll() {
     $("wifiPass").value = wifi.pass || "";
     status("Pret");
   } catch (err) {
-    status("Erreur Wi-Fi: " + err.message);
+    status("Erreur réseau: " + err.message);
   }
 }
 
@@ -158,11 +158,11 @@ async function saveWifi() {
       })
     });
     status((ui.rebootAfterWifi || data.reboot_scheduled)
-      ? "Wi-Fi enregistre. Redemarrage en cours..."
-      : "Wi-Fi enregistre. Redemarrage immediat...");
+      ? "Réseau enregistre. Redemarrage en cours..."
+      : "Réseau enregistre. Redemarrage immediat...");
     await fetch("/api/system/reboot", { method: "POST" });
   } catch (err) {
-    status("Erreur Wi-Fi: " + err.message);
+    status("Erreur réseau: " + err.message);
   }
 }
 

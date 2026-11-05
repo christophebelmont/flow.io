@@ -9,6 +9,18 @@
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 
+namespace {
+uint8_t fragmentationPercent_(uint32_t freeBytes, uint32_t largestBlock)
+{
+    if (freeBytes == 0U) return 100U;
+    float ratio = (float)largestBlock / (float)freeBytes;
+    float frag = 1.0f - ratio;
+    if (frag < 0.0f) frag = 0.0f;
+    if (frag > 1.0f) frag = 1.0f;
+    return (uint8_t)(frag * 100.0f);
+}
+}
+
 void SystemStats::collect(SystemStatsSnapshot& out) {
     const uint64_t uptimeMs64 = (uint64_t)(esp_timer_get_time() / 1000ULL);
     out.uptimeMs64 = uptimeMs64;
@@ -22,19 +34,16 @@ void SystemStats::collect(SystemStatsSnapshot& out) {
     out.heap.freeBytes = free8;
     out.heap.minFreeBytes = minFree8;
     out.heap.largestFreeBlock = largest;
+    out.heap.fragPercent = fragmentationPercent_(free8, largest);
 
-    /// Fragmentation estimation:
-    /// - if largest is close to free => low fragmentation
-    /// - if largest is much smaller => high fragmentation
-    if (free8 == 0) {
-        out.heap.fragPercent = 100;
-    } else {
-        float ratio = (float)largest / (float)free8;   ///< 0..1
-        float frag = 1.0f - ratio;                     ///< 0..1
-        if (frag < 0.0f) frag = 0.0f;
-        if (frag > 1.0f) frag = 1.0f;
-        out.heap.fragPercent = (uint8_t)(frag * 100.0f);
-    }
+    const uint32_t internalCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+    const uint32_t internalFree = heap_caps_get_free_size(internalCaps);
+    const uint32_t internalMinFree = heap_caps_get_minimum_free_size(internalCaps);
+    const uint32_t internalLargest = heap_caps_get_largest_free_block(internalCaps);
+    out.heap.internalFreeBytes = internalFree;
+    out.heap.internalMinFreeBytes = internalMinFree;
+    out.heap.internalLargestFreeBlock = internalLargest;
+    out.heap.internalFragPercent = fragmentationPercent_(internalFree, internalLargest);
 }
 
 const char* SystemStats::resetReasonStr() {

@@ -1,6 +1,6 @@
 {
   "translations": {
-    "cfgdocs.ethernet.enabled.help": "Active ou désactive l'interface Ethernet W5500. Quand Ethernet est actif, le WiFi station et le provisioning AP restent désactivés.",
+    "cfgdocs.ethernet.enabled.help": "Active ou désactive l'interface Ethernet W5500. Quand Ethernet est actif, il est prioritaire; le WiFi station puis le portail AP servent de fallback si Ethernet n'obtient pas d'IP.",
     "cfgdocs.ethernet.enabled.label": "Ethernet activé"
   }
 }

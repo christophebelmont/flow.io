@@ -2,62 +2,90 @@
 
 #include <stdint.h>
 
-#include "Board/BoardTypes.h"
+#include "Core/Services/IIO.h"
 
 struct AppContext;
 
-enum class DomainRole : uint8_t {
-    None = 0,
-    FiltrationPump,
-    PhPump,
-    ChlorinePump,
-    ChlorineGenerator,
-    Robot,
-    Lights,
-    FillPump,
-    WaterHeater,
-    PoolLevelSensor,
-    PhLevelSensor,
-    ChlorineLevelSensor,
-    WaterCounterSensor,
-    OrpSensor,
-    PhSensor,
-    PsiSensor,
-    SpareAnalog,
-    WaterTemp,
-    AirTemp,
-    SupervisorDisplay,
-    FlowLink
+using IoSlotId = uint16_t;
+using DomainSlotId = uint16_t;
+using PoolDeviceId = uint8_t;
+
+constexpr IoSlotId IO_SLOT_INVALID = 0xFFFFu;
+constexpr DomainSlotId DOMAIN_SLOT_INVALID = 0xFFFFu;
+constexpr PoolDeviceId POOL_DEVICE_INVALID = 0xFFu;
+
+enum IoSlotKind : uint8_t {
+    IO_SLOT_ANALOG_INPUT = 0,
+    IO_SLOT_DIGITAL_INPUT = 1,
+    IO_SLOT_DIGITAL_OUTPUT = 2
 };
 
-struct DomainIoBinding {
-    BoardSignal signal;
-    DomainRole role;
+constexpr IoSlotId ioSlotId(uint8_t kind, uint8_t index)
+{
+    return (IoSlotId)(((uint16_t)kind << 8) | index);
+}
+
+constexpr uint8_t ioSlotKind(IoSlotId slot)
+{
+    return (uint8_t)((slot >> 8) & 0xFFu);
+}
+
+constexpr uint8_t ioSlotIndex(IoSlotId slot)
+{
+    return (uint8_t)(slot & 0xFFu);
+}
+
+constexpr IoSlotId analogInputSlot(uint8_t index)
+{
+    return ioSlotId(IO_SLOT_ANALOG_INPUT, index);
+}
+
+constexpr IoSlotId digitalInputSlot(uint8_t index)
+{
+    return ioSlotId(IO_SLOT_DIGITAL_INPUT, index);
+}
+
+constexpr IoSlotId digitalOutputSlot(uint8_t index)
+{
+    return ioSlotId(IO_SLOT_DIGITAL_OUTPUT, index);
+}
+
+constexpr IoId ioIdFromSlot(IoSlotId slot)
+{
+    return (slot == IO_SLOT_INVALID) ? IO_ID_INVALID :
+           (ioSlotKind(slot) == IO_SLOT_ANALOG_INPUT) ? (IoId)(IO_ID_AI_BASE + ioSlotIndex(slot)) :
+           (ioSlotKind(slot) == IO_SLOT_DIGITAL_INPUT) ? (IoId)(IO_ID_DI_BASE + ioSlotIndex(slot)) :
+           (ioSlotKind(slot) == IO_SLOT_DIGITAL_OUTPUT) ? (IoId)(IO_ID_DO_BASE + ioSlotIndex(slot)) :
+                                                           IO_ID_INVALID;
+}
+
+struct DomainSlotPreset {
+    DomainSlotId id = DOMAIN_SLOT_INVALID;
+    uint8_t slotKind = IO_SLOT_ANALOG_INPUT;
+    const char* endpointId = nullptr;
+    const char* displayName = nullptr;
+    uint8_t runtimeIndex = 0;
+    bool activeHigh = true;
+    uint8_t pullMode = 0;
+};
+
+struct DomainIoSlotBinding {
+    DomainSlotId domainSlot = DOMAIN_SLOT_INVALID;
+    IoSlotId ioSlot = IO_SLOT_INVALID;
 };
 
 struct PoolDevicePreset {
-    DomainRole role;
+    PoolDeviceId id = POOL_DEVICE_INVALID;
+    DomainSlotId commandSlot = DOMAIN_SLOT_INVALID;
     const char* objectSuffix;
     const char* displayName;
     const char* haIcon;
-    uint8_t legacySlot;
     uint8_t poolDeviceType;
     float flowLPerHour;
     float tankCapacityMl;
     float tankInitialMl;
-    DomainRole dependsOnRole;
+    PoolDeviceId dependsOnDevice = POOL_DEVICE_INVALID;
     int32_t maxUptimeDaySec;
-};
-
-struct DomainSensorPreset {
-    DomainRole role;
-    const char* endpointId;
-    const char* displayName;
-    uint8_t legacySlot;
-    uint8_t runtimeIndex;
-    bool digitalInput;
-    bool activeHigh;
-    uint8_t pullMode;
 };
 
 struct PoolLogicDefaultsSpec {

@@ -30,6 +30,7 @@ struct AlarmRegistration {
     char code[24] = {0};
     char title[48] = {0};
     char sourceModule[16] = {0};
+    bool activityLogEnabled = true;
 };
 
 /** Service contract exposed by AlarmModule. */

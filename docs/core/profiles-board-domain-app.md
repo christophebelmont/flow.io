@@ -1,11 +1,18 @@
 # Profils, cartes, domaines et bootstrap
 
-Cette page décrit la structure actuellement utilisée pour composer un firmware à partir d'un profil, d'une carte et d'un domaine.
+Cette page décrit comment le firmware principal `Waveshare-ESP32-S3` est composé à partir d'un profil, d'une carte et du domaine Pool. Les profils `FlowIO` et `Supervisor` restent dans le dépôt pour les matériels historiques, mais ne constituent plus la cible de référence.
 
-Le projet est composé de deux firmwares destinés à deux ESP32 distincts:
+## Vue d'ensemble
 
-- `FlowIO`: nœud principal pour la logique métier et les entrées/sorties
-- `Supervisor`: nœud de supervision pour la configuration, le provisioning Wi-Fi, l'écran TFT, les logs et les mises à jour
+```text
+platformio.ini / FLOW_PROFILE_WAVESHARE
+                 |
+                 v
+Profiles::Waveshare
+  |-- BoardCatalog::activeBoard() -> WaveshareBoard
+  |-- DomainCatalog::pool()       -> PoolDomain
+  `-- WaveshareBootstrap          -> modules et services runtime
+```
 
 ## Couche `App`
 
@@ -16,147 +23,109 @@ Références principales:
 - `src/App/FirmwareProfile.h`
 - `src/App/BuildFlags.h`
 
-Responsabilités actuelles:
-
-- résolution du profil compilé
-- création du contexte global `AppContext`
-- exposition du `ModuleManager`, du `ServiceRegistry`, du `ConfigStore` et des préférences NVS
-- appel des fonctions `setup` et `loop` du profil sélectionné
-
-Le profil compilé est choisi par les macros:
-
-- `FLOW_PROFILE_FLOWIO`
-- `FLOW_PROFILE_SUPERVISOR`
+`Bootstrap::run()` résout le profil compilé, crée le contexte global `AppContext`, installe la carte, le domaine et l'identité produit, puis appelle le setup du profil. Pour la cible principale, `FLOW_PROFILE_WAVESHARE=1` sélectionne `Profiles::Waveshare::profile()`.
 
 ## Couche `Board`
 
 Références principales:
 
-- `src/Board/FlowIODINBoards.h`
-- `src/Board/SupervisorBoardRev1.h`
+- `src/Board/WaveshareBoard.h`
+- `src/Board/BoardCatalog.cpp`
 - `src/Board/BoardSpec.h`
 
-La couche `Board` porte la description physique des cartes:
+`WaveshareBoard.h` est la source de vérité du matériel compilé:
 
-- UART disponibles
-- bus I2C
-- bus 1-Wire
-- GPIO et capacités associées
-- périphériques locaux du Supervisor
+- UART de logs et d'HMI;
+- bus I2C et 1-Wire;
+- Ethernet W5500;
+- buzzer et TFT ST7789;
+- GPIO et points IO;
+- capacités IO, MQTT et Home Assistant.
 
-Types utilisés:
-
-- `BoardSignal`
-- `IoCapability`
-- `IoPointSpec`
-- `BoardSpec`
-- `SupervisorBoardSpec`
+Les broches de bus et périphériques sont des constantes de build. Certains champs sont recopiés comme valeurs initiales de modules puis peuvent être remplacés par une configuration NVS existante; les commentaires de `WaveshareBoard.h` indiquent ce comportement champ par champ.
 
 ## Couche `Domain`
 
 Références principales:
 
 - `src/Domain/Pool/PoolDomain.h`
+- `src/Domain/Pool/PoolIds.h`
 - `src/Domain/DomainSpec.h`
 
-Le domaine porte la description logique du produit:
+Le domaine Pool décrit les rôles fonctionnels indépendamment du câblage physique:
 
-- rôles métier (`DomainRole`)
-- association entre signaux de carte et rôles métier
-- inventaire des capteurs
-- inventaire des équipements
-- valeurs par défaut de logique métier
+- 13 slots capteurs Waveshare;
+- 7 presets d'équipements piscine;
+- 20 liaisons `domain_slot -> io_slot`;
+- les valeurs par défaut de la logique piscine.
 
-Dans l'état actuel du dépôt:
+Le domaine ne sélectionne pas directement un GPIO ou un canal d'expander. Il pointe vers un IO slot stable; le profil IO choisit ensuite son binding port. Voir la [cartographie Waveshare](waveshare-io-map.md).
 
-- `FlowIO` utilise le domaine `Pool`
-- `Supervisor` utilise le domaine `Supervisor`
-
-## Couche `Profiles`
+## Couche `Profiles::Waveshare`
 
 Références principales:
 
-- `src/Profiles/FlowIO/*`
-- `src/Profiles/Supervisor/*`
+- `src/Profiles/Waveshare/WaveshareProfile.cpp`
+- `src/Profiles/Waveshare/WaveshareProfile.h`
+- `src/Profiles/Waveshare/WaveshareModuleInstances.cpp`
+- `src/Profiles/Waveshare/WaveshareBootstrap.cpp`
+- `src/Profiles/Waveshare/WaveshareIoLayout.h`
+- `src/Profiles/Waveshare/WaveshareIoAssembly.cpp`
 
-Chaque profil assemble:
+Le profil assemble `WaveshareBoard`, `PoolDomain`, l'identité MQTT/runtime et toutes les instances de modules. Son bootstrap:
 
-- un `BoardSpec`
-- un `DomainSpec`
-- une identité produit
-- des instances de modules
-- un bootstrap local
+1. initialise la console et la politique PSRAM;
+2. enregistre les modules Core, réseau, UI et métier;
+3. configure les binding ports, expanders et IO slots;
+4. définit les `PoolDevice` à partir du domaine;
+5. enregistre les providers runtime MQTT et Home Assistant;
+6. lance le cycle de vie via `ModuleManager`.
 
-Fichiers typiques d'un profil:
+### Responsabilités principales
 
-- `*Profile.h`: structure `ModuleInstances`
-- `*Profile.cpp`: définition du `FirmwareProfile`
-- `*Bootstrap.cpp`: ordre d'enregistrement des modules, wiring de profil, post-init
+| Zone | Modules ou services |
+|---|---|
+| Core | logs, `ConfigStore`, `DataStore`, commandes, `EventBus` |
+| Réseau | Ethernet, Wi-Fi, provisioning, web, MQTT |
+| Exploitation | mise à jour firmware, temps/RTC, alarmes, supervision système |
+| HMI | UDP/série, buzzer, TFT local |
+| Piscine | IO, logique Pool, équipements Pool, Home Assistant |
+
+## Les trois niveaux de binding
+
+| Couche | Structure source | Exemple filtration |
+|---|---|---|
+| Domaine | `DomainIoSlotBinding` dans `PoolDomain.h` | `ActuatorFiltrationPump -> d00` |
+| Endpoint | `IODigitalOutputDefinition` dans `WaveshareIoAssembly.cpp` | `d00`, actif haut, état initial OFF |
+| Matériel | `IOBindingPortSpec` dans `WaveshareIoLayout.h` | port `300`, `EXIO1`, TCA9554 bit 0 |
+
+Cette séparation permet de changer l'affectation physique d'un IO slot sans modifier le code métier qui consomme le domain slot.
 
 ## Sélection par `platformio.ini`
 
-Le fichier `platformio.ini` décrit:
+L'environnement principal est `[env:Waveshare-ESP32-S3]`. Il active notamment:
 
-- les environnements compilables
-- les macros de profil
-- les exclusions de sources via `build_src_filter`
-- les scripts de génération lancés avant compilation
-- la version de firmware injectée au build
+- `FLOW_PROFILE_WAVESHARE=1`;
+- `FLOW_BOARD_WAVESHARE_ESP32_S3=1`;
+- Ethernet W5500, RTC PCF85063 et TFT S3;
+- PSRAM et les capacités propres à la carte;
+- les scripts de génération et d'export de binaires.
 
-Environnements présents aujourd'hui:
+Commande de référence:
 
-- `FlowIO`
-- `FlowIOWokwi`
-- `Supervisor`
-- `SupervisorWokwi`
+```sh
+~/.platformio/penv/bin/pio run -e Waveshare-ESP32-S3
+```
 
-## Composition actuelle du profil `FlowIO`
+`WaveshareWokwi` fournit une variante de simulation. Les environnements `FlowIO`, `Supervisor`, `FlowConnectDisplay` et `Micronova` sont conservés pour leurs cibles dédiées.
 
-Fichiers de référence:
-
-- `src/Profiles/FlowIO/FlowIOProfile.cpp`
-- `src/Profiles/FlowIO/FlowIOProfile.h`
-- `src/Profiles/FlowIO/FlowIOBootstrap.cpp`
-- `src/Profiles/FlowIO/FlowIOIoLayout.h`
-- `src/Profiles/FlowIO/FlowIOIoAssembly.cpp`
-
-Le profil `FlowIO` ajoute aux services communs:
-
-- le module IO
-- la logique métier piscine
-- les équipements piscine
-- le module HMI Nextion
-- le serveur de configuration I2C
-
-Le bootstrap `FlowIO` exécute aussi:
-
-- la configuration du module IO à partir du domaine actif
-- la définition des équipements `PoolDevice`
-- l'enregistrement des providers runtime MQTT
-- l'enregistrement des providers Runtime UI sur `i2ccfg.server`
-
-## Composition actuelle du profil `Supervisor`
-
-Fichiers de référence:
-
-- `src/Profiles/Supervisor/SupervisorProfile.cpp`
-- `src/Profiles/Supervisor/SupervisorProfile.h`
-- `src/Profiles/Supervisor/SupervisorBootstrap.cpp`
-
-Le profil `Supervisor` assemble:
-
-- le client I2C vers `FlowIO`
-- le provisioning Wi-Fi
-- l'interface web
-- la mise à jour de firmware
-- l'interface TFT locale
-
-## Couches sollicitées selon le type de modification
+## Où modifier quoi
 
 | Type de modification | Zone principale |
 |---|---|
-| changement de broche ou de bus | `src/Board/*` |
-| changement de rôle métier | `src/Domain/*` |
-| changement des modules présents dans un produit | `src/Profiles/*` et `platformio.ini` |
-| changement du profil compilé | `platformio.ini` et `src/App/BuildFlags.h` |
-| changement du binding entre rôles et ports IO | `src/Profiles/FlowIO/FlowIOIoLayout.h` et `FlowIOIoAssembly.cpp` |
+| broche, bus ou périphérique matériel | `src/Board/WaveshareBoard.h` |
+| rôle métier ou liaison domaine vers IO slot | `src/Domain/Pool/*` |
+| binding port ou valeur IO par défaut | `src/Profiles/Waveshare/WaveshareIoLayout.h` |
+| création des endpoints et intégration HA | `src/Profiles/Waveshare/WaveshareIoAssembly.cpp` |
+| modules présents et ordre d'enregistrement | `src/Profiles/Waveshare/*` |
+| flags, dépendances et scripts de build | `platformio.ini` |

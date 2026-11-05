@@ -4,5 +4,11 @@
     "locale": "fr",
     "version": 1
   },
-  "docs": {}
+  "docs": {
+    "log/levels/m26_lvl": {
+      "label_t": "cfgmods.log.levels.m26_lvl.label",
+      "help_t": "cfgmods.log.levels.m26_lvl.help",
+      "enum_set": "log_levels"
+    }
+  }
 }

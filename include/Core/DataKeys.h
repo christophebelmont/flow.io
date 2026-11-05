@@ -30,6 +30,8 @@ constexpr DataKey MqttParseFail = 6;
 constexpr DataKey MqttHandlerFail = 7;
 /** @brief MQTT runtime key: dropped RX messages due to oversize topic/payload (`MQTTRuntime`). */
 constexpr DataKey MqttOversizeDrop = 8;
+/** @brief MQTT runtime key: initial full runtime snapshot has completed (`MQTTRuntime`). */
+constexpr DataKey MqttRuntimeFullSnapshotPublished = 9;
 
 /** @brief Home Assistant runtime key: autoconfig publish state (`HARuntime`). */
 constexpr DataKey HaPublished = 10;
@@ -40,22 +42,34 @@ constexpr DataKey HaDeviceId = 12;
 
 /** @brief Reserved base for IO endpoint runtime keys (`IORuntime`). */
 constexpr DataKey IoBase = 40;
-/** @brief Reserved IO runtime key count: supports endpoints `[0..31]`. */
-constexpr uint8_t IoReservedCount = 32;
+/** @brief Reserved IO runtime key count for the active board profile. */
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
+constexpr uint8_t IoReservedCount = 45;
+#else
+constexpr uint8_t IoReservedCount = 40;
+#endif
 /** @brief End-exclusive bound for IO runtime key range. */
 constexpr DataKey IoEndExclusive = IoBase + IoReservedCount;
 
 /** @brief Reserved base for pool-device state runtime keys (`PoolDeviceRuntime`, state part). */
-constexpr DataKey PoolDeviceStateBase = 80;
-/** @brief Reserved pool-device state key count: supports slots `[0..7]`. */
+constexpr DataKey PoolDeviceStateBase = IoEndExclusive;
+/** @brief Reserved pool-device state key count for the active board profile. */
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
 constexpr uint8_t PoolDeviceStateReservedCount = 8;
+#else
+constexpr uint8_t PoolDeviceStateReservedCount = 16;
+#endif
 /** @brief End-exclusive bound for pool-device state key range. */
 constexpr DataKey PoolDeviceStateEndExclusive = PoolDeviceStateBase + PoolDeviceStateReservedCount;
 
 /** @brief Reserved base for pool-device metrics runtime keys (`PoolDeviceRuntime`, metrics part). */
 constexpr DataKey PoolDeviceMetricsBase = PoolDeviceStateEndExclusive;
-/** @brief Reserved pool-device metrics key count: supports slots `[0..7]`. */
+/** @brief Reserved pool-device metrics key count for the active board profile. */
+#if defined(FLOW_BOARD_WAVESHARE_ESP32_S3)
 constexpr uint8_t PoolDeviceMetricsReservedCount = 8;
+#else
+constexpr uint8_t PoolDeviceMetricsReservedCount = 16;
+#endif
 /** @brief End-exclusive bound for pool-device metrics key range. */
 constexpr DataKey PoolDeviceMetricsEndExclusive = PoolDeviceMetricsBase + PoolDeviceMetricsReservedCount;
 
@@ -133,7 +147,7 @@ constexpr DataKey ReservedMax = MicronovaEndExclusive - 1;
 
 static_assert(WifiReady < TimeReady, "DataKey ordering invariant broken");
 static_assert(TimeReady < MqttReady, "DataKey ordering invariant broken");
-static_assert(MqttOversizeDrop < HaPublished, "DataKey ranges overlap");
+static_assert(MqttRuntimeFullSnapshotPublished < HaPublished, "DataKey ranges overlap");
 static_assert(HaDeviceId < IoBase, "HA fixed keys overlap IO key range");
 static_assert(IoEndExclusive <= PoolDeviceStateBase, "IO and pool-device key ranges overlap");
 static_assert(PoolDeviceStateEndExclusive <= PoolDeviceMetricsBase, "Pool-device state and metrics ranges overlap");

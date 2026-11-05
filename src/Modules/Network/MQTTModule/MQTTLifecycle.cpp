@@ -11,6 +11,7 @@
 #include "Core/Runtime.h"
 #include "Modules/Network/MQTTModule/MQTTRuntime.h"
 
+#include <Arduino.h>
 #include <esp_heap_caps.h>
 #include <esp_mac.h>
 #include <esp_system.h>
@@ -90,6 +91,10 @@ size_t sanitizeTopicSegment(const char* src, char* dst, size_t cap)
 }
 
 static constexpr uint8_t kMqttCfgBranch = 1;
+static constexpr uint32_t kDataChangedSlowWarnUs = 7000U;
+static constexpr uint32_t kDataChangedTraceWarnUs = 30000U;
+static constexpr uint32_t kDataChangedTraceMinIntervalMs = 250U;
+
 static constexpr MqttConfigRouteProducer::Route kMqttCfgRoutes[] = {
     {1, {(uint8_t)ConfigModuleId::Mqtt, kMqttCfgBranch}, "mqtt", "mqtt", (uint8_t)MqttPublishPriority::Normal, nullptr},
 };
@@ -114,7 +119,23 @@ void MQTTModule::setState_(MQTTState s)
     state_ = s;
     stateTs_ = millis();
     if (dataStore_) {
+        if (s != MQTTState::Connected) {
+            setMqttRuntimeFullSnapshotPublished(*dataStore_, false);
+        }
         setMqttReady(*dataStore_, s == MQTTState::Connected);
+    }
+}
+
+void MQTTModule::onRuntimeInitialSnapshotCompleteStatic_(void* ctx)
+{
+    MQTTModule* self = static_cast<MQTTModule*>(ctx);
+    if (self) self->onRuntimeInitialSnapshotComplete_();
+}
+
+void MQTTModule::onRuntimeInitialSnapshotComplete_()
+{
+    if (dataStore_) {
+        setMqttRuntimeFullSnapshotPublished(*dataStore_, true);
     }
 }
 
@@ -123,7 +144,7 @@ bool MQTTModule::allocateScratchBuffers_()
     if (scratch_) return true;
 
     scratch_ = static_cast<ScratchBuffers*>(
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         heap_caps_calloc(1, sizeof(ScratchBuffers), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
 #else
         heap_caps_calloc(1, sizeof(ScratchBuffers), MALLOC_CAP_8BIT)
@@ -143,7 +164,7 @@ bool MQTTModule::allocateRxQueue_()
     const size_t rxItemSize = sizeof(RxMsg);
     const size_t rxQueueStorageLen = ((size_t)Limits::Mqtt::Capacity::RxQueueLen) * rxItemSize;
     rxQueueStorage_ = static_cast<uint8_t*>(
-#if defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_WAVESHARE)
         heap_caps_malloc(rxQueueStorageLen, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
 #else
         heap_caps_malloc(rxQueueStorageLen, MALLOC_CAP_8BIT)
@@ -193,12 +214,15 @@ void MQTTModule::onEventStatic_(const Event& e, void* user)
 void MQTTModule::onEvent_(const Event& e)
 {
     if (e.id == EventId::DataChanged) {
+        const uint32_t t0 = micros();
         const DataChangedPayload* p = (const DataChangedPayload*)e.payload;
         if (!p) return;
 
         if (p->id == DATAKEY_NETWORK_READY) {
             if (!dataStore_) return;
 
+            const bool oldReady = netReady_;
+            const MQTTState oldState = state_;
             const bool ready = networkReady(*dataStore_);
             if (ready == netReady_) return;
 
@@ -211,10 +235,88 @@ void MQTTModule::onEvent_(const Event& e)
                 stopClient_(true);
                 setState_(MQTTState::WaitingNetwork);
             }
+            const uint32_t dtUs = (uint32_t)(micros() - t0);
+            uint16_t jobsUsed = 0U;
+            uint16_t highCount = 0U;
+            uint16_t normalCount = 0U;
+            uint16_t lowCount = 0U;
+            portENTER_CRITICAL(&jobsMux_);
+            snapshotQueueStatsNoLock_(jobsUsed, highCount, normalCount, lowCount);
+            portEXIT_CRITICAL(&jobsMux_);
+            const bool slow = dtUs >= kDataChangedSlowWarnUs;
+            if (slow) {
+                LOGW("datachanged net key=%u dt=%lu us ready=%u->%u state=%u->%u jobs=%u/%u qh=%u/%u qn=%u/%u ql=%u/%u",
+                     (unsigned)p->id,
+                     (unsigned long)dtUs,
+                     (unsigned)oldReady,
+                     (unsigned)netReady_,
+                     (unsigned)oldState,
+                     (unsigned)state_,
+                     (unsigned)jobsUsed,
+                     (unsigned)MaxJobs,
+                     (unsigned)highCount,
+                     (unsigned)HighQueueCap,
+                     (unsigned)normalCount,
+                     (unsigned)NormalQueueCap,
+                     (unsigned)lowCount,
+                     (unsigned)LowQueueCap);
+            } else {
+                LOGI("datachanged net key=%u dt=%lu us ready=%u->%u state=%u->%u jobs=%u/%u qh=%u/%u qn=%u/%u ql=%u/%u",
+                     (unsigned)p->id,
+                     (unsigned long)dtUs,
+                     (unsigned)oldReady,
+                     (unsigned)netReady_,
+                     (unsigned)oldState,
+                     (unsigned)state_,
+                     (unsigned)jobsUsed,
+                     (unsigned)MaxJobs,
+                     (unsigned)highCount,
+                     (unsigned)HighQueueCap,
+                     (unsigned)normalCount,
+                     (unsigned)NormalQueueCap,
+                     (unsigned)lowCount,
+                     (unsigned)LowQueueCap);
+            }
             return;
         }
 
-        runtimeProducerCore_.onDataChanged(p->id);
+        const RuntimeProducer::DataChangeStats stats = runtimeProducerCore_.onDataChanged(p->id);
+        const uint32_t dtUs = (uint32_t)(micros() - t0);
+        const bool slow = dtUs >= kDataChangedSlowWarnUs;
+        const bool trace = dtUs >= kDataChangedTraceWarnUs ||
+                           stats.enqueueFail > 0U ||
+                           stats.matched > 8U;
+        const uint32_t nowMs = millis();
+        if (slow && trace &&
+            (uint32_t)(nowMs - lastDataChangedTraceLogMs_) >= kDataChangedTraceMinIntervalMs) {
+            lastDataChangedTraceLogMs_ = nowMs;
+            uint16_t jobsUsed = 0U;
+            uint16_t highCount = 0U;
+            uint16_t normalCount = 0U;
+            uint16_t lowCount = 0U;
+            portENTER_CRITICAL(&jobsMux_);
+            snapshotQueueStatsNoLock_(jobsUsed, highCount, normalCount, lowCount);
+            portEXIT_CRITICAL(&jobsMux_);
+            LOGW("datachanged slow key=%u dt=%lu us state=%u routes=%u checked=%u matched=%u enq_ok=%u enq_fail=%u already=%u enq_us=%lu jobs=%u/%u qh=%u/%u qn=%u/%u ql=%u/%u",
+                 (unsigned)p->id,
+                 (unsigned long)dtUs,
+                 (unsigned)state_,
+                 (unsigned)stats.routeCount,
+                 (unsigned)stats.checked,
+                 (unsigned)stats.matched,
+                 (unsigned)stats.enqueueOk,
+                 (unsigned)stats.enqueueFail,
+                 (unsigned)stats.pendingAlready,
+                 (unsigned long)stats.enqueueUs,
+                 (unsigned)jobsUsed,
+                 (unsigned)MaxJobs,
+                 (unsigned)highCount,
+                 (unsigned)HighQueueCap,
+                 (unsigned)normalCount,
+                 (unsigned)NormalQueueCap,
+                 (unsigned)lowCount,
+                 (unsigned)LowQueueCap);
+        }
         return;
     }
 
@@ -302,7 +404,9 @@ void MQTTModule::init(ConfigStore& cfg, ServiceRegistry& services)
                                 (uint8_t)(sizeof(kMqttCfgRoutes) / sizeof(kMqttCfgRoutes[0])),
                                 services);
     }
-    runtimeProducerCore_.configure(&mqttSvc_);
+    runtimeProducerCore_.configure(&mqttSvc_,
+                                   &MQTTModule::onRuntimeInitialSnapshotCompleteStatic_,
+                                   this);
 
     ackProducerDesc_ = MqttPublishProducer{};
     ackProducerDesc_.producerId = ProducerIdAck;
@@ -355,7 +459,7 @@ void MQTTModule::init(ConfigStore& cfg, ServiceRegistry& services)
     makeDeviceId(deviceId_, sizeof(deviceId_));
     buildTopics_();
 
-#if defined(FLOW_PROFILE_MICRONOVA) || defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_MICRONOVA) || defined(FLOW_PROFILE_WAVESHARE)
     LOGI("mqtt heap buffers deferred until startup release");
 #else
     (void)allocateScratchBuffers_();
@@ -388,10 +492,12 @@ void MQTTModule::onConfigLoaded(ConfigStore&, ServiceRegistry& services)
 
 void MQTTModule::onStart(ConfigStore&, ServiceRegistry&)
 {
-#if defined(FLOW_PROFILE_MICRONOVA) || defined(FLOW_PROFILE_FLOWIOS3)
+#if defined(FLOW_PROFILE_MICRONOVA) || defined(FLOW_PROFILE_WAVESHARE)
     (void)allocateScratchBuffers_();
     (void)allocateRxQueue_();
 #endif
+    runtimeProducerCore_.rebuildRoutes();
+    LOGI("runtime routes ready count=%u", (unsigned)runtimeProducerCore_.routeCount());
 }
 
 void MQTTModule::loop()

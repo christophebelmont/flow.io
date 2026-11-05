@@ -84,6 +84,26 @@ void test_stop_le_start_with_late_start_uses_fallback_window()
     TEST_ASSERT_EQUAL_UINT8(1, out.durationHours);
 }
 
+void test_day_window_is_inactive_after_stop_hour()
+{
+    TEST_ASSERT_FALSE(isFiltrationWindowActiveAtMinute(8, 23, (uint16_t)((0 * 60) + 18)));
+    TEST_ASSERT_TRUE(isFiltrationWindowActiveAtMinute(8, 23, (uint16_t)((22 * 60) + 59)));
+    TEST_ASSERT_FALSE(isFiltrationWindowActiveAtMinute(8, 23, (uint16_t)(23 * 60)));
+}
+
+void test_overnight_window_wraps_across_midnight()
+{
+    TEST_ASSERT_FALSE(isFiltrationWindowActiveAtMinute(22, 6, (uint16_t)((21 * 60) + 59)));
+    TEST_ASSERT_TRUE(isFiltrationWindowActiveAtMinute(22, 6, (uint16_t)((0 * 60) + 18)));
+    TEST_ASSERT_FALSE(isFiltrationWindowActiveAtMinute(22, 6, (uint16_t)(6 * 60)));
+}
+
+void test_equal_start_stop_window_is_inactive()
+{
+    TEST_ASSERT_FALSE(isFiltrationWindowActiveAtMinute(23, 23, (uint16_t)((0 * 60) + 18)));
+    TEST_ASSERT_FALSE(isFiltrationWindowActiveAtMinute(23, 23, (uint16_t)(23 * 60)));
+}
+
 int main()
 {
     UNITY_BEGIN();
@@ -92,5 +112,8 @@ int main()
     RUN_TEST(test_nan_temperature_uses_widest_available_window);
     RUN_TEST(test_stop_le_start_uses_emergency_duration_when_possible);
     RUN_TEST(test_stop_le_start_with_late_start_uses_fallback_window);
+    RUN_TEST(test_day_window_is_inactive_after_stop_hour);
+    RUN_TEST(test_overnight_window_wraps_across_midnight);
+    RUN_TEST(test_equal_start_stop_window_is_inactive);
     return UNITY_END();
 }

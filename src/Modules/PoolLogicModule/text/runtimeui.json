@@ -45,7 +45,7 @@
     },
     {
       "valueId": 4,
-      "key": "pool.orp_auto_mode",
+      "key": "pool.dis_auto_mode",
       "type": "bool",
       "domain": "mode",
       "display": "boolean",

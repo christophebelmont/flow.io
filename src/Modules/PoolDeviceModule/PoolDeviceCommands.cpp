@@ -5,7 +5,7 @@
 
 #include "PoolDeviceModule.h"
 #include "Core/ErrorCodes.h"
-#include "Domain/Pool/PoolBindings.h"
+#include "Domain/Pool/PoolIds.h"
 #define LOG_MODULE_ID ((LogModuleId)LogModuleIdValue::PoolDeviceModule)
 #include "Core/ModuleLog.h"
 #include <ArduinoJson.h>
@@ -56,6 +56,38 @@ void writeCmdErrorSlot_(char* reply, size_t replyLen, const char* where, ErrorCo
         snprintf(reply, replyLen, "{\"ok\":false}");
     }
 }
+
+bool readConfigBool_(ConfigStore* cfgStore, const char* moduleName, const char* key, bool& out)
+{
+    if (!cfgStore || !moduleName || !key) return false;
+    char json[192]{};
+    bool truncated = false;
+    if (!cfgStore->toJsonModule(moduleName, json, sizeof(json), &truncated) || truncated) return false;
+
+    StaticJsonDocument<192> doc;
+    const DeserializationError err = deserializeJson(doc, json);
+    if (err || !doc.is<JsonObjectConst>()) return false;
+    JsonVariantConst value = doc.as<JsonObjectConst>()[key];
+    if (!value.is<bool>()) return false;
+    out = value.as<bool>();
+    return true;
+}
+
+bool readConfigUInt8_(ConfigStore* cfgStore, const char* moduleName, const char* key, uint8_t& out)
+{
+    if (!cfgStore || !moduleName || !key) return false;
+    char json[192]{};
+    bool truncated = false;
+    if (!cfgStore->toJsonModule(moduleName, json, sizeof(json), &truncated) || truncated) return false;
+
+    StaticJsonDocument<192> doc;
+    const DeserializationError err = deserializeJson(doc, json);
+    if (err || !doc.is<JsonObjectConst>()) return false;
+    JsonVariantConst value = doc.as<JsonObjectConst>()[key];
+    if (!value.is<uint8_t>()) return false;
+    out = value.as<uint8_t>();
+    return true;
+}
 } // namespace
 
 bool PoolDeviceModule::cmdPoolWrite_(void* userCtx, const CommandRequest& req, char* reply, size_t replyLen)
@@ -84,6 +116,81 @@ bool PoolDeviceModule::cmdPoolResetUptimeAll_(void* userCtx, const CommandReques
     PoolDeviceModule* self = static_cast<PoolDeviceModule*>(userCtx);
     if (!self) return false;
     return self->handlePoolResetUptimeAll_(req, reply, replyLen);
+}
+
+ActivityRole PoolDeviceModule::activityRoleForSlot_(uint8_t slot) const
+{
+    if (slot == PoolIds::DeviceFiltrationPump) return ActivityRole::Filtration;
+    if (slot == PoolIds::DeviceChlorineGenerator) return ActivityRole::Swg;
+    if (slot == PoolIds::DeviceRobot) return ActivityRole::Robot;
+    if (slot == PoolIds::DeviceFillPump) return ActivityRole::Filling;
+    if (slot == PoolIds::DevicePhPump) return ActivityRole::Ph;
+    if (slot == PoolIds::DeviceChlorinePump) return ActivityRole::Disinfection;
+    if (slot == PoolIds::DeviceWaterHeater) return ActivityRole::Heater;
+    return ActivityRole::None;
+}
+
+void PoolDeviceModule::emitActivity_(ActivityCode code,
+                                     ActivitySource source,
+                                     ActivitySeverity severity,
+                                     ActivityRole role,
+                                     ActivityState state,
+                                     ActivityReason reason,
+                                     uint8_t slot,
+                                     const char* title,
+                                     const char* detail,
+                                     const char* icon) const
+{
+    if (!activityLogSvc_ || !activityLogSvc_->emit) return;
+    ActivityEvent event{};
+    event.code = (uint16_t)code;
+    event.domain = (uint8_t)ActivityDomain::PoolDevice;
+    event.source = (uint8_t)source;
+    event.severity = (uint8_t)severity;
+    event.role = (uint8_t)role;
+    event.state = (uint8_t)state;
+    event.reason = (uint8_t)reason;
+    event.targetSlot = slot;
+    snprintf(event.title, sizeof(event.title), "%s", title ? title : "Action piscine");
+    snprintf(event.detail, sizeof(event.detail), "%s", detail ? detail : "");
+    snprintf(event.icon, sizeof(event.icon), "%s", icon ? icon : "touch_app");
+    (void)activityLogSvc_->emit(activityLogSvc_->ctx, &event);
+}
+
+void PoolDeviceModule::emitAutoModeDisabledByManualActivity_(ActivityRole role,
+                                                             uint8_t slot,
+                                                             const char* autoLabel) const
+{
+    const char* roleLabel = "équipement";
+    const char* icon = "settings";
+    if (role == ActivityRole::Ph) {
+        roleLabel = "pompe pH";
+        icon = "science";
+    } else if (role == ActivityRole::Disinfection) {
+        roleLabel = "pompe ORP";
+        icon = "science";
+    } else if (role == ActivityRole::Filtration) {
+        roleLabel = "filtration";
+        icon = "pool";
+    }
+
+    char title[48] = {0};
+    char detail[128] = {0};
+    snprintf(title, sizeof(title), "Mode auto %s désactivé", autoLabel ? autoLabel : roleLabel);
+    snprintf(detail,
+             sizeof(detail),
+             "Commande manuelle sur %s: l'automatisme a été désactivé.",
+             roleLabel);
+    emitActivity_(ActivityCode::SystemConfigChanged,
+                  ActivitySource::Manual,
+                  ActivitySeverity::Info,
+                  role,
+                  ActivityState::None,
+                  ActivityReason::Manual,
+                  slot,
+                  title,
+                  detail,
+                  icon);
 }
 
 bool PoolDeviceModule::handlePoolWrite_(const CommandRequest& req, char* reply, size_t replyLen)
@@ -147,12 +254,12 @@ bool PoolDeviceModule::handlePoolWrite_(const CommandRequest& req, char* reply, 
     // if a dosing pump is manually forced ON, disable the corresponding auto mode
     // regardless of the command source (HMI, MQTT, Web, ...).
     if (requested && cfgStore_) {
-        uint8_t phPumpSlot = PoolBinding::kDeviceSlotPhPump;
-        uint8_t orpPumpSlot = PoolBinding::kDeviceSlotChlorinePump;
+        uint8_t phPumpSlot = PoolIds::DevicePhPump;
+        uint8_t orpPumpSlot = PoolIds::DeviceChlorinePump;
 
         char modeJson[160]{};
         bool truncated = false;
-        if (cfgStore_->toJsonModule("poollogic/device", modeJson, sizeof(modeJson), &truncated) && !truncated) {
+        if (cfgStore_->toJsonModule("poollogic/devices", modeJson, sizeof(modeJson), &truncated) && !truncated) {
             StaticJsonDocument<192> modeDoc;
             const DeserializationError modeErr = deserializeJson(modeDoc, modeJson);
             if (!modeErr && modeDoc.is<JsonObjectConst>()) {
@@ -161,8 +268,8 @@ bool PoolDeviceModule::handlePoolWrite_(const CommandRequest& req, char* reply, 
                     const uint16_t v = obj["ph_pump_slot"].as<uint16_t>();
                     if (v < POOL_DEVICE_MAX) phPumpSlot = (uint8_t)v;
                 }
-                if (obj["orp_pump_slot"].is<uint16_t>()) {
-                    const uint16_t v = obj["orp_pump_slot"].as<uint16_t>();
+                if (obj["dis_pump_slot"].is<uint16_t>()) {
+                    const uint16_t v = obj["dis_pump_slot"].as<uint16_t>();
                     if (v < POOL_DEVICE_MAX) orpPumpSlot = (uint8_t)v;
                 }
             }
@@ -170,28 +277,90 @@ bool PoolDeviceModule::handlePoolWrite_(const CommandRequest& req, char* reply, 
 
         const char* modeKey = nullptr;
         if (slot == phPumpSlot) modeKey = "ph_auto_mode";
-        else if (slot == orpPumpSlot) modeKey = "orp_auto_mode";
+        else if (slot == orpPumpSlot) modeKey = "disinfection_type";
 
         if (modeKey) {
+            bool shouldLogAutoDisabled = false;
+            ActivityRole disabledRole = ActivityRole::None;
+            const char* disabledLabel = nullptr;
             char patch[96]{};
-            snprintf(patch, sizeof(patch), "{\"poollogic/mode\":{\"%s\":false}}", modeKey);
+            if (strcmp(modeKey, "disinfection_type") == 0) {
+                uint8_t disinfectionType = 0;
+                shouldLogAutoDisabled = !readConfigUInt8_(cfgStore_,
+                                                           "poollogic/modes",
+                                                           "disinfection_type",
+                                                           disinfectionType) ||
+                                        disinfectionType != 3U;
+                disabledRole = ActivityRole::Disinfection;
+                disabledLabel = "ORP";
+                snprintf(patch, sizeof(patch), "{\"poollogic/modes\":{\"disinfection_type\":3}}");
+            } else if (strcmp(modeKey, "ph_auto_mode") == 0) {
+                bool phAutoMode = false;
+                shouldLogAutoDisabled = !readConfigBool_(cfgStore_,
+                                                         "poollogic/ph",
+                                                         "ph_auto_mode",
+                                                         phAutoMode) ||
+                                        phAutoMode;
+                disabledRole = ActivityRole::Ph;
+                disabledLabel = "pH";
+                snprintf(patch, sizeof(patch), "{\"poollogic/ph\":{\"ph_auto_mode\":false}}");
+            } else {
+                snprintf(patch, sizeof(patch), "{\"poollogic/modes\":{\"%s\":false}}", modeKey);
+            }
             if (!cfgStore_->applyJson(patch)) {
                 LOGW("Manual pump start slot=%u failed to clear %s",
                      (unsigned)slot,
                      modeKey);
             } else {
-                LOGI("Manual pump start slot=%u -> %s=false",
-                     (unsigned)slot,
-                     modeKey);
+                if (strcmp(modeKey, "disinfection_type") == 0) {
+                    const PoolDeviceSvcStatus rest = svcWriteDesiredImpl_(slot, 1U);
+                    if (rest != POOLDEV_SVC_OK) {
+                        writeCmdErrorSlot_(reply, replyLen, "pooldevice.write", ErrorCode::Failed, slot);
+                        return false;
+                    }
+                    LOGI("Manual pump start slot=%u -> disinfection_type=3",
+                         (unsigned)slot);
+                } else {
+                    LOGI("Manual pump start slot=%u -> %s=false",
+                         (unsigned)slot,
+                         modeKey);
+                }
+                if (shouldLogAutoDisabled) {
+                    emitAutoModeDisabledByManualActivity_(disabledRole, slot, disabledLabel);
+                }
             }
         }
     }
 
-    const char* label = deviceLabel(slot);
+    char label[sizeof(PoolDeviceDefinition::label)] = {0};
+    if (lockState_()) {
+        if (slots_[slot].used) {
+            snprintf(label,
+                     sizeof(label),
+                     "%s",
+                     slots_[slot].def.label[0] ? slots_[slot].def.label : (slots_[slot].id ? slots_[slot].id : ""));
+        }
+        unlockState_();
+    }
     LOGI("Manual %s %s (slot=%u)",
          requested ? "Start" : "Stop",
-         (label && label[0] != '\0') ? label : "Pool Device",
+         label[0] ? label : "Pool Device",
          (unsigned)slot);
+    char title[48] = {0};
+    char detail[128] = {0};
+    const char* display = label[0] ? label : "Équipement piscine";
+    snprintf(title, sizeof(title), "%s %s", display, requested ? "démarré manuellement" : "arrêté manuellement");
+    snprintf(detail, sizeof(detail), "Commande manuelle appliquée au slot %u.", (unsigned)slot);
+    emitActivity_(requested ? ActivityCode::PoolDeviceManualStart : ActivityCode::PoolDeviceManualStop,
+                  ActivitySource::Manual,
+                  requested ? ActivitySeverity::Success : ActivitySeverity::Info,
+                  activityRoleForSlot_(slot),
+                  requested ? ActivityState::RequestedOn : ActivityState::RequestedOff,
+                  ActivityReason::Manual,
+                  slot,
+                  title,
+                  detail,
+                  requested ? "play_arrow" : "stop");
     snprintf(reply, replyLen, "{\"ok\":true,\"slot\":%u}", (unsigned)slot);
     return true;
 }
@@ -218,7 +387,19 @@ bool PoolDeviceModule::handlePoolRefill_(const CommandRequest& req, char* reply,
         return false;
     }
 
-    float remaining = slots_[slot].def.tankCapacityMl;
+    float remaining = 0.0f;
+    if (!lockState_()) {
+        writeCmdErrorSlot_(reply, replyLen, "pool.refill", ErrorCode::NotReady, slot);
+        return false;
+    }
+    if (!slots_[slot].used) {
+        unlockState_();
+        writeCmdErrorSlot_(reply, replyLen, "pool.refill", ErrorCode::UnknownSlot, slot);
+        return false;
+    }
+    remaining = slots_[slot].def.tankCapacityMl;
+    unlockState_();
+
     if (args.containsKey("remaining_ml")) {
         JsonVariantConst rem = args["remaining_ml"];
         if (rem.is<float>() || rem.is<double>() || rem.is<int32_t>() || rem.is<uint32_t>()) {
@@ -236,7 +417,39 @@ bool PoolDeviceModule::handlePoolRefill_(const CommandRequest& req, char* reply,
         return false;
     }
 
-    const float applied = slots_[slot].tankRemainingMl;
+    float applied = 0.0f;
+    char label[sizeof(PoolDeviceDefinition::label)] = {0};
+    if (lockState_()) {
+        if (slots_[slot].used) {
+            applied = slots_[slot].tankRemainingMl;
+            snprintf(label,
+                     sizeof(label),
+                     "%s",
+                     slots_[slot].def.label[0] ? slots_[slot].def.label : (slots_[slot].id ? slots_[slot].id : ""));
+        }
+        unlockState_();
+    }
+    char title[48] = {0};
+    char detail[128] = {0};
+    snprintf(title,
+             sizeof(title),
+             "%s rempli",
+             label[0] ? label : "Réservoir");
+    snprintf(detail,
+             sizeof(detail),
+             "Niveau réservoir mis à %.1f ml pour le slot %u.",
+             (double)applied,
+             (unsigned)slot);
+    emitActivity_(ActivityCode::PoolDeviceTankRefill,
+                  ActivitySource::Manual,
+                  ActivitySeverity::Success,
+                  activityRoleForSlot_(slot),
+                  ActivityState::None,
+                  ActivityReason::Manual,
+                  slot,
+                  title,
+                  detail,
+                  "water_drop");
     snprintf(reply, replyLen, "{\"ok\":true,\"slot\":%u,\"remaining_ml\":%.1f}", (unsigned)slot, (double)applied);
     return true;
 }
@@ -268,11 +481,37 @@ bool PoolDeviceModule::handlePoolResetUptime_(const CommandRequest& req, char* r
         return false;
     }
 
-    tickDevices_(millis(), false);
-    const char* label = deviceLabel(slot);
+    char label[sizeof(PoolDeviceDefinition::label)] = {0};
+    if (lockState_()) {
+        tickDevices_(millis(), false);
+        if (slots_[slot].used) {
+            snprintf(label,
+                     sizeof(label),
+                     "%s",
+                     slots_[slot].def.label[0] ? slots_[slot].def.label : (slots_[slot].id ? slots_[slot].id : ""));
+        }
+        unlockState_();
+    }
     LOGI("Reset uptime %s (slot=%u)",
-         (label && label[0] != '\0') ? label : "Pool Device",
+         label[0] ? label : "Pool Device",
          (unsigned)slot);
+    char title[48] = {0};
+    char detail[128] = {0};
+    snprintf(title,
+             sizeof(title),
+             "Compteurs %s remis à zéro",
+             label[0] ? label : "équipement");
+    snprintf(detail, sizeof(detail), "Compteurs journaliers/hebdomadaires/mensuels remis à zéro pour le slot %u.", (unsigned)slot);
+    emitActivity_(ActivityCode::PoolDeviceUptimeReset,
+                  ActivitySource::Manual,
+                  ActivitySeverity::Info,
+                  activityRoleForSlot_(slot),
+                  ActivityState::None,
+                  ActivityReason::Manual,
+                  slot,
+                  title,
+                  detail,
+                  "restart_alt");
     snprintf(reply, replyLen, "{\"ok\":true,\"slot\":%u}", (unsigned)slot);
     return true;
 }
@@ -280,17 +519,39 @@ bool PoolDeviceModule::handlePoolResetUptime_(const CommandRequest& req, char* r
 bool PoolDeviceModule::handlePoolResetUptimeAll_(const CommandRequest&, char* reply, size_t replyLen)
 {
     const uint8_t resetCount = resetUptimeAll_();
-    tickDevices_(millis(), false);
+    if (lockState_()) {
+        tickDevices_(millis(), false);
+        unlockState_();
+    }
     LOGI("Reset uptime all (count=%u)", (unsigned)resetCount);
+    char detail[96] = {0};
+    snprintf(detail, sizeof(detail), "%u équipement(s) remis à zéro.", (unsigned)resetCount);
+    emitActivity_(ActivityCode::PoolDeviceUptimeReset,
+                  ActivitySource::Manual,
+                  ActivitySeverity::Info,
+                  ActivityRole::None,
+                  ActivityState::None,
+                  ActivityReason::Manual,
+                  ACTIVITY_TARGET_NONE,
+                  "Tous les compteurs piscine remis à zéro",
+                  detail,
+                  "restart_alt");
     snprintf(reply, replyLen, "{\"ok\":true,\"reset\":%u}", (unsigned)resetCount);
     return true;
 }
 
 bool PoolDeviceModule::resetUptimeSlot_(uint8_t slot)
 {
-    if (slot >= POOL_DEVICE_MAX) return false;
+    if (!lockState_()) return false;
+    if (slot >= POOL_DEVICE_MAX) {
+        unlockState_();
+        return false;
+    }
     PoolDeviceSlot& s = slots_[slot];
-    if (!s.used) return false;
+    if (!s.used) {
+        unlockState_();
+        return false;
+    }
 
     PeriodKeys keys{};
     const bool hasKeys = currentPeriodKeys_(keys);
@@ -315,6 +576,7 @@ bool PoolDeviceModule::resetUptimeSlot_(uint8_t slot)
     s.forceMetricsCommit = true;
     s.persistDirty = true;
     s.persistImmediate = true;
+    unlockState_();
     return true;
 }
 

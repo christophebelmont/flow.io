@@ -6,7 +6,9 @@
 
 #include <stdint.h>
 
-constexpr uint8_t POOL_DEVICE_MAX = 8;
+#include "Core/SystemLimits.h"
+
+constexpr uint8_t POOL_DEVICE_MAX = Limits::Io::MaxPoolDevices;
 
 enum PoolDeviceRuntimeType : uint8_t {
     POOL_DEVICE_RT_FILTRATION = 0,
@@ -19,7 +21,9 @@ enum PoolDeviceRuntimeBlockReason : uint8_t {
     POOL_DEVICE_BLOCK_DISABLED = 1,
     POOL_DEVICE_BLOCK_INTERLOCK = 2,
     POOL_DEVICE_BLOCK_IO_ERROR = 3,
-    POOL_DEVICE_BLOCK_MAX_UPTIME = 4
+    POOL_DEVICE_BLOCK_MAX_UPTIME = 4,
+    POOL_DEVICE_BLOCK_UNBOUND = 5,
+    POOL_DEVICE_BLOCK_IO_DISABLED = 6
 };
 
 struct PoolDeviceRuntimeStateEntry {
@@ -49,7 +53,6 @@ struct PoolDeviceRuntimeMetricsEntry {
 struct PoolDeviceSlotDescriptor {
     const char* id;
     const char* configModuleName;
-    const char* runtimeModuleName;
     const char* enabledKey;
     const char* dependsKey;
     const char* flowKey;

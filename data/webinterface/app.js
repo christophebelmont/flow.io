@@ -5,11 +5,18 @@
     const pages = Array.from(document.querySelectorAll('.page'));
     const mobileTopbarTitle = document.getElementById('mobileTopbarTitle');
     const desktopPageTitle = document.getElementById('desktopPageTitle');
+    const headerNetworkIcon = document.getElementById('headerNetworkIcon');
+    const networkConfigIcon = document.getElementById('networkConfigIcon');
+    const applyNetworkIcon = document.getElementById('applyNetworkIcon');
     const headerWifiDot = document.getElementById('headerWifiDot');
     const headerWifiStatus = document.getElementById('headerWifiStatus');
+    const headerReachabilityDot = document.getElementById('headerReachabilityDot');
     const headerDeviceStatus = document.getElementById('headerDeviceStatus');
+    const headerClockLabel = document.getElementById('headerClockLabel');
     const headerClockStatus = document.getElementById('headerClockStatus');
+    const themeToggle = document.getElementById('themeToggle');
     const flowWebAssetVersionStorageKey = 'flow_web_asset_version';
+    const flowWebThemeStorageKey = 'flow_web_theme';
     const deferredVisualAssetsStateKey = 'flow_web_deferred_visual_assets';
     const upgradeUiSessionStorageKey = 'flow_upgrade_ui_session';
     const upgradeStatusPollActiveMs = 900;
@@ -23,12 +30,18 @@
     const deferredMenuAssetReloadDelayMs = 1400;
     const deferredMenuAssetReloadStepMs = 850;
     const deferredMenuAssetReloadFallbackDelayMs = 6500;
+    const deviceReachabilityProbeMs = 5000;
+    const deviceReachabilityFetchTimeoutMs = 2500;
+    const deviceReachabilityLostThreshold = 3;
     const remoteMenuIconFontLinkId = 'flowMenuIconFontRemote';
     const remoteMenuIconFontHref = 'https://fonts.googleapis.com/icon?family=Material+Symbols+Rounded&display=block';
     const remoteMenuIconLigatures = {
       'icon-measures': 'water_damage',
+      'icon-pool': 'pool',
+      'icon-io': 'lan',
       'icon-calibration': 'science',
       'icon-terminal': 'list_alt',
+      'icon-activity': 'history',
       'icon-system': 'system_update_alt',
       'icon-flowcfg': 'settings',
       'icon-info': 'info'
@@ -43,9 +56,14 @@
     let loadedWebAssetVersion = '';
     let supervisorFirmwareVersion = '-';
     let nextionDisplayVersion = '';
+    let nextionDisplayVersionDetected = false;
+    let nextionDisplayVersionCompatible = false;
+    let nextionDisplayExpectedVersion = '';
     let supervisorUptimeMs = 0;
     let supervisorHeap = {};
     let webProfileName = 'Supervisor';
+    let webDeviceName = 'flowio';
+    let infoLastMac = '-';
     let webProfileKey = 'supervisor';
     let webLocalConfigLabel = 'Config Store Supervisor';
     let webLocalRuntime = false;
@@ -61,10 +79,16 @@
     let deferredMenuAssetsArmed = false;
     let fieldApplyCheckIcon = '✓';
     let networkMode = 'none';
+    let networkTransport = 'none';
+    let currentFlowTimeSourceLabel = '';
     let useRemoteMenuIcons = false;
     let remoteMenuIconFontReady = false;
     let remoteMenuIconFontPromise = null;
     let appHeaderClockTimer = null;
+    let deviceReachabilityTimer = null;
+    let deviceReachabilityInFlight = false;
+    let deviceReachabilityMisses = 0;
+    let deviceReachabilityReachable = false;
     const pendingSystemActionCountdowns = new Map();
     let activeColorPickerPopover = null;
     let webUiLocale = 'fr';
@@ -207,16 +231,21 @@
         applyStaticTranslations();
         syncMobileTopbarTitle(getActivePageId());
         updateInfoLoadButtonsText();
+        updateThemeToggleUi(currentThemePreference());
         refreshCfgDocLocaleRuntime(false).catch(() => {});
         ensureWebUiLocaleBundle(normalized, false).then((loaded) => {
           if (!loaded || webUiLocale !== normalized) return;
           applyStaticTranslations();
           syncMobileTopbarTitle(getActivePageId());
           updateInfoLoadButtonsText();
+          updateThemeToggleUi(currentThemePreference());
           applyProfileUiText();
           syncMenuIconFallbacks();
           renderInfoPanel();
           refreshPoolMeasuresView();
+          if (getActivePageId() === 'page-pool' && poolConfigLoadedOnce) {
+            loadPoolConfig(true).catch(() => {});
+          }
           refreshCfgDocLocaleRuntime(false).catch(() => {});
         }).catch(() => {});
         return;
@@ -238,6 +267,7 @@
       applyStaticTranslations();
       syncMobileTopbarTitle(getActivePageId());
       updateInfoLoadButtonsText();
+      updateThemeToggleUi(currentThemePreference());
       applyProfileUiText();
       syncMenuIconFallbacks();
       renderInfoPanel();
@@ -249,10 +279,14 @@
         applyStaticTranslations();
         syncMobileTopbarTitle(getActivePageId());
         updateInfoLoadButtonsText();
+        updateThemeToggleUi(currentThemePreference());
         applyProfileUiText();
         syncMenuIconFallbacks();
         renderInfoPanel();
         refreshPoolMeasuresView();
+        if (getActivePageId() === 'page-pool' && poolConfigLoadedOnce) {
+          loadPoolConfig(true).catch(() => {});
+        }
         refreshCfgDocLocaleRuntime(true).catch(() => {});
       }).catch(() => {});
     }
@@ -337,7 +371,20 @@
       const raw = String(value || '').trim().toLowerCase();
       if (raw === 'ap' || raw === 'accesspoint' || raw === 'access_point') return 'ap';
       if (raw === 'station' || raw === 'sta') return 'station';
+      if (raw === 'ethernet') return 'ethernet';
       return 'none';
+    }
+
+    function normalizeNetworkType(value) {
+      const raw = String(value || '').trim().toLowerCase();
+      if (raw === 'ethernet' || raw === 'eth' || raw === 'wired') return 'ethernet';
+      if (raw === 'wifi' || raw === 'wi-fi' || raw === 'station' || raw === 'sta') return 'wifi';
+      return '';
+    }
+
+    function normalizeNetworkTransport(value) {
+      const raw = normalizeNetworkType(value);
+      return raw || 'none';
     }
 
     function isAccessPointMode() {
@@ -480,6 +527,8 @@
         webProfileName = rawProfile;
         webProfileKey = rawProfile.toLowerCase();
       }
+      const rawDeviceName = String(data.devicename || data.deviceName || '').trim();
+      webDeviceName = rawDeviceName || 'flowio';
       webLocalRuntime = data.local_runtime === true;
       const label = String(data.local_config_label || '').trim();
       webLocalConfigLabel = label || (isMicronovaProfile()
@@ -507,6 +556,7 @@
     async function applyMenuIconModeFromMeta(data) {
       const mode = normalizeNetworkMode(data && data.network_mode);
       networkMode = mode;
+      networkTransport = normalizeNetworkTransport(data && (data.network_transport || data.transport));
       const remoteReady = await ensureRemoteMenuIconFontLoaded().catch(() => false);
       applyMenuIconSourcePreference(remoteReady);
     }
@@ -515,13 +565,15 @@
       return webProfileKey === 'micronova';
     }
 
-    function isFlowIOS3Profile() {
+    function isWaveshareProfile() {
       const key = String(webProfileKey || '').trim().toLowerCase();
-      return key === 'flowios3'
-        || key === 'waveshare'
+      return key === 'waveshare'
+        || key === 'flowios3'
         || key === 'esp32s3'
+        || key === 'esp32-s3'
+        || key === 'flowio-s3'
         || key.indexOf('waveshare') >= 0
-        || key.indexOf('flowios3') === 0;
+        || key.indexOf('flowios3') >= 0;
     }
 
     function isFlowIOProfile() {
@@ -536,7 +588,7 @@
     function runtimeDomainsForProfile() {
       return isMicronovaProfile()
         ? ['micronova', 'alarm']
-        : ['mode', 'sondes', 'alarm'];
+        : ['mode', 'equipements', 'sondes', 'alarm'];
     }
 
     function createRuntimeDomainState() {
@@ -591,6 +643,7 @@
       setBrandWordmark(isMicronovaProfile() ? 'Pellet' : 'Flow');
       if (isMicronovaProfile()) {
         setPageMenuVisible('page-calibration', false);
+        setPageMenuVisible('page-pool', false);
       }
       if (rebootDeviceTargetSelect) {
         const labelsByTarget = {
@@ -602,8 +655,8 @@
         };
         const blockValues = isMicronovaProfile()
           ? new Set(['flow_soft', 'flow_hard', 'nextion', 'factory_reset'])
-          : (isFlowIOS3Profile() ? new Set(['supervisor', 'flow_hard']) : new Set());
-        const hiddenValues = isFlowIOS3Profile()
+          : (isWaveshareProfile() ? new Set(['supervisor', 'flow_hard']) : new Set());
+        const hiddenValues = isWaveshareProfile()
           ? new Set(['supervisor', 'flow_hard'])
           : new Set();
         Array.from(rebootDeviceTargetSelect.options || []).forEach((option) => {
@@ -651,6 +704,8 @@
           webProfileName = rawProfile;
           webProfileKey = rawProfile.toLowerCase();
         }
+        const rawDeviceName = String(initialMeta.devicename || initialMeta.deviceName || '').trim();
+        webDeviceName = rawDeviceName || 'flowio';
         const label = String(initialMeta.local_config_label || '').trim();
         webLocalConfigLabel = label || (isMicronovaProfile()
           ? tr('cfg.local.micronova', 'Config Store Micronova')
@@ -658,6 +713,7 @@
         webLocalRuntime = initialMeta.local_runtime === true;
         webRemoteConfigEnabled = initialMeta.remote_config_enabled !== false;
         networkMode = normalizeNetworkMode(initialMeta.network_mode);
+        networkTransport = normalizeNetworkTransport(initialMeta.network_transport || initialMeta.transport);
       }
     } catch (err) {
     }
@@ -691,6 +747,49 @@
         storage.setItem(key, value);
       } catch (err) {
       }
+    }
+
+    function normalizeThemePreference(raw) {
+      return String(raw || '').trim().toLowerCase() === 'dark' ? 'dark' : 'light';
+    }
+
+    function currentThemePreference() {
+      return normalizeThemePreference(getStorageValue(localStorage, flowWebThemeStorageKey));
+    }
+
+    function themeToggleLabel(theme) {
+      const isDark = theme === 'dark';
+      if (webUiLocale === 'en') return isDark ? 'Light mode' : 'Dark mode';
+      return isDark ? 'Mode clair' : 'Mode sombre';
+    }
+
+    function themeToggleTitle(theme) {
+      const isDark = theme === 'dark';
+      if (webUiLocale === 'en') return isDark ? 'Switch to light mode' : 'Switch to dark mode';
+      return isDark ? 'Activer le mode clair' : 'Activer le mode sombre';
+    }
+
+    function updateThemeToggleUi(theme) {
+      if (!themeToggle) return;
+      const currentTheme = normalizeThemePreference(theme);
+      const label = themeToggleLabel(currentTheme);
+      const title = themeToggleTitle(currentTheme);
+      const wrapper = themeToggle.closest('.theme-switch');
+      const labelNode = wrapper ? wrapper.querySelector('.theme-toggle-label') : null;
+      themeToggle.checked = currentTheme === 'dark';
+      themeToggle.setAttribute('aria-label', title);
+      if (wrapper) wrapper.setAttribute('title', title);
+      if (labelNode) labelNode.textContent = label;
+    }
+
+    function applyThemePreference(theme, persist) {
+      const currentTheme = normalizeThemePreference(theme);
+      document.documentElement.setAttribute('data-theme', currentTheme);
+      document.documentElement.style.colorScheme = currentTheme;
+      if (persist) {
+        setStorageValue(localStorage, flowWebThemeStorageKey, currentTheme);
+      }
+      updateThemeToggleUi(currentTheme);
     }
 
     async function fetchJsonResponse(url, options, fetchImpl) {
@@ -958,12 +1057,15 @@
             supervisorFirmwareVersion = trimmed;
           }
         }
-        if (Object.prototype.hasOwnProperty.call(data, 'nextion_display_version')) {
-          const rawNextionVersion = String(data.nextion_display_version || '').trim();
-          if (rawNextionVersion && rawNextionVersion !== '0') {
-            nextionDisplayVersion = rawNextionVersion;
-          }
-        }
+        const rawNextionVersion = String(data.nextion_display_version || '').trim();
+        nextionDisplayVersion = rawNextionVersion && rawNextionVersion !== '0' ? rawNextionVersion : '';
+        nextionDisplayVersionDetected = Object.prototype.hasOwnProperty.call(data, 'nextion_display_version_detected')
+          ? data.nextion_display_version_detected === true
+          : !!nextionDisplayVersion;
+        nextionDisplayVersionCompatible = Object.prototype.hasOwnProperty.call(data, 'nextion_display_version_compatible')
+          ? data.nextion_display_version_compatible === true
+          : nextionDisplayVersionDetected;
+        nextionDisplayExpectedVersion = String(data.nextion_display_expected_version || '').trim();
         supervisorUptimeMs = Number(data.upms) || 0;
         supervisorHeap = (data.heap && typeof data.heap === 'object') ? data.heap : {};
         renderUpgradeCatalog();
@@ -1004,9 +1106,51 @@
       }
       const mode = normalizeNetworkMode(networkMode);
       if (mode === 'ap') return 'AP';
-      if (mode === 'sta') return tr('info.netType.wifi', 'Wifi');
+      const type = currentFlowNetworkType();
+      if (type) return formatInfoNetworkType(type);
+      if (mode === 'station') return tr('info.netType.wifi', 'Wifi');
       if (mode === 'ethernet') return tr('info.netType.ethernet', 'Ethernet');
       return '-';
+    }
+
+    function effectiveNetworkType(wifi, domainReady) {
+      const transport = normalizeNetworkType(networkTransport);
+      if (transport) return transport;
+
+      const ready = wifi && typeof wifi.rdy === 'boolean'
+        ? wifi.rdy
+        : !!domainReady;
+      if (!ready) return '';
+
+      const runtimeType = normalizeNetworkType(wifi && wifi.typ);
+      if (runtimeType) return runtimeType;
+
+      const mode = normalizeNetworkMode(networkMode);
+      if (mode === 'ethernet') return 'ethernet';
+      if (mode === 'station') return 'wifi';
+      return '';
+    }
+
+    function currentFlowNetworkType() {
+      try {
+        const wifiDomain = (flowStatusDomainCache.wifi && flowStatusDomainCache.wifi.data && flowStatusDomainCache.wifi.data.ok === true)
+          ? flowStatusDomainCache.wifi.data
+          : null;
+        const wifi = (wifiDomain && wifiDomain.wifi && typeof wifiDomain.wifi === 'object') ? wifiDomain.wifi : null;
+        const type = effectiveNetworkType(wifi, !!wifiDomain);
+        if (type) return type;
+      } catch (err) {
+      }
+      const transport = normalizeNetworkType(networkTransport);
+      if (transport) return transport;
+      const mode = normalizeNetworkMode(networkMode);
+      if (mode === 'ethernet') return 'ethernet';
+      if (mode === 'station') return 'wifi';
+      return '';
+    }
+
+    function currentFlowNetworkIcon() {
+      return currentFlowNetworkType() === 'ethernet' ? 'settings_ethernet' : 'wifi';
     }
 
     function isHeaderWifiConnected() {
@@ -1018,8 +1162,9 @@
         if (wifi && typeof wifi.rdy === 'boolean') return wifi.rdy;
       } catch (err) {
       }
+      if (normalizeNetworkType(networkTransport)) return true;
       const mode = normalizeNetworkMode(networkMode);
-      return mode === 'sta' || mode === 'ethernet';
+      return mode === 'station' || mode === 'ethernet';
     }
 
     function refreshAppHeader(pageId) {
@@ -1031,15 +1176,28 @@
       if (headerWifiStatus) {
         headerWifiStatus.textContent = formatHeaderNetworkStatus();
       }
+      if (headerNetworkIcon) {
+        headerNetworkIcon.textContent = currentFlowNetworkIcon();
+      }
+      if (networkConfigIcon) {
+        networkConfigIcon.textContent = currentFlowNetworkIcon();
+      }
+      if (applyNetworkIcon) {
+        applyNetworkIcon.textContent = currentFlowNetworkType() === 'ethernet' ? 'settings_ethernet' : 'wifi_protected_setup';
+      }
       if (headerWifiDot) {
         headerWifiDot.classList.toggle('is-connected', isHeaderWifiConnected());
       }
-      if (headerDeviceStatus) {
-        headerDeviceStatus.textContent = webProfileName || '-';
-      }
+      renderHeaderReachability();
     }
 
     function refreshAppHeaderClock() {
+      if (headerClockLabel) {
+        const baseLabel = tr('header.time', 'Heure');
+        headerClockLabel.textContent = currentFlowTimeSourceLabel
+          ? baseLabel + ' (' + currentFlowTimeSourceLabel + ')'
+          : baseLabel;
+      }
       if (!headerClockStatus) return;
       headerClockStatus.textContent = new Date().toLocaleTimeString(currentWebLocaleTag());
     }
@@ -1050,12 +1208,101 @@
       appHeaderClockTimer = setInterval(refreshAppHeaderClock, 1000);
     }
 
+    function syncHeaderTimeSourceFromSystemDomain() {
+      try {
+        const systemDomain = (flowStatusDomainCache.system && flowStatusDomainCache.system.data && flowStatusDomainCache.system.data.ok === true)
+          ? flowStatusDomainCache.system.data
+          : null;
+        const time = (systemDomain && systemDomain.time && typeof systemDomain.time === 'object') ? systemDomain.time : null;
+        const nextTimeLabel = flowTimeHeaderLabel(time);
+        if (nextTimeLabel) {
+          currentFlowTimeSourceLabel = nextTimeLabel;
+          refreshAppHeaderClock();
+        }
+      } catch (err) {
+      }
+    }
+
+    function renderHeaderReachability() {
+      const unreachable = deviceReachabilityMisses >= deviceReachabilityLostThreshold;
+      const reachable = deviceReachabilityReachable && !unreachable;
+      if (headerDeviceStatus) {
+        headerDeviceStatus.textContent = unreachable
+          ? tr('header.device.unreachable', 'Non joignable')
+          : (reachable ? tr('header.device.reachable', 'Joignable') : tr('header.device.pending', 'Vérification...'));
+      }
+      if (headerReachabilityDot) {
+        headerReachabilityDot.classList.toggle('is-reachable', reachable);
+        headerReachabilityDot.classList.toggle('is-pending', !reachable && !unreachable);
+        headerReachabilityDot.classList.toggle('is-unreachable', unreachable);
+      }
+    }
+
+    async function fetchHeaderReachabilityHello() {
+      const supportsAbort = typeof AbortController === 'function';
+      const controller = supportsAbort ? new AbortController() : null;
+      const timeoutId = controller
+        ? setTimeout(() => {
+            try {
+              controller.abort();
+            } catch (err) {
+            }
+          }, deviceReachabilityFetchTimeoutMs)
+        : null;
+      try {
+        const res = await fetch('/api/web/meta', {
+          cache: 'no-store',
+          signal: controller ? controller.signal : undefined
+        });
+        if (!res.ok) throw new Error('hello_http_' + res.status);
+        const data = await res.json().catch(() => null);
+        if (!data || data.ok !== true) throw new Error('hello_payload');
+      } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+      }
+    }
+
+    async function probeHeaderReachability() {
+      if (deviceReachabilityInFlight) return;
+      deviceReachabilityInFlight = true;
+      try {
+        await fetchHeaderReachabilityHello();
+        deviceReachabilityMisses = 0;
+        deviceReachabilityReachable = true;
+      } catch (err) {
+        deviceReachabilityMisses = Math.min(deviceReachabilityLostThreshold, deviceReachabilityMisses + 1);
+      } finally {
+        deviceReachabilityInFlight = false;
+        renderHeaderReachability();
+      }
+    }
+
+    function startHeaderReachabilityProbe() {
+      renderHeaderReachability();
+      probeHeaderReachability().catch(() => {});
+      if (deviceReachabilityTimer || !headerDeviceStatus) return;
+      deviceReachabilityTimer = setInterval(() => {
+        if (document.hidden) return;
+        probeHeaderReachability().catch(() => {});
+        refreshAppHeaderTime(false).catch(() => {});
+      }, deviceReachabilityProbeMs);
+    }
+
     async function refreshAppHeaderWifi(forceRefresh) {
       try {
         await fetchFlowStatusDomain('wifi', !!forceRefresh, 'header');
       } catch (err) {
       }
       refreshAppHeader(getActivePageId());
+    }
+
+    async function refreshAppHeaderTime(forceRefresh) {
+      try {
+        await fetchFlowStatusDomain('system', !!forceRefresh, 'header');
+        syncHeaderTimeSourceFromSystemDomain();
+      } catch (err) {
+      }
+      refreshAppHeaderClock();
     }
 
     function syncMobileTopbarTitle(pageId) {
@@ -1141,11 +1388,6 @@
       return raw ? raw.toUpperCase() : '-';
     }
 
-    function formatInfoDeviceId(mac) {
-      const normalized = String(mac || '').replace(/[^a-fA-F0-9]/g, '').toLowerCase();
-      return normalized ? ('flow.io-' + normalized) : '-';
-    }
-
     function setInfoFlowDomainLoading(domainKey, loading) {
       if (!Object.prototype.hasOwnProperty.call(infoFlowDomainLoading, domainKey)) return;
       const isLoading = !!loading;
@@ -1223,12 +1465,21 @@
           ok: true,
           fw: infoRuntimeValue(valueById, 1801, ''),
           upms: infoRuntimeValue(valueById, 1802, 0),
+          time: {
+            rdy: !!infoRuntimeValue(valueById, 1301, false),
+            src: infoRuntimeValue(valueById, 1302, 'none'),
+            qlt: infoRuntimeValue(valueById, 1303, '')
+          },
           heap: {
             free: infoRuntimeValue(valueById, 1803, 0),
             min_free: infoRuntimeValue(valueById, 1804, 0)
           }
         };
       } else if (hasAnyValue && domainKey === 'wifi') {
+        const previousWifi = (cacheEntry.data && cacheEntry.data.ok === true && cacheEntry.data.wifi && typeof cacheEntry.data.wifi === 'object')
+          ? cacheEntry.data.wifi
+          : {};
+        const previousMac = normalizeInfoMac(previousWifi.mac);
         const rssiItem = valueById.get(1003);
         data = {
           ok: true,
@@ -1236,6 +1487,7 @@
             rdy: !!infoRuntimeValue(valueById, 1001, false),
             typ: infoRuntimeValue(valueById, 1004, 'wifi'),
             ip: normalizeIpValue(infoRuntimeValue(valueById, 1002, '')),
+            mac: previousMac !== '-' ? previousMac : '',
             rssi: infoRuntimeValue(valueById, 1003, null),
             hrss: infoRuntimeValueAvailable(rssiItem)
           }
@@ -1345,10 +1597,14 @@
     }
 
     function formatInfoNetworkType(value) {
-      const normalized = String(value || '').trim().toLowerCase();
+      const normalized = normalizeNetworkType(value);
       if (normalized === 'ethernet') return tr('info.netType.ethernet', 'Ethernet');
-      if (normalized === 'wifi' || normalized === 'wi-fi') return tr('info.netType.wifi', 'Wifi');
-      return normalized ? normalized : '-';
+      if (normalized === 'wifi') return tr('info.netType.wifi', 'Wifi');
+      const raw = String(value || '').trim().toLowerCase();
+      if (!raw || raw === 'none' || raw === 'ap' || raw === 'accesspoint' || raw === 'access_point') {
+        return tr('info.state.disconnected', 'Déconnecté');
+      }
+      return raw ? raw : '-';
     }
 
     function renderInfoPanel() {
@@ -1366,20 +1622,28 @@
         ? flowStatusDomainCache.mqtt.data
         : null;
       const mqtt = (mqttDomain && mqttDomain.mqtt && typeof mqttDomain.mqtt === 'object') ? mqttDomain.mqtt : {};
+      const time = (systemDomain && systemDomain.time && typeof systemDomain.time === 'object') ? systemDomain.time : null;
+      if (time) {
+        syncHeaderTimeSourceFromSystemDomain();
+      }
       const fullFirmware = systemDomain ? fmtFlowStatusVal(systemDomain.fw) : (supervisorFirmwareVersion || '-');
       const firmwareParts = splitInfoFirmwareVersion(fullFirmware);
-      const mac = wifiDomain ? normalizeInfoMac(wifi.mac) : '-';
+      const currentMac = wifiDomain ? normalizeInfoMac(wifi.mac) : '-';
+      if (currentMac !== '-') infoLastMac = currentMac;
+      const mac = currentMac !== '-' ? currentMac : infoLastMac;
+      const deviceName = String(systemDomain && systemDomain.devicename ? systemDomain.devicename : webDeviceName || 'flowio').trim() || 'flowio';
+      const infoNetworkType = effectiveNetworkType(wifi, !!wifiDomain);
       const infoRows = [
-        [tr('info.row.deviceName', 'Nom de l’appareil'), 'flow.io'],
+        [tr('info.row.deviceName', 'Nom de l’appareil'), deviceName],
         [tr('info.row.firmwareVersion', 'Version firmware'), firmwareParts.version],
         [tr('info.row.buildVersion', 'Version build'), firmwareParts.build],
         [tr('info.row.uptime', 'Uptime'), systemDomain ? formatInfoUptime(systemDomain.upms) : formatInfoUptime(supervisorUptimeMs)],
         [tr('info.row.ip', 'Adresse IP'), wifiDomain ? normalizeIpValue(wifi.ip) : '-'],
         [tr('info.row.mac', 'Adresse MAC'), mac],
-        [tr('info.row.deviceId', 'ID appareil'), formatInfoDeviceId(mac)],
-        [tr('info.row.networkType', 'Type réseau'), wifiDomain ? formatInfoNetworkType(wifi.typ) : '-'],
+        [tr('info.row.networkType', 'Type réseau'), wifiDomain ? formatInfoNetworkType(infoNetworkType) : '-'],
         [tr('info.row.signal', 'Signal'), (wifiDomain && wifi.hrss) ? formatInfoDbm(wifi.rssi) : '-'],
-        [tr('info.row.mqtt', 'MQTT'), mqttDomain ? formatInfoBoolean(!!mqtt.rdy, tr('info.state.connected', 'Connecté'), tr('info.state.disconnected', 'Déconnecté')) : '-']
+        [tr('info.row.mqtt', 'MQTT'), mqttDomain ? formatInfoBoolean(!!mqtt.rdy, tr('info.state.connected', 'Connecté'), tr('info.state.disconnected', 'Déconnecté')) : '-'],
+        [tr('info.row.time', 'Heure'), time ? flowTimeStatusLabel(time) : '-']
       ];
       if (systemDomain) {
         infoRows.push([tr('info.row.heapFree', 'Heap libre'), formatInfoBytes(flowHeap.free)]);
@@ -1496,6 +1760,12 @@
       return queued;
     }
 
+    function fetchFlowCfgEndpoint(url, options) {
+      return isWaveshareProfile()
+        ? fetchWithBusyRetry(url, options)
+        : fetchFlowRemoteQueued(url, options);
+    }
+
     function waitMs(ms) {
       return new Promise((resolve) => setTimeout(resolve, ms));
     }
@@ -1525,26 +1795,43 @@
 
     function showPage(pageId, options) {
       const opts = options || {};
+      if (flowCfgLocalApplyBusyDepth > 0 && currentPageId === 'page-control' && pageId !== 'page-control') {
+        if (flowCfgStatus) {
+          flowCfgStatus.textContent = tr('cfg.apply.waitBeforeLeaving', 'Application en cours : attendez la confirmation avant de quitter la configuration.');
+        }
+        return;
+      }
       const deferredHeavyMs = Math.max(0, Number(opts.deferHeavyMs) || 0);
       const pageToken = ++pageLoadToken;
       currentPageId = pageId;
+      if (pageId !== 'page-activity-log') {
+        cancelActivityLogRefresh();
+      }
       if (pageId !== 'page-info') {
         stopInfoPolling();
       }
       pages.forEach((el) => el.classList.toggle('active', el.id === pageId));
       menuItems.forEach((el) => el.classList.toggle('active', el.dataset.page === pageId));
       syncMobileTopbarTitle(pageId);
-      terminalActive = pageId === 'page-terminal';
-      if (terminalActive) {
-        connectLogSocket();
-      } else {
-        closeLogSocket();
-        setWsStatusText(tr('terminal.inactive', 'inactif'));
+      if (!logsOverlayOpen) setWsStatusText(tr('terminal.inactive', 'inactif'));
+      if (pageId === 'page-activity-log') {
+        schedulePageTask(pageId, pageToken, deferredHeavyMs, () => refreshActivityLog(false));
       }
       if (pageId === 'page-pool-measures') {
         schedulePageTask(pageId, pageToken, deferredHeavyMs, () => onPoolMeasuresPageShown());
       } else {
         stopPoolMeasuresTimer();
+      }
+      if (pageId === 'page-pool') {
+        schedulePageTask(pageId,
+                         pageToken,
+                         deferredHeavyMs > 0 ? (deferredHeavyMs + 120) : 0,
+                         () => onPoolConfigPageShown(false));
+      }
+      if (pageId === 'page-io-summary') {
+        schedulePageTask(pageId, pageToken, deferredHeavyMs, () => onIoSummaryPageShown());
+      } else {
+        stopIoSummaryTimer();
       }
       if (pageId === 'page-calibration') {
         schedulePageTask(pageId,
@@ -1638,12 +1925,28 @@
     const logSourceSelect = document.getElementById('logSourceSelect');
     const bootLogDumpBtn = document.getElementById('bootLogDumpBtn');
     const toggleAutoscrollInput = document.getElementById('toggleAutoscroll');
+    const logsOverlay = document.getElementById('logsOverlay');
+    const openLogsOverlayBtn = document.getElementById('openLogsOverlay');
+    const closeLogsOverlayBtn = document.getElementById('closeLogsOverlay');
+    const activityLogList = document.getElementById('activityLogList');
+    const activityLogStatus = document.getElementById('activityLogStatus');
+    const activityRefreshBtn = document.getElementById('activityRefreshBtn');
+    const activityPurgeBtn = document.getElementById('activityPurgeBtn');
+    const activityPrevBtn = document.getElementById('activityPrevBtn');
+    const activityNextBtn = document.getElementById('activityNextBtn');
+    const activityRangeText = document.getElementById('activityRangeText');
+    const activityFilterBtns = Array.from(document.querySelectorAll('[data-activity-filter]'));
     let autoScrollEnabled = true;
-    let terminalActive = false;
+    let logsOverlayOpen = false;
+    let activityFilter = 'all';
+    let activityWindowShiftHours = 0;
+    let activityRequestToken = 0;
+    let activityAbortController = null;
+    let activityLoadedEvents = [];
+    let activityLoadedStats = null;
 
-    const updateServerPath = document.getElementById('updateServerPath');
-    const applyUpdateServerPathBtn = document.getElementById('applyUpdateServerPath');
     const checkUpdatesBtn = document.getElementById('checkUpdates');
+    const cancelUpgradeUiBtn = document.getElementById('cancelUpgradeUi');
     const upgradeCards = document.getElementById('upgradeCards');
     const upgradeTableBody = document.getElementById('upgradeTableBody');
     const upgradeProgressBar = document.getElementById('upgradeProgressBar');
@@ -1678,10 +1981,23 @@
     const flowStatusChip = document.getElementById('flowStatusChip');
     const flowStatusGrid = document.getElementById('flowStatusGrid');
     const flowStatusRaw = document.getElementById('flowStatusRaw');
+    const ioSummaryCards = document.getElementById('ioSummaryCards');
+    const ioSummaryTables = document.getElementById('ioSummaryTables');
     const poolMeasuresRefreshBtn = document.getElementById('poolMeasuresRefresh');
     const poolMeasuresDomains = document.getElementById('poolMeasuresDomains');
     const poolMeasuresStatus = document.getElementById('poolMeasuresStatus');
     const poolMeasuresGrid = document.getElementById('poolMeasuresGrid');
+    const poolConfigRefreshBtn = document.getElementById('poolConfigRefresh');
+    const poolConfigTitle = document.getElementById('poolConfigTitle');
+    const poolConfigSummary = document.getElementById('poolConfigSummary');
+    const poolHeroState = document.getElementById('poolHeroState');
+    const poolFiltrationStart = document.getElementById('poolFiltrationStart');
+    const poolFiltrationStop = document.getElementById('poolFiltrationStop');
+    const poolFiltrationFill = document.getElementById('poolFiltrationFill');
+    const poolModeBadges = document.getElementById('poolModeBadges');
+    const poolDisinfectionModes = document.getElementById('poolDisinfectionModes');
+    const poolAlarmCard = document.getElementById('poolAlarmCard');
+    const poolConfigGrid = document.getElementById('poolConfigGrid');
     const calibrationSensorSelect = document.getElementById('calibrationSensorSelect');
     const calibrationLoadBtn = document.getElementById('calibrationLoadBtn');
     const calibrationComputeBtn = document.getElementById('calibrationComputeBtn');
@@ -1714,9 +2030,11 @@
     const flowCfgPathLabel = document.getElementById('flowCfgCurrentPath');
     const flowCfgPathMeta = document.getElementById('flowCfgPathMeta');
     const flowCfgFields = document.getElementById('flowCfgFields');
+    const flowCfgApplyBusy = document.getElementById('flowCfgApplyBusy');
     const flowCfgStatus = document.getElementById('flowCfgStatus');
     const flowCfgBackupStatus = document.getElementById('flowCfgBackupStatus');
     const flowCfgBackupProgress = document.getElementById('flowCfgBackupProgress');
+    const flowCfgBackupProgressLabel = document.getElementById('flowCfgBackupProgressLabel');
     const flowCfgBackupPct = document.getElementById('flowCfgBackupPct');
     const flowCfgBackupProgressBar = document.getElementById('flowCfgBackupProgressBar');
     const flowCfgBackupProgressDot = document.getElementById('flowCfgBackupProgressDot');
@@ -1745,7 +2063,8 @@
     let flowCfgLoadPromise = null;
     let flowCfgRetryTimer = null;
     let flowCfgFlowOnlyFailureStreak = 0;
-    let upgradeCfgLoadedOnce = false;
+    let flowCfgLocalApplyBusyDepth = 0;
+    let flowCfgApplyBtnSavedText = '';
     let wifiConfigLoadedOnce = false;
     let flowCfgLoadedOnce = false;
     let calibrationLoadedOnce = false;
@@ -1756,6 +2075,7 @@
     let cfgTreeVirtualBranches = [];
     const cfgTreeNodeTextNames = { supervisor: {}, flow: {} };
     const cfgTreeNodeTextNamePending = { supervisor: new Set(), flow: new Set() };
+    const poolLogicDeviceIoOutputNames = { supervisor: {}, flow: {} };
     let supCfgCurrentModule = '';
     let supCfgCurrentData = {};
     let supCfgCurrentPdmExtension = null;
@@ -1771,10 +2091,21 @@
       4: 'Pompe remplissage',
       5: 'Electrolyse',
       6: 'Eclairage',
-      7: 'Chauffage eau'
+      7: 'Chauffage eau',
+      8: 'COMP01',
+      9: 'COMP02',
+      10: 'COMP03',
+      11: 'COMP04',
+      12: 'COMP05',
+      13: 'COMP06',
+      14: 'COMP07',
+      15: 'COMP08'
     });
     let wifiScanAutoRequested = false;
     let flowStatusReqSeq = 0;
+    let ioSummaryReqSeq = 0;
+    let ioSummaryLoadedOnce = false;
+    let ioTopologyCache = null;
     fieldApplyCheckIcon = iconCheckText();
     const flowCfgBackupFormat = 'flowio-configstore-backup';
     const flowCfgBackupVersion = 1;
@@ -1788,7 +2119,8 @@
         label: 'pH',
         mode: 'two',
         poollogicKey: 'ph_io_id',
-        runtimeUiId: 2103,
+        ioSlot: 1,
+        runtimeUiId: 2203,
         recommendedSpan: 1.5,
         warningOffset: 1.0
       },
@@ -1796,8 +2128,9 @@
         key: 'orp',
         label: 'ORP',
         mode: 'two',
-        poollogicKey: 'orp_io_id',
-        runtimeUiId: 2104,
+        poollogicKey: 'dis_io_id',
+        ioSlot: 0,
+        runtimeUiId: 2204,
         recommendedSpan: 120,
         warningOffset: 120
       },
@@ -1806,7 +2139,8 @@
         label: 'Pression PSI',
         mode: 'two',
         poollogicKey: 'psi_io_id',
-        runtimeUiId: 2106,
+        ioSlot: 2,
+        runtimeUiId: 2206,
         recommendedSpan: 0.4,
         warningOffset: 0.6
       },
@@ -1815,7 +2149,8 @@
         label: 'Température eau',
         mode: 'one',
         poollogicKey: 'wat_temp_io_id',
-        runtimeUiId: 2101,
+        ioSlot: 4,
+        runtimeUiId: 2201,
         recommendedSpan: 0,
         warningOffset: 2.0
       },
@@ -1824,7 +2159,8 @@
         label: 'Température air',
         mode: 'one',
         poollogicKey: 'air_temp_io_id',
-        runtimeUiId: 2102,
+        ioSlot: 5,
+        runtimeUiId: 2202,
         recommendedSpan: 0,
         warningOffset: 2.0
       }
@@ -1840,6 +2176,9 @@
     const infoFlowDomainKeys = ['system', 'wifi', 'mqtt'];
     const infoRuntimeDomainEntries = Object.freeze({
       system: Object.freeze([
+        Object.freeze({ id: 1301 }),
+        Object.freeze({ id: 1302 }),
+        Object.freeze({ id: 1303 }),
         Object.freeze({ id: 1801 }),
         Object.freeze({ id: 1802 }),
         Object.freeze({ id: 1803 }),
@@ -1882,30 +2221,69 @@
       micronova: createRuntimeDomainState(),
       alarm: createRuntimeDomainState()
     };
+    let poolConfigLoadedOnce = false;
+    let poolConfigReqSeq = 0;
+    const poolConfigModuleDefs = Object.freeze([
+      Object.freeze({ module: 'poollogic/modes', titleKey: 'pool.card.modes.title', title: 'Pilotage général', icon: 'tune', noteKey: 'pool.card.modes.note', note: 'Ces interrupteurs définissent si PoolLogic pilote la piscine et quelle stratégie de traitement est retenue.' }),
+      Object.freeze({ module: 'poollogic/filtration', titleKey: 'pool.card.filtration.title', title: 'Filtration', icon: 'waves', noteKey: 'pool.card.filtration.note', note: 'La plage de filtration combine contraintes horaires et température d’eau pour protéger le bassin.' }),
+      Object.freeze({ module: 'poollogic/heater', titleKey: 'pool.card.heater.title', title: 'Chauffage', icon: 'thermostat', noteKey: 'pool.card.heater.note', note: 'Le chauffage suit sa consigne seulement quand le mode automatique le permet.' }),
+      Object.freeze({ module: 'poollogic/refill', titleKey: 'pool.card.refill.title', title: 'Remplissage', icon: 'water_drop', noteKey: 'pool.card.refill.note', note: 'Le remplissage garde une durée minimale pour éviter les cycles trop courts.' }),
+      Object.freeze({ module: 'poollogic/safety', titleKey: 'pool.card.safety.title', title: 'Protections', icon: 'health_and_safety', noteKey: 'pool.card.safety.note', note: 'Seuils de pression, hors gel et bascule hiver utilisés par les automatismes.' }),
+      Object.freeze({ module: 'poollogic/regulation', titleKey: 'pool.card.regulation.title', title: 'Régulation', icon: 'speed', noteKey: 'pool.card.regulation.note', note: 'Temporisations communes aux régulateurs pH et désinfection.' }),
+      Object.freeze({ module: 'poollogic/robot', titleKey: 'pool.card.robot.title', title: 'Robot', icon: 'smart_toy', noteKey: 'pool.card.robot.note', note: 'Fenêtre de lancement et durée du nettoyage automatique.' })
+    ]);
+    const poolDisinfectionModeDefs = Object.freeze([
+      Object.freeze({
+        key: 'chlorine',
+        typeValue: 0,
+        module: 'poollogic/chlorine',
+        titleKey: 'pool.disinfection.chlorine.title',
+        title: 'Chlore / Brome',
+        icon: 'science',
+        accent: 'blue',
+        noteKey: 'pool.disinfection.chlorine.note',
+        note: 'Régulation liquide pilotée par la mesure ORP et une pompe doseuse.'
+      }),
+      Object.freeze({
+        key: 'swg',
+        typeValue: 1,
+        module: 'poollogic/swg',
+        titleKey: 'pool.disinfection.swg.title',
+        title: 'Électrolyse',
+        icon: 'bolt',
+        accent: 'cyan',
+        noteKey: 'pool.disinfection.swg.note',
+        note: 'Production au sel, soit sur consigne ORP, soit en continu pendant la filtration.'
+      }),
+      Object.freeze({
+        key: 'o2',
+        typeValue: 2,
+        module: 'poollogic/o2',
+        titleKey: 'pool.disinfection.o2.title',
+        title: 'Oxygène actif',
+        icon: 'bubble_chart',
+        accent: 'green',
+        noteKey: 'pool.disinfection.o2.note',
+        note: 'Dosage hebdomadaire calculé depuis le volume du bassin, la charge et la température.'
+      })
+    ]);
     const poolMeasureDomainAnimations = {};
     const upgradeReconnectFetchTimeoutMs = 1400;
-    const upgradeConfigFieldDefs = [
-      {
-        key: 'update_server_path',
-        input: updateServerPath,
-        button: applyUpdateServerPathBtn,
-        successMessage: 'Serveur d’upgrade enregistré.'
-      }
-    ];
     const upgradeTargetDefs = {
-      flowio: { manifestKey: 'flowio', target: 'flowio', endpoint: '/fwupdate/flowio', label: 'flow.io', order: 10 },
-      esp32s3: { manifestKey: 'esp32s3', target: 'esp32s3', endpoint: '/fwupdate/flowio', label: 'ESP32-S3', order: 11 },
-      'esp32s3-spiffs': { manifestKey: 'esp32s3-spiffs', target: 'spiffs', endpoint: '/fwupdate/spiffs', label: 'Assets ESP32-S3', order: 12 },
-      supervisor: { manifestKey: 'supervisor', target: 'supervisor', endpoint: '/fwupdate/supervisor', label: 'Supervisor', order: 20 },
+      flowios3: { manifestKey: 'flowios3', target: 'flowios3', endpoint: '/fwupdate/waveshare', label: 'FlowIOS3', order: 10 },
+      waveshare: { manifestKey: 'waveshare', target: 'waveshare', endpoint: '/fwupdate/waveshare', label: 'Waveshare', order: 10 },
+      esp32s3: { manifestKey: 'esp32s3', target: 'esp32s3', endpoint: '/fwupdate/waveshare', label: 'ESP32-S3', order: 11 },
+      'flowios3-spiffs': { manifestKey: 'flowios3-spiffs', target: 'spiffs', endpoint: '/fwupdate/spiffs', label: 'SPIFFS FlowIOS3', order: 39 },
+      'esp32s3-spiffs': { manifestKey: 'esp32s3-spiffs', target: 'spiffs', endpoint: '/fwupdate/spiffs', label: 'SPIFFS ESP32-S3', order: 39 },
+      'waveshare-spiffs': { manifestKey: 'waveshare-spiffs', target: 'spiffs', endpoint: '/fwupdate/spiffs', label: 'SPIFFS Waveshare', order: 39 },
       nextion: { manifestKey: 'nextion', target: 'nextion', endpoint: '/fwupdate/nextion', label: 'Nextion', order: 30 },
-      spiffs: { manifestKey: 'spiffs', target: 'spiffs', endpoint: '/fwupdate/spiffs', label: 'Assets Supervisor', order: 40 },
-      cfgdocs: { manifestKey: 'cfgdocs', target: 'spiffs', endpoint: '/fwupdate/spiffs', label: 'Assets Supervisor', order: 41 }
+      spiffs: { manifestKey: 'spiffs', target: 'spiffs', endpoint: '/fwupdate/spiffs', label: 'SPIFFS', order: 40 }
     };
     const upgradeComponentDefs = [
       {
         key: 'flowio',
-        title: 'flow.io',
-        subtitle: 'Firmware',
+        title: 'FlowIOS3',
+        subtitle: 'Firmware Waveshare',
         icon: 'layers',
         tone: 'blue',
         commentsAvailable: 'Ajout de nouvelles fonctionnalités et améliorations système',
@@ -1923,11 +2301,11 @@
       {
         key: 'nextion',
         title: 'Nextion',
-        subtitle: 'Interface',
-        icon: 'tab',
+        subtitle: 'Interface écran',
+        icon: 'display_settings',
         tone: 'orange',
-        commentsAvailable: 'Interface utilisateur disponible',
-        commentsCurrent: 'Interface utilisateur actuelle'
+        commentsAvailable: 'Nouvelle interface écran disponible',
+        commentsCurrent: 'Interface écran actuelle'
       }
     ];
 
@@ -1939,6 +2317,7 @@
     };
     let logSource = 'supervisor';
     let logSocket = null;
+    let upgradeUiStatusMuted = false;
     const upgradeStatusPoller = createTimeoutRunner(() => pollUpgradeStatusTick());
     const infoRuntimePoller = createIntervalRunner(() => pollInfoRuntimeTick(), infoRefreshActiveMs);
     const infoSupervisorPoller = createIntervalRunner(() => pollInfoSupervisorTick(), infoSupervisorRefreshMs);
@@ -1948,6 +2327,10 @@
     const poolMeasuresPoller = createIntervalRunner(() => {
       if (getActivePageId() !== 'page-pool-measures' || document.hidden) return;
       return refreshPoolMeasures(false);
+    }, 10000);
+    const ioSummaryPoller = createIntervalRunner(() => {
+      if (getActivePageId() !== 'page-io-summary' || document.hidden) return;
+      return refreshIoSummary(false);
     }, 10000);
     const wifiScanPoller = createTimeoutRunner(() => refreshWifiScanStatus(false));
 
@@ -2026,6 +2409,11 @@
     }
 
     function connectLogSocket() {
+      if (!logsOverlayOpen || document.hidden) {
+        closeLogSocket();
+        setWsStatusText(tr('terminal.inactive', 'inactif'));
+        return;
+      }
       closeLogSocket();
       setWsStatusText(tr('terminal.connecting', 'connexion...'));
       const meta = activeLogSourceMeta();
@@ -2041,6 +2429,7 @@
       };
       socket.onclose = (ev) => {
         if (socket !== logSocket) return;
+        logSocket = null;
         const code = ev && Number.isFinite(ev.code) ? ev.code : 0;
         if (code === 1008) {
           setWsStatusText(meta.statusBusy);
@@ -2060,6 +2449,7 @@
     }
 
     function appendTerminalLine(raw, decodeAnsi) {
+      if (!term) return;
       const parsed = decodeAnsi ? decodeAnsiLine(raw) : { text: raw, color: null };
       const row = document.createElement('div');
       row.className = 'log-line';
@@ -2126,6 +2516,274 @@
       }
     }
 
+    function openLogsOverlay() {
+      if (!logsOverlay) return;
+      logsOverlay.hidden = false;
+      logsOverlay.setAttribute('aria-hidden', 'false');
+      logsOverlayOpen = true;
+      if (term) term.textContent = '';
+      connectLogSocket();
+    }
+
+    function closeLogsOverlay() {
+      if (!logsOverlay) return;
+      logsOverlayOpen = false;
+      closeLogSocket();
+      logsOverlay.hidden = true;
+      logsOverlay.setAttribute('aria-hidden', 'true');
+      setWsStatusText(tr('terminal.inactive', 'inactif'));
+    }
+
+    function activityEventDate(ev) {
+      const epoch = Number(ev && ev.epoch_s) || 0;
+      if (epoch > 0) return new Date(epoch * 1000);
+      return null;
+    }
+
+    function formatActivityTime(date) {
+      if (!date) return '--:--:--';
+      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    }
+
+    function formatActivityDay(date) {
+      if (!date) return 'Date inconnue';
+      const dayText = date.toLocaleDateString([], { day: 'numeric', month: 'long', year: 'numeric' });
+      const startOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+      const now = new Date();
+      const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+      const dayOffset = Math.round((startOfToday - startOfDay) / 86400000);
+      if (dayOffset === 0) return 'Aujourd’hui · ' + dayText;
+      if (dayOffset === 1) return 'Hier · ' + dayText;
+      return dayText;
+    }
+
+    function formatActivityRelative(date) {
+      if (!date) return 'heure non synchronisée';
+      const diffSec = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
+      if (diffSec < 60) return diffSec <= 3 ? 'Maintenant' : ('Il y a ' + diffSec + ' secondes');
+      const diffMin = Math.round(diffSec / 60);
+      if (diffMin < 60) return 'Il y a ' + diffMin + ' min';
+      const diffHour = Math.round(diffMin / 60);
+      if (diffHour < 24) return 'Il y a ' + diffHour + ' h';
+      const diffDay = Math.round(diffHour / 24);
+      return 'Il y a ' + diffDay + ' j';
+    }
+
+    function activityMatchesFilter(ev) {
+      const date = activityEventDate(ev);
+      if (date) {
+        const end = Date.now() - (activityWindowShiftHours * 3 * 3600000);
+        const start = end - (3 * 3600000);
+        const ts = date.getTime();
+        if (ts < start || ts > end) return false;
+      } else if (activityWindowShiftHours !== 0) {
+        return false;
+      }
+      if (activityFilter === 'all') return true;
+      if (activityFilter === 'poollogic') return ev.domain_name === 'poollogic' || ev.domain_name === 'pooldevice';
+      if (activityFilter === 'manual') return ev.source_name === 'manual';
+      if (activityFilter === 'safety') return ev.domain_name === 'alarm' || ev.source_name === 'safety' || ev.severity_name === 'warning' || ev.severity_name === 'alarm';
+      if (activityFilter === 'system') return ev.domain_name === 'system';
+      return true;
+    }
+
+    function updateActivityRangeText() {
+      if (!activityRangeText) return;
+      const end = new Date(Date.now() - (activityWindowShiftHours * 3 * 3600000));
+      const start = new Date(end.getTime() - (3 * 3600000));
+      activityRangeText.textContent =
+        start.toLocaleDateString([], { day: 'numeric', month: 'short' }) + ' à ' +
+        start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + ' - ' +
+        end.toLocaleDateString([], { day: 'numeric', month: 'short' }) + ' à ' +
+        end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+
+    function activityWindowBoundsMs() {
+      const end = Date.now() - (activityWindowShiftHours * 3 * 3600000);
+      return { start: end - (3 * 3600000), end };
+    }
+
+    function cancelActivityLogRefresh() {
+      activityRequestToken += 1;
+      const controller = activityAbortController;
+      activityAbortController = null;
+      if (controller) controller.abort();
+    }
+
+    function renderActivityLog(events, stats) {
+      if (!activityLogList) return;
+      activityLogList.innerHTML = '';
+      updateActivityRangeText();
+      const filtered = (Array.isArray(events) ? events : [])
+        .filter(activityMatchesFilter)
+        .sort((a, b) => {
+          const ae = Number(a.epoch_s) || 0;
+          const be = Number(b.epoch_s) || 0;
+          if (ae !== be) return be - ae;
+          return (Number(b.seq) || 0) - (Number(a.seq) || 0);
+        });
+      if (!filtered.length) {
+        const empty = document.createElement('div');
+        empty.className = 'activity-empty';
+        empty.textContent = 'Aucune activité pour ce filtre.';
+        activityLogList.appendChild(empty);
+        if (activityLogStatus) {
+          if (stats) {
+            activityLogStatus.textContent =
+              '0/' + (Number(stats.entries) || 0) +
+              ' événement(s), persistés=' + (Number(stats.persisted) || 0);
+          } else {
+            activityLogStatus.textContent = 'Aucune activité.';
+          }
+        }
+        return;
+      }
+      let currentDay = '';
+      let currentDayEvents = null;
+      filtered.forEach((ev) => {
+        const date = activityEventDate(ev);
+        const day = formatActivityDay(date);
+        if (day !== currentDay) {
+          currentDay = day;
+          const daySection = document.createElement('section');
+          daySection.className = 'activity-day';
+          const dayNode = document.createElement('div');
+          dayNode.className = 'activity-day-title';
+          dayNode.textContent = day;
+          currentDayEvents = document.createElement('div');
+          currentDayEvents.className = 'activity-day-events';
+          daySection.appendChild(dayNode);
+          daySection.appendChild(currentDayEvents);
+          activityLogList.appendChild(daySection);
+        }
+        const row = document.createElement('article');
+        row.className = 'activity-row activity-severity-' + String(ev.severity_name || 'info');
+        const time = document.createElement('time');
+        time.className = 'activity-row-time';
+        time.textContent = formatActivityTime(date);
+        if (date) time.dateTime = date.toISOString();
+        const rail = document.createElement('div');
+        rail.className = 'activity-row-rail';
+        const icon = document.createElement('span');
+        icon.className = 'ui-msr activity-row-icon';
+        icon.setAttribute('aria-hidden', 'true');
+        icon.textContent = String(ev.icon || 'history');
+        rail.appendChild(icon);
+        const main = document.createElement('div');
+        main.className = 'activity-row-main';
+        const title = document.createElement('div');
+        title.className = 'activity-row-title';
+        const strong = document.createElement('strong');
+        strong.textContent = String(ev.title || 'Activité');
+        title.appendChild(strong);
+        const meta = document.createElement('div');
+        meta.className = 'activity-row-meta';
+        meta.textContent = formatActivityRelative(date);
+        main.appendChild(title);
+        if (ev.detail) {
+          const detail = document.createElement('div');
+          detail.className = 'activity-row-detail';
+          detail.textContent = String(ev.detail);
+          main.appendChild(detail);
+        }
+        main.appendChild(meta);
+        row.appendChild(time);
+        row.appendChild(rail);
+        row.appendChild(main);
+        currentDayEvents.appendChild(row);
+      });
+      activityLogList.querySelectorAll('.activity-day-events').forEach((dayEvents) => {
+        const rows = dayEvents.querySelectorAll('.activity-row');
+        if (!rows.length) return;
+        rows[0].classList.add('is-first');
+        rows[rows.length - 1].classList.add('is-last');
+      });
+      if (activityLogStatus && stats) {
+        activityLogStatus.textContent =
+          filtered.length + '/' + (Number(stats.entries) || filtered.length) +
+          ' événement(s), persistés=' + (Number(stats.persisted) || 0);
+      }
+    }
+
+    async function refreshActivityLog(showBusy) {
+      if (!activityLogList) return;
+      if (showBusy && activityLogStatus) activityLogStatus.textContent = 'Chargement du journal...';
+
+      if (activityAbortController) activityAbortController.abort();
+      const controller = new AbortController();
+      activityAbortController = controller;
+      const requestToken = ++activityRequestToken;
+      const limit = 32;
+      let offset = 0;
+      const events = [];
+      const seenSequences = new Set();
+      let stats = null;
+      const windowBounds = activityWindowBoundsMs();
+
+      try {
+        while (true) {
+          const url =
+            '/api/activity/logs?order=desc&offset=' + encodeURIComponent(offset) +
+            '&limit=' + limit;
+          const response = await fetch(url, { cache: 'no-store', signal: controller.signal });
+          if (!response.ok) throw new Error('HTTP ' + response.status);
+          const page = await response.json();
+          if (requestToken !== activityRequestToken) return;
+
+          stats = page;
+          const pageEvents = Array.isArray(page.events) ? page.events : [];
+          pageEvents.forEach((event) => {
+            const sequence = Number(event && event.seq) || 0;
+            if (sequence > 0 && seenSequences.has(sequence)) return;
+            if (sequence > 0) seenSequences.add(sequence);
+            events.push(event);
+          });
+
+          const reachedWindowStart = pageEvents.some((event) => {
+            const epoch = Number(event && event.epoch_s) || 0;
+            return epoch > 0 && (epoch * 1000) <= windowBounds.start;
+          });
+          if (reachedWindowStart || page.complete || page.next == null || Number(page.count) === 0) break;
+
+          offset = Number(page.next);
+          if (!Number.isFinite(offset) || offset < 0 || events.length >= 768) break;
+        }
+
+        if (requestToken !== activityRequestToken) return;
+        activityLoadedEvents = events;
+        activityLoadedStats = stats;
+        renderActivityLog(activityLoadedEvents, activityLoadedStats);
+      } catch (err) {
+        if (err && err.name === 'AbortError') return;
+        throw err;
+      } finally {
+        if (activityAbortController === controller) {
+          activityAbortController = null;
+        }
+      }
+    }
+
+    async function purgeActivityLog() {
+      if (!confirm('Confirmer la purge du Journal d’Activité ? Cette action efface l’historique en mémoire et dans le SPIFFS.')) {
+        return;
+      }
+      if (activityPurgeBtn) activityPurgeBtn.disabled = true;
+      if (activityLogStatus) activityLogStatus.textContent = 'Purge du journal...';
+      try {
+        const response = await fetch('/api/activity/purge', { method: 'POST', cache: 'no-store' });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const payload = await response.json().catch(() => ({}));
+        if (payload && payload.ok === false) throw new Error('Purge refusée');
+        activityWindowShiftHours = 0;
+        await refreshActivityLog(false);
+        if (activityLogStatus) activityLogStatus.textContent = 'Journal purgé.';
+      } catch (err) {
+        if (activityLogStatus) activityLogStatus.textContent = 'Purge impossible: ' + (err && err.message ? err.message : String(err));
+      } finally {
+        if (activityPurgeBtn) activityPurgeBtn.disabled = false;
+      }
+    }
+
     function setLogSource(source) {
       let normalized = String(source || '').trim().toLowerCase();
       if (webLocalRuntime && normalized === 'flowio') {
@@ -2135,8 +2793,8 @@
       if (logSourceSelect && logSourceSelect.value !== logSource) {
         logSourceSelect.value = logSource;
       }
-      if (terminalActive) {
-        term.textContent = '';
+      if (logsOverlayOpen) {
+        if (term) term.textContent = '';
         connectLogSocket();
       } else {
         setWsStatusText(tr('terminal.inactive', 'inactif'));
@@ -2173,7 +2831,7 @@
     if (toggleAutoscrollInput) toggleAutoscrollInput.addEventListener('change', () => {
       autoScrollEnabled = !!toggleAutoscrollInput.checked;
       refreshAutoscrollUi();
-      if (autoScrollEnabled) term.scrollTop = term.scrollHeight;
+      if (autoScrollEnabled && term) term.scrollTop = term.scrollHeight;
     });
     if (logSourceSelect) {
       logSourceSelect.value = 'supervisor';
@@ -2184,6 +2842,53 @@
     if (bootLogDumpBtn) {
       bootLogDumpBtn.addEventListener('click', requestBootLogDump);
     }
+    if (openLogsOverlayBtn) {
+      openLogsOverlayBtn.addEventListener('click', openLogsOverlay);
+    }
+    if (closeLogsOverlayBtn) {
+      closeLogsOverlayBtn.addEventListener('click', closeLogsOverlay);
+    }
+    if (logsOverlay) {
+      logsOverlay.addEventListener('click', (ev) => {
+        if (ev.target === logsOverlay) closeLogsOverlay();
+      });
+    }
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && logsOverlayOpen) closeLogsOverlay();
+    });
+    if (activityRefreshBtn) {
+      activityRefreshBtn.addEventListener('click', () => refreshActivityLog(true).catch((err) => {
+        if (activityLogStatus) activityLogStatus.textContent = 'Journal indisponible: ' + (err && err.message ? err.message : String(err));
+      }));
+    }
+    if (activityPurgeBtn) {
+      activityPurgeBtn.addEventListener('click', () => {
+        purgeActivityLog().catch((err) => {
+          if (activityLogStatus) activityLogStatus.textContent = 'Purge impossible: ' + (err && err.message ? err.message : String(err));
+        });
+      });
+    }
+    if (activityPrevBtn) {
+      activityPrevBtn.addEventListener('click', () => {
+        activityWindowShiftHours += 1;
+        updateActivityRangeText();
+        refreshActivityLog(false).catch(() => {});
+      });
+    }
+    if (activityNextBtn) {
+      activityNextBtn.addEventListener('click', () => {
+        activityWindowShiftHours = Math.max(0, activityWindowShiftHours - 1);
+        updateActivityRangeText();
+        refreshActivityLog(false).catch(() => {});
+      });
+    }
+    activityFilterBtns.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        activityFilter = String(btn.dataset.activityFilter || 'all');
+        activityFilterBtns.forEach((el) => el.classList.toggle('is-active', el === btn));
+        renderActivityLog(activityLoadedEvents, activityLoadedStats);
+      });
+    });
     applyLogSourceUi();
     refreshAutoscrollUi();
     logSource = 'supervisor';
@@ -2234,17 +2939,16 @@
 
     function upgradeTargetLabel(target) {
       const key = String(target || '').trim().toLowerCase();
-      if (key === 'flowio') return 'flow.io';
-      if (key === 'esp32s3') return 'ESP32-S3';
-      if (key === 'supervisor') return isMicronovaProfile() ? 'Micronova' : 'Superviseur';
-      if (key === 'nextion') return 'Nextion';
+      if (key === 'flowios3' || key === 'esp32s3') return 'FlowIOS3';
+      if (key === 'waveshare') return 'FlowIOS3';
       if (key === 'spiffs') return 'SPIFFS';
+      if (key === 'nextion') return 'Nextion';
       return 'Firmware';
     }
 
     function upgradeUsesReconnect(target) {
       const key = String(target || '').trim().toLowerCase();
-      return key === 'supervisor' || key === 'spiffs';
+      return key === 'flowios3' || key === 'esp32s3' || key === 'waveshare' || key === 'spiffs';
     }
 
     function upgradeStepDefinitions(target) {
@@ -2385,6 +3089,18 @@
       });
     }
 
+    function isUpgradeUiCancelable(session) {
+      const phase = String(session && session.phase ? session.phase : 'idle');
+      return !!(session && (session.awaitingReconnect || phase === 'target' || phase === 'download' || phase === 'flash' || phase === 'reboot' || phase === 'reconnect'));
+    }
+
+    function syncUpgradeCancelButton(session) {
+      if (!cancelUpgradeUiBtn) return;
+      const canCancel = isUpgradeUiCancelable(session);
+      cancelUpgradeUiBtn.hidden = !canCancel;
+      cancelUpgradeUiBtn.disabled = !canCancel;
+    }
+
     function renderUpgradeJourney(session) {
       const safeSession = session && typeof session === 'object' ? session : { phase: 'idle', target: '' };
       const phase = String(safeSession.phase || 'idle');
@@ -2417,6 +3133,7 @@
       if (upStatusChip) {
         upStatusChip.textContent = stateLabel;
       }
+      syncUpgradeCancelButton(safeSession);
     }
 
     function updateUpgradeUiSession(patch) {
@@ -2439,6 +3156,7 @@
 
     function startUpgradeUiSession(target) {
       stopUpgradeReconnectFlow();
+      upgradeUiStatusMuted = false;
       return updateUpgradeUiSession({
         phase: 'target',
         target: target,
@@ -2449,6 +3167,17 @@
         reconnectShown: false,
         reconnectProgress: 0,
         failedStep: ''
+      });
+    }
+
+    function cancelUpgradeUiSession() {
+      upgradeUiStatusMuted = true;
+      stopUpgradeStatusPolling();
+      clearUpgradeUiSession();
+      renderUpgradeJourney({
+        phase: 'idle',
+        target: '',
+        detail: tr('updates.none', 'Aucune opération en cours.')
       });
     }
 
@@ -2582,6 +3311,11 @@
       const progress = Math.max(0, Math.min(100, Number(data.progress) || 0));
       const msg = String(data.msg || '').trim();
 
+      if (upgradeUiStatusMuted) {
+        if (state !== 'idle' && state !== 'done' && state !== 'error') return;
+        upgradeUiStatusMuted = false;
+      }
+
       if (state === 'idle') {
         if (current && current.awaitingReconnect) {
           handleUpgradeReconnectSuccess();
@@ -2699,48 +3433,6 @@
       }
     }
 
-    async function loadUpgradeConfig() {
-      try {
-        const data = await fetchOkJson('/api/fwupdate/config', { cache: 'no-store' }, 'configuration firmware indisponible');
-        if (updateServerPath) {
-          updateServerPath.value = composeUpgradeServerPath(data.update_host || '', data.update_path || '');
-        }
-        resetUpgradeManifestSelections(tr('updates.empty', 'Cliquez sur « Vérifier les mises à jour ».'));
-        syncUpgradeConfigFieldInitialValues();
-      } catch (err) {
-        setUpgradeMessage('Échec du chargement de la configuration : ' + err);
-      }
-    }
-
-    function composeUpgradeServerPath(hostRaw, pathRaw) {
-      const host = String(hostRaw || '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
-      let path = String(pathRaw || '').trim();
-      if (path && !path.startsWith('/')) path = '/' + path;
-      if (!host) return path.replace(/^\/+/, '');
-      return host + path;
-    }
-
-    function splitUpgradeServerPath(rawValue) {
-      const raw = String(rawValue || '').trim().replace(/^https?:\/\//i, '');
-      if (!raw) return { host: '', path: '' };
-      const slashIndex = raw.indexOf('/');
-      if (slashIndex < 0) {
-        return { host: raw.replace(/\/+$/, ''), path: '' };
-      }
-      const host = raw.slice(0, slashIndex).trim().replace(/\/+$/, '');
-      let path = raw.slice(slashIndex).trim();
-      if (path && !path.startsWith('/')) path = '/' + path;
-      return { host: host, path: path };
-    }
-
-    function buildUpgradeConfigPayload() {
-      const parts = splitUpgradeServerPath(updateServerPath ? updateServerPath.value : '');
-      return {
-        update_host: parts.host,
-        update_path: parts.path
-      };
-    }
-
     function normalizeFirmwareVersionForCompare(value) {
       return String(value || '').trim().split('+')[0].replace(/^v/i, '');
     }
@@ -2805,11 +3497,10 @@
 
     function endpointForUpgradeTarget(target) {
       const key = String(target || '').trim().toLowerCase();
-      if (key === 'flowio') return '/fwupdate/flowio';
-      if (key === 'esp32s3') return isFlowIOS3Profile() ? '/fwupdate/supervisor' : '/fwupdate/flowio';
-      if (key === 'supervisor') return '/fwupdate/supervisor';
+      if (key === 'flowios3' || key === 'esp32s3') return '/fwupdate/waveshare';
+      if (key === 'waveshare') return '/fwupdate/waveshare';
+      if (key === 'spiffs') return '/fwupdate/spiffs';
       if (key === 'nextion') return '/fwupdate/nextion';
-      if (key === 'spiffs' || key === 'cfgdocs') return '/fwupdate/spiffs';
       return '';
     }
 
@@ -2821,10 +3512,14 @@
       const key = String(category || '').trim().toLowerCase();
       if (!key) return false;
       if (isMicronovaProfile() || isSupervisorProfile()) {
-        return key === 'supervisor' || key === 'spiffs' || key === 'cfgdocs' || key === 'nextion';
+        return key === 'flowios3' || key === 'esp32s3' || key === 'waveshare'
+          || key === 'spiffs' || key === 'flowios3-spiffs' || key === 'esp32s3-spiffs' || key === 'waveshare-spiffs'
+          || key === 'nextion';
       }
-      if (isFlowIOS3Profile()) {
-        return key === 'esp32s3' || key === 'esp32s3-spiffs' || key === 'nextion';
+      if (isWaveshareProfile()) {
+        return key === 'flowios3' || key === 'esp32s3' || key === 'waveshare'
+          || key === 'spiffs' || key === 'flowios3-spiffs' || key === 'esp32s3-spiffs' || key === 'waveshare-spiffs'
+          || key === 'nextion';
       }
       if (isFlowIOProfile()) {
         return key === 'flowio';
@@ -2841,8 +3536,8 @@
 
     function resolveArtifactEndpoint(category, artifact, target) {
       const categoryKey = String(category || '').trim().toLowerCase();
-      if (isFlowIOS3Profile() && categoryKey === 'esp32s3') {
-        return '/fwupdate/supervisor';
+      if (categoryKey === 'flowios3' || categoryKey === 'esp32s3' || categoryKey === 'waveshare') {
+        return '/fwupdate/waveshare';
       }
       const explicit = String(artifact && (artifact.route || artifact.endpoint || artifact.update_route) ? (artifact.route || artifact.endpoint || artifact.update_route) : '').trim();
       if (explicit) {
@@ -2962,15 +3657,11 @@
     function upgradeManifestKeysForComponent(componentKey) {
       const key = String(componentKey || '').trim().toLowerCase();
       if (key === 'flowio') {
-        if (isFlowIOS3Profile()) return ['esp32s3', 'flowio'];
-        if (isMicronovaProfile() || isSupervisorProfile()) return ['supervisor'];
-        return ['flowio', 'esp32s3', 'supervisor'];
+        return ['flowios3', 'waveshare', 'esp32s3'];
       }
       if (key === 'spiffs') {
-        if (isFlowIOS3Profile()) return ['esp32s3-spiffs', 'spiffs'];
-        return ['spiffs', 'cfgdocs', 'esp32s3-spiffs'];
+        return ['spiffs', 'flowios3-spiffs', 'esp32s3-spiffs', 'waveshare-spiffs'];
       }
-      if (key === 'nextion') return ['nextion'];
       return [key];
     }
 
@@ -3034,17 +3725,33 @@
         const available = latest
           ? { version: latest.version, build: latest.buildDate }
           : { version: '-', build: '-' };
+        const nextionUnavailable = def.key === 'nextion'
+          && (!nextionDisplayVersionDetected || !nextionDisplayVersionCompatible);
         const comparableCurrent = current.version && current.version !== '-';
         const comparableAvailable = available.version && available.version !== '-';
-        const updateAvailable = comparableAvailable && (!comparableCurrent || compareFirmwareVersions(available.version, current.version) > 0);
+        const updateAvailable = !nextionUnavailable
+          && comparableAvailable
+          && (!comparableCurrent || compareFirmwareVersions(available.version, current.version) > 0);
+        const unavailableMessage = nextionDisplayVersionDetected
+          ? tr('updates.nextion.incompatible', 'Version Nextion incompatible')
+          : tr('updates.nextion.notDetected', 'Nextion non détecté');
+        const expectedVersion = formatDetectedNextionVersion(nextionDisplayExpectedVersion);
+        const unavailableComment = nextionDisplayVersionDetected && expectedVersion !== '-'
+          ? tr('updates.nextion.incompatibleDetail', 'Version attendue : {version}.')
+            .replace('{version}', expectedVersion)
+          : tr('updates.nextion.notDetectedDetail', 'Vérifiez la connexion de l’écran puis redémarrez le système.');
         return Object.assign({}, def, {
           current: current,
           available: available,
           updateAvailable: updateAvailable,
+          unavailable: nextionUnavailable,
+          unavailableMessage: nextionUnavailable ? unavailableMessage : '',
           entry: latest,
-          comments: latest && latest.notes
-            ? latest.notes
-            : (updateAvailable ? def.commentsAvailable : def.commentsCurrent)
+          comments: nextionUnavailable
+            ? unavailableComment
+            : (latest && latest.notes
+              ? latest.notes
+              : (updateAvailable ? def.commentsAvailable : def.commentsCurrent))
         });
       });
     }
@@ -3072,12 +3779,16 @@
       return badge;
     }
 
-    function createUpgradeStatusBadge(updateAvailable) {
+    function createUpgradeStatusBadge(row) {
       const badge = document.createElement('span');
-      badge.className = 'update-status-badge ' + (updateAvailable ? 'is-available' : 'is-current');
-      badge.textContent = updateAvailable
-        ? tr('updates.status.available', 'Mise à jour disponible')
-        : tr('updates.status.current', 'À jour');
+      badge.className = 'update-status-badge ' + (row.unavailable
+        ? 'is-unavailable'
+        : (row.updateAvailable ? 'is-available' : 'is-current'));
+      badge.textContent = row.unavailable
+        ? row.unavailableMessage
+        : (row.updateAvailable
+          ? tr('updates.status.available', 'Mise à jour disponible')
+          : tr('updates.status.current', 'À jour'));
       return badge;
     }
 
@@ -3112,7 +3823,8 @@
       upgradeCards.classList.remove('has-error');
       rows.forEach((row) => {
         const card = document.createElement('article');
-        card.className = 'update-summary-card update-summary-' + row.tone;
+        card.className = 'update-summary-card update-summary-' + row.tone + (row.unavailable ? ' is-disabled' : '');
+        if (row.unavailable) card.setAttribute('aria-disabled', 'true');
         card.appendChild(createUpgradeComponentBadge(row, 'update-component-badge-lg'));
 
         const body = document.createElement('div');
@@ -3145,17 +3857,19 @@
         const stateIcon = document.createElement('span');
         stateIcon.className = 'ui-msr update-summary-state';
         stateIcon.setAttribute('aria-hidden', 'true');
-        stateIcon.textContent = row.updateAvailable ? 'arrow_upward' : 'horizontal_rule';
+        stateIcon.textContent = row.unavailable ? 'link_off' : (row.updateAvailable ? 'arrow_upward' : 'horizontal_rule');
         card.appendChild(stateIcon);
 
         const foot = document.createElement('div');
         foot.className = 'update-summary-foot';
         const dot = document.createElement('span');
-        dot.className = 'update-dot ' + (row.updateAvailable ? 'is-green' : 'is-blue');
+        dot.className = 'update-dot ' + (row.unavailable ? 'is-gray' : (row.updateAvailable ? 'is-green' : 'is-blue'));
         foot.appendChild(dot);
-        foot.appendChild(document.createTextNode(row.updateAvailable
-          ? tr('updates.status.available', 'Mise à jour disponible')
-          : tr('updates.status.current', 'À jour')));
+        foot.appendChild(document.createTextNode(row.unavailable
+          ? row.unavailableMessage
+          : (row.updateAvailable
+            ? tr('updates.status.available', 'Mise à jour disponible')
+            : tr('updates.status.current', 'À jour'))));
         card.appendChild(foot);
 
         upgradeCards.appendChild(card);
@@ -3167,6 +3881,9 @@
       upgradeTableBody.innerHTML = '';
       rows.forEach((row) => {
         const trEl = document.createElement('tr');
+        if (row.unavailable) {
+          trEl.className = 'is-disabled';
+        }
 
         const componentCell = document.createElement('td');
         const component = document.createElement('div');
@@ -3192,7 +3909,7 @@
         trEl.appendChild(availableCell);
 
         const statusCell = document.createElement('td');
-        statusCell.appendChild(createUpgradeStatusBadge(row.updateAvailable));
+        statusCell.appendChild(createUpgradeStatusBadge(row));
         trEl.appendChild(statusCell);
 
         const commentsCell = document.createElement('td');
@@ -3277,10 +3994,35 @@
         checkUpdatesBtn.classList.add('is-pending');
       }
       try {
-        await saveUpgradeConfig();
         setUpgradeCardsEmpty(tr('updates.checking', 'Vérification du manifest...'));
         setUpgradeMessage(tr('updates.checking', 'Vérification du manifest...'));
-        const data = await fetchOkJson('/api/fwupdate/check', { cache: 'no-store' }, 'échec vérification');
+        const started = await fetchOkJson(
+          '/api/fwupdate/check',
+          { method: 'POST', cache: 'no-store' },
+          'échec lancement vérification'
+        );
+        const requestId = Number(started && started.request_id);
+        if (!Number.isFinite(requestId) || requestId <= 0) {
+          throw new Error('identifiant de vérification invalide');
+        }
+
+        const deadlineMs = Date.now() + 85000;
+        let data = null;
+        while (Date.now() < deadlineMs) {
+          data = await fetchOkJson(
+            '/api/fwupdate/check?request_id=' + encodeURIComponent(String(requestId)),
+            { cache: 'no-store' },
+            'échec vérification'
+          );
+          if (data && data.state === 'ready') break;
+          if (!data || (data.state !== 'queued' && data.state !== 'downloading')) {
+            throw new Error('état de vérification inattendu');
+          }
+          await waitMs(400);
+        }
+        if (!data || data.state !== 'ready') {
+          throw new Error('délai de vérification du manifest dépassé');
+        }
         populateUpgradeManifestSelections(data);
         setUpgradeMessage(describeManifestUpdates(data));
       } catch (err) {
@@ -3292,61 +4034,6 @@
           checkUpdatesBtn.disabled = false;
           checkUpdatesBtn.classList.remove('is-pending');
         }
-      }
-    }
-
-    function syncUpgradeConfigFieldInitialValues(keys) {
-      const changedKeys = Array.isArray(keys) ? new Set(keys) : null;
-      upgradeConfigFieldDefs.forEach((def) => {
-        if (!def || !def.input || !def.button) return;
-        if (changedKeys) {
-          const isCombinedUpgradeField = def.key === 'update_server_path'
-            && (changedKeys.has('update_host') || changedKeys.has('update_path'));
-          if (!changedKeys.has(def.key) && !isCombinedUpgradeField) return;
-        }
-        def.input.dataset.initialValue = def.input.value.trim();
-        updateUpgradeConfigFieldApplyState(def);
-      });
-    }
-
-    function isUpgradeConfigFieldDirty(def) {
-      if (!def || !def.input) return false;
-      return def.input.value.trim() !== String(def.input.dataset.initialValue || '');
-    }
-
-    function updateUpgradeConfigFieldApplyState(def) {
-      if (!def || !def.button) return;
-      const dirty = isUpgradeConfigFieldDirty(def);
-      def.button.textContent = fieldApplyCheckIcon;
-      def.button.disabled = !dirty;
-      def.button.classList.toggle('is-dirty', dirty);
-      def.button.classList.remove('is-pending');
-      def.button.title = dirty ? 'Appliquer ce changement' : 'Aucun changement a appliquer';
-      def.button.setAttribute('aria-label', def.button.title);
-    }
-
-    async function saveUpgradeConfig(values, successMessage) {
-      const payload = values && typeof values === 'object'
-        ? values
-        : buildUpgradeConfigPayload();
-      await fetchOkJson('/api/fwupdate/config', createFormPostOptions(payload), 'échec enregistrement');
-      syncUpgradeConfigFieldInitialValues(Object.keys(payload));
-      setUpgradeMessage(successMessage || 'Configuration enregistrée.');
-    }
-
-    async function applyUpgradeConfigField(def) {
-      if (!def || !def.input || !def.button || !isUpgradeConfigFieldDirty(def)) return;
-      def.button.disabled = true;
-      def.button.classList.add('is-pending');
-      try {
-        const success = def.successMessage;
-        if (def.key === 'update_server_path') {
-          await saveUpgradeConfig(buildUpgradeConfigPayload(), success);
-        } else {
-          await saveUpgradeConfig({ [def.key]: def.input.value.trim() }, success);
-        }
-      } finally {
-        updateUpgradeConfigFieldApplyState(def);
       }
     }
 
@@ -3367,7 +4054,6 @@
       try {
         startUpgradeUiSession(target);
         startUpgradeStatusPolling(true);
-        await saveUpgradeConfig();
         const selectedUrl = String(url || '').trim();
         if (!selectedUrl) {
           throw new Error('aucune image sélectionnée, lancez Vérifier');
@@ -3441,6 +4127,47 @@
         return trimmed;
       }
       return String(v);
+    }
+
+    function flowTimeSourceLabel(src) {
+      const key = String(src || '').trim().toLowerCase();
+      if (key === 'ntp') return 'NTP';
+      if (key === 'internal_rtc') return 'RTC';
+      if (key === 'manual') return 'manuel';
+      return '';
+    }
+
+    function flowTimeQualityLabel(quality) {
+      const key = String(quality || '').trim().toLowerCase();
+      if (key === 'ntp_synced') return 'NTP';
+      if (key === 'rtc_trusted') return currentWebLocaleTag().toLowerCase().startsWith('en') ? 'RTC' : 'RTC';
+      if (key === 'manual') return currentWebLocaleTag().toLowerCase().startsWith('en') ? 'manual' : 'manuel';
+      if (key === 'rtc_untrusted') return 'RTC?';
+      if (key === 'invalid') return '';
+      return '';
+    }
+
+    function flowTimeIsReady(time) {
+      if (!time || typeof time !== 'object') return false;
+      return !!time.rdy || !!flowTimeQualityLabel(time.qlt) || !!flowTimeSourceLabel(time.src);
+    }
+
+    function flowTimeHeaderLabel(time) {
+      if (!time || typeof time !== 'object') return '';
+      const quality = flowTimeQualityLabel(time.qlt);
+      if (quality) return quality;
+      const source = flowTimeSourceLabel(time.src);
+      if (source) return source;
+      return flowTimeIsReady(time) ? tr('info.state.synced', 'Synchronisée') : tr('info.state.unsynced', 'Non synchronisée');
+    }
+
+    function flowTimeStatusLabel(time) {
+      if (!time || typeof time !== 'object') return '';
+      if (!flowTimeIsReady(time)) return tr('info.state.unsynced', 'Non synchronisée');
+      const source = flowTimeQualityLabel(time.qlt) || flowTimeSourceLabel(time.src);
+      return source
+        ? tr('info.state.synced', 'Synchronisée') + ' (' + source + ')'
+        : tr('info.state.synced', 'Synchronisée');
     }
 
     function fmtFlowCount(v) {
@@ -3772,7 +4499,8 @@
 
     function buildFlowStatusCardIcon(iconKey, ok, label) {
       const iconText = {
-        wifi: 'WF',
+        wifi: 'wifi',
+        ethernet: 'settings_ethernet',
         supervisor: 'SUP',
         system: 'SYS',
         mqtt: 'MQ',
@@ -3781,6 +4509,9 @@
       };
       const span = document.createElement('span');
       span.className = ok ? 'status-card-icon is-true' : 'status-card-icon is-false';
+      if (iconKey === 'wifi' || iconKey === 'ethernet') {
+        span.classList.add('status-card-icon-msr');
+      }
       span.setAttribute('role', 'img');
       span.setAttribute('aria-label', label || (ok ? 'OK' : 'NOK'));
       span.title = label || (ok ? 'OK' : 'NOK');
@@ -3846,6 +4577,9 @@
         merged.fw = system.fw || '';
         merged.upms = system.upms ?? 0;
         merged.heap = (system.heap && typeof system.heap === 'object') ? system.heap : {};
+        if (system.time && typeof system.time === 'object') {
+          merged.time = system.time;
+        }
       }
 
       const wifi = domainData.wifi;
@@ -3901,6 +4635,7 @@
       ) {
         flowStatusDomainCache.system.data = {
           ok: true,
+          devicename: data.devicename || '',
           fw: data.fw || '',
           upms: data.upms ?? 0,
           heap: (data.heap && typeof data.heap === 'object') ? data.heap : {}
@@ -3910,6 +4645,8 @@
 
       if (data.wifi && typeof data.wifi === 'object') {
         const wifiData = Object.assign({}, data.wifi, { ip: normalizeIpValue(data.wifi.ip) });
+        const wifiMac = normalizeInfoMac(wifiData.mac);
+        if (wifiMac !== '-') infoLastMac = wifiMac;
         flowStatusDomainCache.wifi.data = { ok: true, wifi: wifiData };
         flowStatusDomainCache.wifi.fetchedAt = stamp;
       }
@@ -3927,6 +4664,15 @@
       if (data.i2c && typeof data.i2c === 'object') {
         flowStatusDomainCache.i2c.data = { ok: true, i2c: data.i2c };
         flowStatusDomainCache.i2c.fetchedAt = stamp;
+      }
+
+      if (data.time && typeof data.time === 'object') {
+        const systemData = flowStatusDomainCache.system.data && typeof flowStatusDomainCache.system.data === 'object'
+          ? flowStatusDomainCache.system.data
+          : { ok: true };
+        systemData.time = data.time;
+        flowStatusDomainCache.system.data = systemData;
+        flowStatusDomainCache.system.fetchedAt = stamp;
       }
     }
 
@@ -4076,6 +4822,7 @@
       const wifi = (data && typeof data.wifi === 'object') ? data.wifi : {};
       const mqtt = (data && typeof data.mqtt === 'object') ? data.mqtt : {};
       const pool = (data && typeof data.pool === 'object') ? data.pool : {};
+      const time = (data && typeof data.time === 'object') ? data.time : {};
       const heap = (data && data.heap && typeof data.heap === 'object') ? data.heap : {};
       const i2c = (data && data.i2c && typeof data.i2c === 'object') ? data.i2c : {};
       const firmware = fmtFlowStatusVal(data.fw);
@@ -4085,7 +4832,13 @@
       const wifiIp = normalizeIpValue(wifi.ip);
       const wifiHasRssi = !!wifi.hrss;
       const wifiRssi = wifi.rssi ?? '-';
+      const networkType = effectiveNetworkType(wifi, true);
+      const networkIsEthernet = networkType === 'ethernet';
       const mqttReady = !!mqtt.rdy;
+      if (data && Object.prototype.hasOwnProperty.call(data, 'time')) {
+        currentFlowTimeSourceLabel = flowTimeHeaderLabel(time);
+      }
+      refreshAppHeaderClock();
       const mqttServer = fmtFlowStatusVal(mqtt.srv);
       const mqttRxDrop = mqtt.rxdrp ?? 0;
       const mqttParseFail = mqtt.prsf ?? 0;
@@ -4211,15 +4964,19 @@
       ]);
 
       flowStatusGrid.innerHTML = '';
+      const networkRows = [
+        [tr('info.row.ip', 'Adresse IP'), wifiIp],
+        [tr('info.row.networkType', 'Type réseau'), formatInfoNetworkType(networkType)]
+      ];
+      if (!networkIsEthernet) {
+        networkRows.push([tr('info.row.signal', 'Signal'), buildFlowRssiGauge(wifiRssi, wifiHasRssi)]);
+      }
       appendFlowStatusCard({
-        title: 'WiFi',
-        icon: 'wifi',
+        title: tr('header.wifi', 'Réseau'),
+        icon: networkIsEthernet ? 'ethernet' : 'wifi',
         ok: wifiReady,
-        iconLabel: wifiReady ? 'WiFi connecte' : 'WiFi deconnecte',
-        rows: [
-          ['Adresse IP', wifiIp],
-          ['Signal', buildFlowRssiGauge(wifiRssi, wifiHasRssi)]
-        ]
+        iconLabel: wifiReady ? tr('info.state.connected', 'Connecté') : tr('info.state.disconnected', 'Déconnecté'),
+        rows: networkRows
       });
       appendFlowStatusCard({
         title: 'MQTT',
@@ -4344,6 +5101,471 @@
       }
     }
 
+    function stopIoSummaryTimer() {
+      ioSummaryPoller.stop();
+    }
+
+    function startIoSummaryTimer() {
+      ioSummaryPoller.start();
+    }
+
+    function ioSummaryStateLabel(state) {
+      const key = String(state || '').trim().toLowerCase();
+      if (key === 'active') return tr('io.state.active', 'Actif');
+      if (key === 'sleeping') return tr('io.state.sleeping', 'Veille');
+      if (key === 'manually_disabled') return tr('io.state.manuallyDisabled', 'Désactivé manuellement');
+      if (key === 'error') return tr('io.state.error', 'Erreur');
+      return key || '-';
+    }
+
+    function ioSummaryStateClass(state) {
+      const key = String(state || '').trim().toLowerCase();
+      if (key === 'active') return 'is-active';
+      if (key === 'manually_disabled') return 'is-disabled';
+      if (key === 'error') return 'is-error';
+      return 'is-sleeping';
+    }
+
+    function ioSummaryText(value, fallback) {
+      const text = String(value === null || value === undefined ? '' : value).trim();
+      return text || fallback || '-';
+    }
+
+    function ioSummaryNumber(value) {
+      const n = Number(value);
+      return Number.isFinite(n) ? n : 0;
+    }
+
+    function ioSummarySlotLabel(row) {
+      const kind = ioSummaryText(row && row.io_slot, '');
+      const idx = Number(row && row.io_slot_index);
+      if (!kind) return '-';
+      return Number.isFinite(idx) ? (kind + ' #' + idx) : kind;
+    }
+
+    function ioSummaryIoIdLabel(row) {
+      const explicit = String(row && row.io_id_label !== null && row.io_id_label !== undefined ? row.io_id_label : '').trim();
+      if (explicit) return explicit;
+      const id = Number(row && row.io_id);
+      if (!Number.isFinite(id) || id === 65535) return tr('io.unassigned', 'Non affecté');
+      return String(id);
+    }
+
+    function createIoDirectionBadge(direction) {
+      const key = String(direction || '').trim().toLowerCase();
+      const badge = document.createElement('span');
+      badge.className = 'io-direction-badge ' + (key === 'input' ? 'is-input' : key === 'output' ? 'is-output' : 'is-unknown');
+
+      const label = key === 'input'
+        ? tr('io.direction.input', 'Entrée')
+        : key === 'output'
+          ? tr('io.direction.output', 'Sortie')
+          : tr('io.direction.unknown', 'Inconnu');
+      badge.title = label;
+      badge.setAttribute('aria-label', label);
+      badge.tabIndex = 0;
+
+      const icon = document.createElement('span');
+      icon.className = 'io-direction-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = key === 'input' ? '⇥' : key === 'output' ? '↦' : '?';
+
+      badge.appendChild(icon);
+      return badge;
+    }
+
+    function createIoOptionalCell(value) {
+      const content = document.createElement('span');
+      if (value !== null && value !== undefined) content.textContent = String(value).trim();
+      return content;
+    }
+
+    function appendIoSummaryCard(title, value, summary, state) {
+      if (!ioSummaryCards) return;
+      const card = document.createElement('div');
+      card.className = 'status-card io-summary-card';
+
+      const head = document.createElement('div');
+      head.className = 'status-card-head';
+      const copy = document.createElement('div');
+      const h3 = document.createElement('h3');
+      h3.textContent = title;
+      const p = document.createElement('p');
+      p.className = 'status-card-summary';
+      p.textContent = summary;
+      copy.appendChild(h3);
+      copy.appendChild(p);
+
+      const metric = document.createElement('span');
+      metric.className = 'io-summary-card-value ' + ioSummaryStateClass(state);
+      metric.textContent = String(value);
+      head.appendChild(copy);
+      head.appendChild(metric);
+      card.appendChild(head);
+      ioSummaryCards.appendChild(card);
+    }
+
+    function appendIoSummarySkeletonCard(title, summary) {
+      if (!ioSummaryCards) return;
+      const card = document.createElement('div');
+      card.className = 'status-card io-summary-card status-card-skeleton';
+
+      const head = document.createElement('div');
+      head.className = 'status-card-head';
+      const copy = document.createElement('div');
+      const h3 = document.createElement('h3');
+      h3.textContent = title;
+      const p = document.createElement('p');
+      p.className = 'status-card-summary';
+      p.textContent = summary;
+      copy.appendChild(h3);
+      copy.appendChild(p);
+
+      const metric = document.createElement('span');
+      metric.className = 'io-summary-card-value is-sleeping';
+      metric.appendChild(createSkeletonLine('io-summary-card-value-skeleton', 100));
+      head.appendChild(copy);
+      head.appendChild(metric);
+      card.appendChild(head);
+      ioSummaryCards.appendChild(card);
+    }
+
+    function createIoStateBadge(state) {
+      const badge = document.createElement('span');
+      badge.className = 'io-state-badge ' + ioSummaryStateClass(state);
+      badge.textContent = ioSummaryStateLabel(state);
+      return badge;
+    }
+
+    function createIoCompactTable(title, columns, rows) {
+      const section = document.createElement('section');
+      section.className = 'io-table-section';
+
+      const heading = document.createElement('div');
+      heading.className = 'control-section-title ui-heading-inline';
+      const icon = document.createElement('span');
+      icon.className = 'ui-msr ui-msr-sm';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = 'table_chart';
+      const text = document.createElement('span');
+      text.textContent = title;
+      heading.appendChild(icon);
+      heading.appendChild(text);
+      section.appendChild(heading);
+
+      const shell = document.createElement('div');
+      shell.className = 'io-table-shell';
+      const table = document.createElement('table');
+      table.className = 'io-compact-table';
+
+      const thead = document.createElement('thead');
+      const headRow = document.createElement('tr');
+      columns.forEach((column) => {
+        const th = document.createElement('th');
+        th.scope = 'col';
+        th.textContent = column.label;
+        headRow.appendChild(th);
+      });
+      thead.appendChild(headRow);
+      table.appendChild(thead);
+
+      const tbody = document.createElement('tbody');
+      (rows || []).forEach((row) => {
+        const trEl = document.createElement('tr');
+        columns.forEach((column) => {
+          const td = document.createElement('td');
+          const rendered = typeof column.render === 'function' ? column.render(row) : row[column.key];
+          if (rendered instanceof Node) {
+            td.appendChild(rendered);
+          } else {
+            td.textContent = ioSummaryText(rendered, '-');
+          }
+          trEl.appendChild(td);
+        });
+        tbody.appendChild(trEl);
+      });
+      if (!rows || !rows.length) {
+        const trEl = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = columns.length;
+        td.className = 'io-empty-cell';
+        td.textContent = tr('io.empty', 'Aucune donnée.');
+        trEl.appendChild(td);
+        tbody.appendChild(trEl);
+      }
+      table.appendChild(tbody);
+      shell.appendChild(table);
+      section.appendChild(shell);
+      return section;
+    }
+
+    function createIoSummaryTableSkeleton(title, labels, rowCount) {
+      const widths = [72, 54, 48, 42, 64, 58, 46];
+      const columns = (labels || []).map((label, index) => ({
+        key: 'c' + index,
+        label,
+        render: () => createSkeletonLine('io-table-skeleton-line', widths[index % widths.length])
+      }));
+      const rows = Array.from({ length: Math.max(1, rowCount || 1) }, () => ({}));
+      return createIoCompactTable(title, columns, rows);
+    }
+
+    function renderIoSummarySkeleton() {
+      if (ioSummaryCards) {
+        ioSummaryCards.innerHTML = '';
+        appendIoSummarySkeletonCard(
+          tr('io.cards.bindingPorts', 'BindingPorts'),
+          tr('io.cards.bindingPorts.summary', 'ports physiques actifs')
+        );
+        appendIoSummarySkeletonCard(
+          tr('io.cards.ioslots', 'IOSlots'),
+          tr('io.cards.ioslots.summary', 'slots logiques actifs')
+        );
+        appendIoSummarySkeletonCard(
+          tr('io.cards.domainSlots', 'DomainSlots'),
+          tr('io.cards.domainSlots.summary', 'slots domaine actifs')
+        );
+        appendIoSummarySkeletonCard(
+          tr('io.cards.manuallyDisabled', 'Désactivés manuellement'),
+          tr('io.status.loading', 'Chargement...')
+        );
+        appendIoSummarySkeletonCard(
+          tr('io.cards.errors', 'Slots en erreur'),
+          tr('io.status.loading', 'Chargement...')
+        );
+      }
+      if (ioSummaryTables) {
+        ioSummaryTables.innerHTML = '';
+        ioSummaryTables.appendChild(createIoSummaryTableSkeleton(
+          tr('io.table.drivers', 'Affectations par driver'),
+          [
+            tr('io.col.driver', 'Driver'),
+            tr('io.col.active', 'Actifs'),
+            tr('io.col.manuallyDisabled', 'Désactivés'),
+            tr('io.col.errors', 'Erreurs')
+          ],
+          3
+        ));
+        ioSummaryTables.appendChild(createIoSummaryTableSkeleton(
+          tr('io.table.bindingPorts', 'BindingPorts'),
+          [
+            tr('io.col.port', 'Port'),
+            tr('io.col.boardPort', 'Port carte'),
+            tr('io.col.direction', 'Sens'),
+            tr('io.col.driver', 'Driver'),
+            tr('io.col.channel', 'Canal interne'),
+            tr('io.col.state', 'Etat'),
+            tr('io.col.lastValue', 'Dernière valeur'),
+            tr('io.col.ioId', 'IoId')
+          ],
+          4
+        ));
+        ioSummaryTables.appendChild(createIoSummaryTableSkeleton(
+          tr('io.table.ioSlots', 'IOSlots'),
+          [
+            tr('io.col.slot', 'Slot'),
+            tr('io.col.configName', 'Nom config'),
+            tr('io.col.kind', 'Type'),
+            tr('io.col.driver', 'Driver'),
+            tr('io.col.state', 'Etat'),
+            tr('io.col.lastValue', 'Dernière valeur'),
+            tr('io.col.error', 'Erreur')
+          ],
+          4
+        ));
+        ioSummaryTables.appendChild(createIoSummaryTableSkeleton(
+          tr('io.table.domainSlots', 'DomainSlots'),
+          [
+            tr('io.col.domainSlot', 'Domaine'),
+            tr('io.col.ioName', 'IONAME'),
+            tr('io.col.ioSlot', 'IOSlot'),
+            tr('io.col.state', 'Etat'),
+            tr('io.col.lastValue', 'Dernière valeur')
+          ],
+          4
+        ));
+      }
+    }
+
+    function renderIoSummary(data) {
+      const summary = data && typeof data.summary === 'object' ? data.summary : {};
+      const drivers = Array.isArray(data && data.drivers) ? data.drivers : [];
+      const bindingPorts = Array.isArray(data && data.binding_ports) ? data.binding_ports : [];
+      const ioSlots = Array.isArray(data && data.io_slots) ? data.io_slots : [];
+      const domainSlots = Array.isArray(data && data.domain_slots) ? data.domain_slots : [];
+      const errors = Array.isArray(data && data.error_slots) ? data.error_slots : [];
+
+      if (ioSummaryCards) {
+        ioSummaryCards.innerHTML = '';
+        appendIoSummaryCard(
+          tr('io.cards.bindingPorts', 'BindingPorts'),
+          ioSummaryNumber(summary.binding_ports_active) + '/' + ioSummaryNumber(summary.binding_ports_total),
+          tr('io.cards.bindingPorts.summary', 'ports physiques actifs'),
+          ioSummaryNumber(summary.binding_ports_error) ? 'error' : 'active'
+        );
+        appendIoSummaryCard(
+          tr('io.cards.ioslots', 'IOSlots'),
+          ioSummaryNumber(summary.io_slots_active) + '/' + ioSummaryNumber(summary.io_slots_total),
+          tr('io.cards.ioslots.summary', 'slots logiques actifs'),
+          ioSummaryNumber(summary.io_slots_error) ? 'error' : 'active'
+        );
+        appendIoSummaryCard(
+          tr('io.cards.domainSlots', 'DomainSlots'),
+          ioSummaryNumber(summary.domain_slots_active) + '/' + ioSummaryNumber(summary.domain_slots_total),
+          tr('io.cards.domainSlots.summary', 'slots domaine actifs'),
+          ioSummaryNumber(summary.domain_slots_error) ? 'error' : 'active'
+        );
+        appendIoSummaryCard(
+          tr('io.cards.manuallyDisabled', 'Désactivés manuellement'),
+          ioSummaryNumber(summary.io_slots_manually_disabled),
+          tr('io.cards.manuallyDisabled.summary', 'slots désactivés par configuration'),
+          ioSummaryNumber(summary.io_slots_manually_disabled) ? 'manually_disabled' : 'active'
+        );
+        appendIoSummaryCard(
+          tr('io.cards.errors', 'Slots en erreur'),
+          ioSummaryNumber(summary.error_slots),
+          errors.length ? errors.map((slot) => ioSummaryText(slot.label, slot.io_slot)).slice(0, 3).join(', ') : tr('io.cards.errors.none', 'aucune erreur active'),
+          errors.length ? 'error' : 'active'
+        );
+      }
+
+      if (ioSummaryTables) {
+        ioSummaryTables.innerHTML = '';
+        ioSummaryTables.appendChild(createIoCompactTable(
+          tr('io.table.drivers', 'Affectations par driver'),
+          [
+            { key: 'driver', label: tr('io.col.driver', 'Driver') },
+            { key: 'active_slots', label: tr('io.col.active', 'Actifs') },
+            { key: 'manually_disabled_slots', label: tr('io.col.manuallyDisabled', 'Désactivés') },
+            { key: 'error_slots', label: tr('io.col.errors', 'Erreurs') }
+          ],
+          drivers
+        ));
+        ioSummaryTables.appendChild(createIoCompactTable(
+          tr('io.table.bindingPorts', 'BindingPorts'),
+          [
+            { key: 'port_id', label: tr('io.col.port', 'Port') },
+            { key: 'board_port', label: tr('io.col.boardPort', 'Port carte'), render: (row) => ioSummaryText(row.board_port, '-') },
+            { key: 'direction', label: tr('io.col.direction', 'Sens'), render: (row) => createIoDirectionBadge(row.direction) },
+            { key: 'driver', label: tr('io.col.driver', 'Driver') },
+            { key: 'channel', label: tr('io.col.channel', 'Canal interne') },
+            { key: 'state', label: tr('io.col.state', 'Etat'), render: (row) => createIoStateBadge(row.state) },
+            { key: 'last_value', label: tr('io.col.lastValue', 'Dernière valeur') },
+            { key: 'io_id', label: tr('io.col.ioId', 'IoId'), render: (row) => ioSummaryIoIdLabel(row) }
+          ],
+          bindingPorts
+        ));
+        ioSummaryTables.appendChild(createIoCompactTable(
+          tr('io.table.ioSlots', 'IOSlots'),
+          [
+            { key: 'io_slot', label: tr('io.col.slot', 'Slot'), render: (row) => ioSummarySlotLabel(row) },
+            { key: 'config_name', label: tr('io.col.configName', 'Nom config'), render: (row) => ioSummaryText(row.config_name, '-') },
+            { key: 'kind', label: tr('io.col.kind', 'Type') },
+            { key: 'driver', label: tr('io.col.driver', 'Driver'), render: (row) => createIoOptionalCell(row.driver) },
+            { key: 'channel', label: tr('io.col.channel', 'Canal interne'), render: (row) => createIoOptionalCell(row.channel) },
+            { key: 'state', label: tr('io.col.state', 'Etat'), render: (row) => createIoStateBadge(row.state) },
+            { key: 'last_value', label: tr('io.col.lastValue', 'Dernière valeur') },
+            { key: 'error', label: tr('io.col.error', 'Erreur') }
+          ],
+          ioSlots
+        ));
+        ioSummaryTables.appendChild(createIoCompactTable(
+          tr('io.table.domainSlots', 'DomainSlots'),
+          [
+            { key: 'display_name', label: tr('io.col.domainSlot', 'Domaine') },
+            { key: 'io_name', label: tr('io.col.ioName', 'IONAME'), render: (row) => ioSummaryText(row.io_name, '-') },
+            { key: 'io_slot', label: tr('io.col.ioSlot', 'IOSlot'), render: (row) => ioSummarySlotLabel(row) },
+            { key: 'state', label: tr('io.col.state', 'Etat'), render: (row) => createIoStateBadge(row.state) },
+            { key: 'last_value', label: tr('io.col.lastValue', 'Dernière valeur') }
+          ],
+          domainSlots
+        ));
+      }
+    }
+
+    function mergeIoTopologyAndRuntime(topology, runtime) {
+      const bindingRuntime = new Map(
+        (Array.isArray(runtime && runtime.binding_ports) ? runtime.binding_ports : [])
+          .map((row) => [Number(row && row.port_id), row])
+      );
+      const ioRuntime = new Map(
+        (Array.isArray(runtime && runtime.io_slots) ? runtime.io_slots : [])
+          .map((row) => [Number(row && row.domain_slot_id), row])
+      );
+      const domainRuntime = new Map(
+        (Array.isArray(runtime && runtime.domain_slots) ? runtime.domain_slots : [])
+          .map((row) => [Number(row && row.domain_slot_id), row])
+      );
+
+      return {
+        ok: true,
+        summary: runtime && runtime.summary,
+        drivers: Array.isArray(runtime && runtime.drivers) ? runtime.drivers : [],
+        binding_ports: (Array.isArray(topology && topology.binding_ports) ? topology.binding_ports : [])
+          .map((row) => Object.assign({}, row, bindingRuntime.get(Number(row && row.port_id)) || {})),
+        io_slots: (Array.isArray(topology && topology.io_slots) ? topology.io_slots : [])
+          .map((row) => Object.assign({}, row, ioRuntime.get(Number(row && row.domain_slot_id)) || {})),
+        domain_slots: (Array.isArray(topology && topology.domain_slots) ? topology.domain_slots : [])
+          .map((row) => Object.assign({}, row, domainRuntime.get(Number(row && row.domain_slot_id)) || {})),
+        error_slots: Array.isArray(runtime && runtime.error_slots) ? runtime.error_slots : []
+      };
+    }
+
+    async function fetchIoTopology(forceRefresh) {
+      if (!forceRefresh && ioTopologyCache) return ioTopologyCache;
+      const data = await fetchOkJson(
+        '/api/io/topology',
+        { cache: 'no-store' },
+        'topologie entrées/sorties indisponible'
+      );
+      ioTopologyCache = data;
+      return data;
+    }
+
+    async function fetchIoRuntime() {
+      return fetchOkJson(
+        '/api/io/runtime',
+        { cache: 'no-store' },
+        'état entrées/sorties indisponible'
+      );
+    }
+
+    async function fetchIoSummary(forceTopologyRefresh) {
+      let results = await Promise.all([
+        fetchIoTopology(!!forceTopologyRefresh),
+        fetchIoRuntime()
+      ]);
+      let topology = results[0];
+      let runtime = results[1];
+      const topologyRevision = Number(topology && topology.revision);
+      const runtimeRevision = Number(runtime && runtime.topology_revision);
+      if (Number.isFinite(runtimeRevision) && runtimeRevision !== topologyRevision) {
+        results = await Promise.all([fetchIoTopology(true), fetchIoRuntime()]);
+        topology = results[0];
+        runtime = results[1];
+      }
+      return mergeIoTopologyAndRuntime(topology, runtime);
+    }
+
+    async function refreshIoSummary(forceRefresh) {
+      const reqSeq = ++ioSummaryReqSeq;
+      if (forceRefresh || !ioSummaryLoadedOnce) renderIoSummarySkeleton();
+      try {
+        const data = await fetchIoSummary(forceRefresh || !ioTopologyCache);
+        if (reqSeq !== ioSummaryReqSeq) return;
+        ioSummaryLoadedOnce = true;
+        renderIoSummary(data);
+      } catch (err) {
+        if (reqSeq !== ioSummaryReqSeq) return;
+        if (ioSummaryTables) ioSummaryTables.innerHTML = '';
+      }
+    }
+
+    async function onIoSummaryPageShown() {
+      startIoSummaryTimer();
+      await refreshIoSummary(!ioSummaryLoadedOnce);
+    }
+
     function stopPoolMeasuresTimer() {
       poolMeasuresPoller.stop();
     }
@@ -4439,10 +5661,11 @@
     function formatRuntimeDomainLabel(domain) {
       const key = String(domain || '').trim().toLowerCase();
       if (key === 'mode') return 'Mode';
+      if (key === 'equipements') return tr('dashboard.domain.equipements', 'Equipements');
       if (key === 'sondes') return 'Sondes';
       if (key === 'micronova') return 'Micronova';
       if (key === 'mqtt') return 'MQTT';
-      if (key === 'wifi') return 'WiFi';
+      if (key === 'wifi') return tr('header.wifi', 'Réseau');
       if (key === 'i2c') return 'I2C';
       if (key === 'system') return 'Système';
       if (key === 'alarm') return 'Alarmes';
@@ -4454,7 +5677,14 @@
       const domainLabel = formatRuntimeDomainLabel(domain);
       const groupLabel = String(group || '').trim();
       if (!groupLabel) return domainLabel;
-      if (groupLabel.localeCompare(domainLabel, 'fr', { sensitivity: 'base' }) === 0) return domainLabel;
+      const comparableTitle = (value) => {
+        const normalized = String(value || '').trim().toLowerCase();
+        const ascii = typeof normalized.normalize === 'function'
+          ? normalized.normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+          : normalized;
+        return ascii.replace(/[^a-z0-9]+/g, '').replace(/s$/, '');
+      };
+      if (comparableTitle(groupLabel) === comparableTitle(domainLabel)) return domainLabel;
       return domainLabel + ' · ' + groupLabel;
     }
 
@@ -5524,15 +6754,616 @@
       }
     }
 
+    function poolConfigDisinfectionLabel(value) {
+      const n = Number(value);
+      if (n === 0) return tr('pool.disinfection.chlorine.title', 'Chlore / Brome');
+      if (n === 1) return tr('pool.disinfection.swg.title', 'Électrolyse');
+      if (n === 2) return tr('pool.disinfection.o2.title', 'Oxygène actif');
+      if (n === 3) return tr('pool.disinfection.disabled', 'Désactivé');
+      return tr('pool.state.unknown', 'Inconnu');
+    }
+
+    function poolConfigBoolLabel(value, activeText, inactiveText) {
+      return toBool(value) ? (activeText || tr('pool.state.active', 'Actif')) : (inactiveText || tr('pool.state.stopped', 'Arrêt'));
+    }
+
+    function poolConfigFormatHour(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return String(value ?? '-');
+      return String(Math.max(0, Math.min(23, Math.trunc(n)))).padStart(2, '0') + ':00';
+    }
+
+    function poolConfigHourToMinutes(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return null;
+      return Math.max(0, Math.min(23, Math.trunc(n))) * 60;
+    }
+
+    function poolConfigDayProgress(startValue, stopValue) {
+      const start = poolConfigHourToMinutes(startValue);
+      const stopRaw = poolConfigHourToMinutes(stopValue);
+      if (start === null || stopRaw === null) return 0;
+      let stop = stopRaw;
+      const now = new Date();
+      let current = now.getHours() * 60 + now.getMinutes();
+      if (stop <= start) {
+        stop += 24 * 60;
+        if (current < start) current += 24 * 60;
+      }
+      if (current <= start) return 0;
+      if (current >= stop) return 100;
+      return Math.max(0, Math.min(100, ((current - start) / (stop - start)) * 100));
+    }
+
+    function poolConfigFormatDurationMs(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return String(value ?? '-');
+      if (Math.abs(n) >= 3600000 && n % 3600000 === 0) return String(Math.round(n / 3600000)) + ' h';
+      if (Math.abs(n) >= 60000 && n % 60000 === 0) return String(Math.round(n / 60000)) + ' min';
+      if (Math.abs(n) >= 1000 && n % 1000 === 0) return String(Math.round(n / 1000)) + ' s';
+      return String(Math.round(n)) + ' ms';
+    }
+
+    function poolConfigFormatNumber(value) {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return String(value ?? '-');
+      const rounded = Math.round(n * 1000) / 1000;
+      const normalized = rounded.toFixed(3).replace(/(?:\.0+|(\.\d*?)0+)$/, '$1');
+      return webUiLocale === 'en' ? normalized : normalized.replace('.', ',');
+    }
+
+    function poolConfigDoc(moduleName, key) {
+      try {
+        return configDocFor(moduleName, key, []);
+      } catch (err) {
+        return null;
+      }
+    }
+
+    function poolConfigFieldLabel(moduleName, key) {
+      const doc = poolConfigDoc(moduleName, key);
+      return doc && typeof doc.label === 'string' && doc.label.trim()
+        ? doc.label.trim()
+        : String(key || '');
+    }
+
+    function poolConfigEnumLabel(doc, value) {
+      const options = doc && Array.isArray(doc._enumOptions) ? doc._enumOptions : [];
+      const current = String(value ?? '');
+      for (const opt of options) {
+        if (!opt || typeof opt !== 'object') continue;
+        if (String(opt.value) === current) {
+          return typeof opt.label === 'string' && opt.label.trim() ? opt.label.trim() : current;
+        }
+      }
+      return '';
+    }
+
+    function poolConfigFormatValue(moduleName, key, value) {
+      if (value === null || typeof value === 'undefined' || value === '') return '-';
+      const doc = poolConfigDoc(moduleName, key);
+      const enumLabel = poolConfigEnumLabel(doc, value);
+      if (enumLabel) return enumLabel;
+      if (typeof value === 'boolean') return poolConfigBoolLabel(value);
+      const cleanKey = String(key || '').toLowerCase();
+      const unit = String(doc && doc.unit ? doc.unit : '').trim();
+      if (cleanKey.endsWith('_ms') || unit === 'ms') return poolConfigFormatDurationMs(value);
+      if (cleanKey.includes('hour') || /^filtr_(?:start|stop)_/.test(cleanKey)) return poolConfigFormatHour(value);
+      if (Number.isFinite(Number(value))) {
+        const base = poolConfigFormatNumber(value);
+        if (unit === 'C') return base + ' °C';
+        if (unit === 'm3') return base + ' m³';
+        return unit ? (base + ' ' + unit) : base;
+      }
+      return String(value);
+    }
+
+    function poolConfigAppendMetric(parent, label, value, options) {
+      if (!parent) return;
+      const opts = options || {};
+      const item = document.createElement('div');
+      item.className = 'pool-metric' + (opts.featured ? ' is-featured' : '');
+      const labelEl = document.createElement('span');
+      labelEl.className = 'pool-metric-label';
+      labelEl.textContent = String(label || '');
+      const valueEl = document.createElement('b');
+      valueEl.className = 'pool-metric-value';
+      valueEl.textContent = String(value ?? '-');
+      item.appendChild(labelEl);
+      item.appendChild(valueEl);
+      parent.appendChild(item);
+    }
+
+    function poolConfigFields(moduleName, data, options) {
+      const opts = options || {};
+      const keys = Object.keys((data && typeof data === 'object') ? data : {})
+        .filter((key) => !opts.exclude || opts.exclude.indexOf(key) < 0)
+        .sort();
+      const picked = Number.isFinite(Number(opts.limit)) ? keys.slice(0, Number(opts.limit)) : keys;
+      return picked.map((key) => ({
+        key,
+        label: poolConfigFieldLabel(moduleName, key),
+        value: poolConfigFormatValue(moduleName, key, data[key])
+      }));
+    }
+
+    function poolConfigBuildFieldList(moduleName, data, options) {
+      const list = document.createElement('div');
+      list.className = 'pool-field-list';
+      poolConfigFields(moduleName, data, options).forEach((field) => {
+        const row = document.createElement('div');
+        row.className = 'pool-field-row';
+        const label = document.createElement('span');
+        label.className = 'pool-field-label';
+        label.textContent = field.label;
+        const value = document.createElement('b');
+        const activeText = tr('pool.state.active', 'Actif').trim().toLowerCase();
+        const cleanValue = String(field.value || '').trim().toLowerCase();
+        const isActiveValue = cleanValue === activeText || cleanValue === 'active' || cleanValue === 'actif';
+        value.className = 'pool-field-value' + (isActiveValue ? ' has-active-dot' : '');
+        const valueText = document.createElement('span');
+        valueText.textContent = field.value;
+        value.appendChild(valueText);
+        if (isActiveValue) {
+          const dot = document.createElement('span');
+          dot.className = 'pool-field-active-dot';
+          dot.setAttribute('aria-hidden', 'true');
+          value.appendChild(dot);
+        }
+        row.appendChild(label);
+        row.appendChild(value);
+        list.appendChild(row);
+      });
+      if (!list.childNodes.length) {
+        const empty = document.createElement('div');
+        empty.className = 'pool-field-empty';
+        empty.textContent = tr('pool.empty.settings', 'Aucun réglage disponible.');
+        list.appendChild(empty);
+      }
+      return list;
+    }
+
+    async function poolConfigFetchModule(moduleName) {
+      const cleanModule = nettoyerNomFlowCfg(moduleName);
+      const data = await fetchOkJson(
+        '/api/flowcfg/module?name=' + encodeURIComponent(cleanModule),
+        { cache: 'no-store' },
+        tr('pool.error.moduleRead', 'lecture {module} impossible').replace('{module}', cleanModule),
+        fetchFlowRemoteQueued
+      );
+      return {
+        module: cleanModule,
+        data: (data && data.data && typeof data.data === 'object') ? data.data : {},
+        truncated: !!(data && data.truncated)
+      };
+    }
+
+    async function poolConfigEnsureDocs() {
+      const modules = poolConfigModuleDefs.map((def) => def.module)
+        .concat(poolDisinfectionModeDefs.map((def) => def.module));
+      await ensureCfgDocsForModule('');
+      for (const moduleName of modules) {
+        await ensureCfgDocsForModule(moduleName).catch(() => {});
+      }
+    }
+
+    function poolConfigRenderModeBadges(modules) {
+      if (!poolModeBadges) return;
+      poolModeBadges.innerHTML = '';
+      const modes = modules['poollogic/modes'] || {};
+      const items = [
+        [tr('pool.badge.poollogic', 'PoolLogic'), poolConfigBoolLabel(modes.enabled, tr('pool.state.active', 'Actif'), tr('pool.state.disabled', 'Désactivé')), toBool(modes.enabled), 'bolt'],
+        [tr('pool.badge.auto', 'Auto'), poolConfigBoolLabel(modes.auto_mode, tr('pool.state.automatic', 'Automatique'), tr('pool.state.manual', 'Manuel')), toBool(modes.auto_mode), 'settings'],
+        [tr('pool.badge.winter', 'Hiver'), poolConfigBoolLabel(modes.winter_mode, tr('pool.state.forced', 'Forcé'), tr('pool.state.normal', 'Normal')), toBool(modes.winter_mode), 'ac_unit']
+      ];
+      items.forEach((item) => {
+        const badge = document.createElement('span');
+        badge.className = 'pool-mode-badge' + (item[2] ? ' is-on' : ' is-off');
+        const icon = document.createElement('span');
+        icon.className = 'ui-msr pool-mode-badge-icon';
+        icon.setAttribute('aria-hidden', 'true');
+        icon.textContent = item[3];
+        const label = document.createElement('span');
+        label.textContent = item[0] + ' · ' + item[1];
+        badge.appendChild(icon);
+        badge.appendChild(label);
+        poolModeBadges.appendChild(badge);
+      });
+    }
+
+    function poolConfigHeroSummary(modules, start, stop) {
+      const source = modules && typeof modules === 'object' ? modules : {};
+      const modes = source['poollogic/modes'] || {};
+      const heater = source['poollogic/heater'] || {};
+      const poolLogicEnabled = toBool(modes.enabled);
+      const autoMode = toBool(modes.auto_mode);
+      const winterMode = toBool(modes.winter_mode);
+      const treatment = poolConfigDisinfectionLabel(modes.disinfection_type);
+      const heaterState = poolConfigBoolLabel(heater.heater_auto_mode, tr('pool.state.autoShort', 'auto'), tr('pool.state.off', 'arrêt'));
+
+      if (!poolLogicEnabled) {
+        return tr('pool.summary.poollogicOff', 'PoolLogic désactivé : le système reste en manuel et ne pilote pas la piscine.');
+      }
+      if (!autoMode) {
+        return tr('pool.summary.manual', 'Mode manuel : PoolLogic est actif, mais les automatismes sont suspendus. Traitement configuré : {treatment}.')
+          .replace('{treatment}', treatment);
+      }
+      if (winterMode) {
+        return tr('pool.summary.autoWinter', 'Mode automatique hiver : filtration {start}-{stop}, traitement {treatment}, chauffage {heater}.')
+          .replace('{start}', start)
+          .replace('{stop}', stop)
+          .replace('{treatment}', treatment)
+          .replace('{heater}', heaterState);
+      }
+      return tr('pool.summary.auto', 'Mode automatique : filtration {start}-{stop}, traitement {treatment}, chauffage {heater}.')
+        .replace('{start}', start)
+        .replace('{stop}', stop)
+        .replace('{treatment}', treatment)
+        .replace('{heater}', heaterState);
+    }
+
+    function poolConfigRenderHero(modules, alarmSlots) {
+      const modes = modules['poollogic/modes'] || {};
+      const filtration = modules['poollogic/filtration'] || {};
+      const alarms = poolConfigActiveAlarms(alarmSlots);
+      const startValue = filtration.filtr_start_clc ?? filtration.filtr_start_min;
+      const stopValue = filtration.filtr_stop_clc ?? filtration.filtr_stop_max;
+      const start = poolConfigFormatHour(startValue);
+      const stop = poolConfigFormatHour(stopValue);
+      if (poolConfigTitle) {
+        poolConfigTitle.textContent = tr('pool.overview.title', 'État Général');
+      }
+      if (poolHeroState) {
+        poolHeroState.className = 'pool-hero-state ' + (alarms.length ? 'is-alert' : 'is-ok');
+        poolHeroState.innerHTML = '';
+        const icon = document.createElement('span');
+        icon.className = 'ui-msr pool-hero-state-icon';
+        icon.setAttribute('aria-hidden', 'true');
+        icon.textContent = alarms.length ? 'warning' : 'check_circle';
+        const label = document.createElement('span');
+        label.textContent = alarms.length
+          ? tr('pool.state.alarmNamed', 'Alarme - {alarm}').replace('{alarm}', alarms[0].label)
+          : tr('pool.state.normalStatus', 'État normal');
+        poolHeroState.appendChild(icon);
+        poolHeroState.appendChild(label);
+      }
+      if (poolConfigSummary) {
+        poolConfigSummary.textContent = poolConfigHeroSummary(modules, start, stop);
+      }
+      if (poolFiltrationStart) poolFiltrationStart.textContent = start;
+      if (poolFiltrationStop) poolFiltrationStop.textContent = stop;
+      if (poolFiltrationFill) {
+        poolFiltrationFill.style.width = poolConfigDayProgress(startValue, stopValue).toFixed(1) + '%';
+      }
+      poolConfigRenderModeBadges(modules);
+    }
+
+    function poolConfigRenderDisinfection(modules) {
+      if (!poolDisinfectionModes) return;
+      poolDisinfectionModes.innerHTML = '';
+      const modes = modules['poollogic/modes'] || {};
+      const selectedType = Number(modes.disinfection_type);
+      const selectedDef = poolDisinfectionModeDefs.find((def) => selectedType === def.typeValue) || poolDisinfectionModeDefs[0];
+      const selected = selectedType === selectedDef.typeValue;
+      const data = selected ? (modules[selectedDef.module] || {}) : {};
+
+      const selector = document.createElement('div');
+      selector.className = 'pool-treatment-selector';
+      const selectorHead = document.createElement('div');
+      selectorHead.className = 'pool-treatment-title';
+      const selectorIcon = document.createElement('span');
+      selectorIcon.className = 'ui-msr pool-treatment-title-icon';
+      selectorIcon.setAttribute('aria-hidden', 'true');
+      selectorIcon.textContent = 'water_drop';
+      const selectorTitle = document.createElement('h3');
+      selectorTitle.textContent = tr('pool.treatment.title', 'Traitement de l’eau');
+      selectorHead.appendChild(selectorIcon);
+      selectorHead.appendChild(selectorTitle);
+      selector.appendChild(selectorHead);
+
+      const choiceGroup = document.createElement('div');
+      choiceGroup.className = 'pool-treatment-choice-group';
+      poolDisinfectionModeDefs.forEach((def) => {
+        const choice = document.createElement('button');
+        choice.type = 'button';
+        choice.disabled = true;
+        choice.className = 'pool-treatment-choice' + (selectedType === def.typeValue ? ' is-selected' : '');
+        const choiceIcon = document.createElement('span');
+        choiceIcon.className = 'ui-msr pool-treatment-choice-icon';
+        choiceIcon.setAttribute('aria-hidden', 'true');
+        choiceIcon.textContent = def.icon;
+        const choiceLabel = document.createElement('span');
+        choiceLabel.textContent = tr(def.titleKey, def.title);
+        choice.appendChild(choiceIcon);
+        choice.appendChild(choiceLabel);
+        choiceGroup.appendChild(choice);
+      });
+      selector.appendChild(choiceGroup);
+
+      const detail = document.createElement('article');
+      detail.className = 'pool-treatment-detail is-' + selectedDef.accent;
+      const head = document.createElement('div');
+      head.className = 'pool-card-head';
+      const icon = document.createElement('span');
+      icon.className = 'ui-msr pool-card-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = selectedDef.icon;
+      const copy = document.createElement('div');
+      copy.className = 'pool-card-title-wrap';
+      const title = document.createElement('h3');
+      title.textContent = selected ? tr(selectedDef.titleKey, selectedDef.title) : poolConfigDisinfectionLabel(selectedType);
+      const note = document.createElement('p');
+      note.textContent = selected
+        ? tr(selectedDef.noteKey, selectedDef.note)
+        : tr('pool.disinfection.disabled.note', 'Aucun traitement de désinfection n’est sélectionné.');
+      copy.appendChild(title);
+      copy.appendChild(note);
+      head.appendChild(icon);
+      head.appendChild(copy);
+      detail.appendChild(head);
+
+      const metrics = document.createElement('div');
+      metrics.className = 'pool-metric-grid';
+      if (selected) {
+        if (selectedDef.key === 'chlorine') {
+          poolConfigAppendMetric(metrics, tr('pool.metric.autoOrp', 'Auto ORP'), poolConfigBoolLabel(data.dis_auto_mode));
+          poolConfigAppendMetric(metrics, tr('pool.metric.setpoint', 'Consigne'), poolConfigFormatValue(selectedDef.module, 'dis_setpoint', data.dis_setpoint), { featured: true });
+          poolConfigAppendMetric(metrics, tr('pool.metric.window', 'Fenêtre'), poolConfigFormatValue(selectedDef.module, 'dis_window_ms', data.dis_window_ms));
+        } else if (selectedDef.key === 'swg') {
+          poolConfigAppendMetric(metrics, tr('pool.metric.control', 'Contrôle'), poolConfigFormatValue(selectedDef.module, 'swg_control_mode', data.swg_control_mode), { featured: true });
+          poolConfigAppendMetric(metrics, tr('pool.metric.delay', 'Délai'), poolConfigFormatValue(selectedDef.module, 'dly_electro_min', data.dly_electro_min));
+          poolConfigAppendMetric(metrics, tr('pool.metric.waterSafety', 'Sécurité eau'), poolConfigFormatValue(selectedDef.module, 'secure_elec_t', data.secure_elec_t));
+        } else if (selectedDef.key === 'o2') {
+          poolConfigAppendMetric(metrics, tr('pool.metric.poolVolume', 'Volume bassin'), poolConfigFormatValue(selectedDef.module, 'pool_volume_m3', data.pool_volume_m3), { featured: true });
+          poolConfigAppendMetric(metrics, tr('pool.metric.weeklyDose', 'Dose hebdo'), poolConfigFormatValue(selectedDef.module, 'dose_ml_10m3_week', data.dose_ml_10m3_week));
+          poolConfigAppendMetric(metrics, tr('pool.metric.injections', 'Injections'), poolConfigFormatValue(selectedDef.module, 'split_count', data.split_count));
+          poolConfigAppendMetric(metrics, tr('pool.metric.pending', 'En attente'), poolConfigFormatValue(selectedDef.module, 'pending_ml', data.pending_ml));
+        }
+      }
+      detail.appendChild(metrics);
+
+      poolDisinfectionModes.appendChild(selector);
+      poolDisinfectionModes.appendChild(detail);
+    }
+
+    function poolConfigActiveAlarms(alarmSlots) {
+      return (Array.isArray(alarmSlots) ? alarmSlots : [])
+        .filter((slot) => {
+          if (!slot || slot.enabled === false) return false;
+          return slot.conditionTrue === true || slot.latched === true;
+        })
+        .map((slot) => {
+          const label = String(slot.label || '').trim() || tr('pool.alarm.defaultLabel', 'Alarme piscine');
+          const state = slot.conditionTrue === true
+            ? tr('pool.alarm.state.activeCondition', 'condition active')
+            : tr('pool.alarm.state.latched', 'alarme mémorisée');
+          return { label, state };
+        });
+    }
+
+    function poolConfigRenderAlarms(alarmSlots) {
+      if (!poolAlarmCard) return;
+      const alarms = poolConfigActiveAlarms(alarmSlots);
+      poolAlarmCard.innerHTML = '';
+      poolAlarmCard.hidden = alarms.length === 0;
+      if (alarms.length === 0) return;
+
+      const head = document.createElement('div');
+      head.className = 'pool-alarm-head';
+      const icon = document.createElement('span');
+      icon.className = 'ui-msr pool-alarm-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = 'warning';
+      const titleWrap = document.createElement('div');
+      titleWrap.className = 'pool-alarm-title-wrap';
+      const title = document.createElement('h3');
+      title.textContent = alarms.length > 1 ? tr('pool.alarm.title.plural', 'Alarmes piscine en cours') : tr('pool.alarm.title.singular', 'Alarme piscine en cours');
+      const intro = document.createElement('p');
+      intro.textContent = tr('pool.alarm.intro', 'PoolLogic signale une attention requise avant de laisser les automatismes fonctionner sans surveillance.');
+      titleWrap.appendChild(title);
+      titleWrap.appendChild(intro);
+      head.appendChild(icon);
+      head.appendChild(titleWrap);
+      poolAlarmCard.appendChild(head);
+
+      const list = document.createElement('div');
+      list.className = 'pool-alarm-list';
+      alarms.forEach((alarm) => {
+        const row = document.createElement('div');
+        row.className = 'pool-alarm-row';
+        const label = document.createElement('b');
+        label.textContent = alarm.label;
+        const state = document.createElement('span');
+        state.textContent = alarm.state;
+        row.appendChild(label);
+        row.appendChild(state);
+        list.appendChild(row);
+      });
+      poolAlarmCard.appendChild(list);
+    }
+
+    function poolConfigRenderFiltrationCard(def, data) {
+      const card = document.createElement('article');
+      card.className = 'pool-config-card pool-filtration-card';
+
+      const head = document.createElement('div');
+      head.className = 'pool-card-head';
+      const icon = document.createElement('span');
+      icon.className = 'ui-msr pool-card-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = def.icon;
+      const copy = document.createElement('div');
+      copy.className = 'pool-card-title-wrap';
+      const title = document.createElement('h3');
+      title.textContent = tr(def.titleKey, def.title);
+      copy.appendChild(title);
+      head.appendChild(icon);
+      head.appendChild(copy);
+      card.appendChild(head);
+
+      const start = poolConfigFormatHour(data.filtr_start_clc ?? data.filtr_start_min);
+      const stop = poolConfigFormatHour(data.filtr_stop_clc ?? data.filtr_stop_max);
+      const times = document.createElement('div');
+      times.className = 'pool-filtration-times';
+      const startEl = document.createElement('b');
+      startEl.textContent = start;
+      const arrow = document.createElement('span');
+      arrow.className = 'ui-msr pool-filtration-arrow';
+      arrow.setAttribute('aria-hidden', 'true');
+      arrow.textContent = 'arrow_forward';
+      const stopEl = document.createElement('b');
+      stopEl.textContent = stop;
+      times.appendChild(startEl);
+      times.appendChild(arrow);
+      times.appendChild(stopEl);
+      card.appendChild(times);
+      return card;
+    }
+
+    function poolConfigRenderGeneralCards(modules) {
+      if (!poolConfigGrid) return;
+      poolConfigGrid.innerHTML = '';
+      const order = ['poollogic/heater', 'poollogic/safety', 'poollogic/regulation', 'poollogic/robot'];
+      const orderedDefs = poolConfigModuleDefs.slice().sort((a, b) => {
+        const ai = order.indexOf(a.module);
+        const bi = order.indexOf(b.module);
+        return (ai < 0 ? 999 : ai) - (bi < 0 ? 999 : bi);
+      });
+      orderedDefs.forEach((def) => {
+        if (def.module === 'poollogic/modes' || def.module === 'poollogic/filtration' || def.module === 'poollogic/refill') return;
+        const data = modules[def.module] || {};
+        if (def.module === 'poollogic/filtration') {
+          poolConfigGrid.appendChild(poolConfigRenderFiltrationCard(def, data));
+          return;
+        }
+        const card = document.createElement('article');
+        card.className = 'pool-config-card pool-config-card-' + runtimeMeasureCssSlug(def.module);
+
+        const head = document.createElement('div');
+        head.className = 'pool-card-head';
+        const icon = document.createElement('span');
+        icon.className = 'ui-msr pool-card-icon';
+        icon.setAttribute('aria-hidden', 'true');
+        icon.textContent = def.icon;
+        const copy = document.createElement('div');
+        copy.className = 'pool-card-title-wrap';
+        const title = document.createElement('h3');
+        title.textContent = tr(def.titleKey, def.title);
+        const note = document.createElement('p');
+        note.textContent = tr(def.noteKey, def.note);
+        copy.appendChild(title);
+        copy.appendChild(note);
+        head.appendChild(icon);
+        head.appendChild(copy);
+        card.appendChild(head);
+        card.appendChild(poolConfigBuildFieldList(def.module, data));
+        poolConfigGrid.appendChild(card);
+      });
+    }
+
+    function poolConfigRender(modules, alarmSlots) {
+      const source = modules && typeof modules === 'object' ? modules : {};
+      poolConfigRenderHero(source, alarmSlots);
+      poolConfigRenderDisinfection(source);
+      poolConfigRenderAlarms([]);
+      poolConfigRenderGeneralCards(source);
+    }
+
+    function poolConfigRenderSkeleton() {
+      if (poolDisinfectionModes) {
+        poolDisinfectionModes.innerHTML = '';
+        for (let i = 0; i < 2; i += 1) {
+          const card = document.createElement('article');
+          card.className = (i === 0 ? 'pool-treatment-selector' : 'pool-treatment-detail') + ' pool-config-skeleton';
+          card.appendChild(createSkeletonLine('', 58));
+          card.appendChild(createSkeletonLine('', 86));
+          card.appendChild(createSkeletonLine('', 42));
+          poolDisinfectionModes.appendChild(card);
+        }
+      }
+      if (poolConfigGrid) {
+        poolConfigGrid.innerHTML = '';
+        for (let i = 0; i < 4; i += 1) {
+          const card = document.createElement('article');
+          card.className = 'pool-config-card pool-config-skeleton';
+          card.appendChild(createSkeletonLine('', i % 2 === 0 ? 52 : 66));
+          card.appendChild(createSkeletonLine('', 88));
+          card.appendChild(createSkeletonLine('', 74));
+          poolConfigGrid.appendChild(card);
+        }
+      }
+      if (poolAlarmCard) {
+        poolAlarmCard.hidden = true;
+        poolAlarmCard.innerHTML = '';
+      }
+    }
+
+    function poolConfigRenderError(err) {
+      if (poolDisinfectionModes) poolDisinfectionModes.innerHTML = '';
+      if (poolAlarmCard) {
+        poolAlarmCard.hidden = true;
+        poolAlarmCard.innerHTML = '';
+      }
+      if (!poolConfigGrid) return;
+      poolConfigGrid.innerHTML = '';
+      const card = document.createElement('article');
+      card.className = 'pool-config-card pool-config-error-card';
+      const head = document.createElement('div');
+      head.className = 'pool-card-head';
+      const icon = document.createElement('span');
+      icon.className = 'ui-msr pool-card-icon';
+      icon.setAttribute('aria-hidden', 'true');
+      icon.textContent = 'error';
+      const copy = document.createElement('div');
+      copy.className = 'pool-card-title-wrap';
+      const title = document.createElement('h3');
+      title.textContent = tr('pool.error.title', 'Configuration piscine indisponible');
+      const detail = document.createElement('p');
+      detail.textContent = String(err || tr('pool.error.readFailed', 'Lecture de la configuration impossible.'));
+      copy.appendChild(title);
+      copy.appendChild(detail);
+      head.appendChild(icon);
+      head.appendChild(copy);
+      card.appendChild(head);
+      poolConfigGrid.appendChild(card);
+    }
+
+    async function loadPoolConfig(forceRefresh) {
+      const reqSeq = ++poolConfigReqSeq;
+      if (!poolConfigLoadedOnce || forceRefresh) poolConfigRenderSkeleton();
+      if (poolConfigRefreshBtn) poolConfigRefreshBtn.disabled = true;
+      try {
+        await poolConfigEnsureDocs().catch(() => {});
+        const modules = {};
+        const allDefs = poolConfigModuleDefs.concat(poolDisinfectionModeDefs);
+        for (const def of allDefs) {
+          const payload = await poolConfigFetchModule(def.module);
+          if (reqSeq !== poolConfigReqSeq) return;
+          modules[payload.module] = payload.data;
+        }
+        const alarmSlots = await fetchPoolAlarmSlots().catch(() => []);
+        if (reqSeq !== poolConfigReqSeq) return;
+        poolConfigRender(modules, alarmSlots);
+        poolConfigLoadedOnce = true;
+      } catch (err) {
+        if (reqSeq !== poolConfigReqSeq) return;
+        poolConfigRenderError(err);
+      } finally {
+        if (reqSeq === poolConfigReqSeq && poolConfigRefreshBtn) {
+          poolConfigRefreshBtn.disabled = false;
+        }
+      }
+    }
+
+    async function onPoolConfigPageShown(forceRefresh) {
+      await loadPoolConfig(!!forceRefresh || !poolConfigLoadedOnce);
+    }
+
     async function onUpgradePageShown() {
       renderUpgradeJourney(readUpgradeUiSession() || { phase: 'idle', target: '', detail: tr('updates.none', 'Aucune opération en cours.') });
       renderUpgradeCatalog();
       resumeUpgradeReconnectFlow();
       await loadWebMeta().catch(() => {});
-      if (!upgradeCfgLoadedOnce) {
-        upgradeCfgLoadedOnce = true;
-        await loadUpgradeConfig();
-      }
       await refreshUpgradeStatus();
       startUpgradeStatusPolling();
     }
@@ -5641,42 +7472,22 @@
       if (calibrationApplyBtn) calibrationApplyBtn.disabled = true;
     }
 
-    function calibrationModuleFromEnumLabel(label) {
-      const text = String(label || '').trim();
-      if (!text) return '';
-      const parts = text.split('|').map((part) => part.trim()).filter((part) => part.length > 0);
-      for (let i = parts.length - 1; i >= 0; --i) {
-        if (/^io\/input\/a\d{2}$/i.test(parts[i])) {
-          return parts[i].toLowerCase();
-        }
+    function calibrationIoModuleFromId(ioIdRaw) {
+      const ioId = Number(ioIdRaw);
+      if (!Number.isFinite(ioId)) return '';
+      const idx = Math.round(ioId) - 192;
+      if (idx >= 0 && idx <= 15) {
+        return 'io/input/a' + String(idx).padStart(2, '0');
       }
       return '';
     }
 
-    function calibrationIoModuleFromId(ioIdRaw) {
-      const ioId = Number(ioIdRaw);
-      if (!Number.isFinite(ioId)) return '';
-
-      for (const source of cfgDocSources) {
-        const normalized = normalizeDocSource(source);
-        if (!normalized || !normalized.meta || typeof normalized.meta !== 'object') continue;
-        const enumSets = normalized.meta.enum_sets;
-        if (!enumSets || typeof enumSets !== 'object') continue;
-        const entries = Array.isArray(enumSets.flowio_logical_input_analog)
-          ? enumSets.flowio_logical_input_analog
-          : [];
-        for (const entry of entries) {
-          if (Number(entry && entry.value) !== ioId) continue;
-          const moduleName = calibrationModuleFromEnumLabel(entry && entry.label);
-          if (moduleName) return moduleName;
-        }
-      }
-
-      const idx = Math.round(ioId) - 192;
-      if (idx >= 0 && idx <= 14) {
-        return 'io/input/a' + String(idx).padStart(2, '0');
-      }
-      return '';
+    function calibrationIoIdFromAnalogSlot(slotRaw) {
+      const slot = Number(slotRaw);
+      if (!Number.isFinite(slot)) return NaN;
+      const idx = Math.trunc(slot);
+      if (idx < 0 || idx > 15) return NaN;
+      return 192 + idx;
     }
 
     async function calibrationEnsureDocSourcesLoaded() {
@@ -5745,7 +7556,10 @@
       try {
         await calibrationEnsureDocSourcesLoaded();
         const poolSensorCfg = await calibrationFetchFlowModule('poollogic/sensors');
-        const ioId = Number(poolSensorCfg[def.poollogicKey]);
+        let ioId = Number(poolSensorCfg[def.poollogicKey]);
+        if (!Number.isFinite(ioId) || !calibrationIoModuleFromId(ioId)) {
+          ioId = calibrationIoIdFromAnalogSlot(def.ioSlot);
+        }
         if (!Number.isFinite(ioId) || ioId <= 0) {
           throw new Error(tr('calibration.err.ioNotConfigured', 'IO non configurée pour {sensor}').replace('{sensor}', def.label));
         }
@@ -6141,11 +7955,11 @@
 
     function updateWifiScanStatusText(data, reqError) {
       if (reqError) {
-        wifiConfigStatus.textContent = 'Scan WiFi indisponible: ' + reqError;
+        wifiConfigStatus.textContent = 'Scan réseau indisponible: ' + reqError;
         return;
       }
       if (!data || data.ok !== true) {
-        wifiConfigStatus.textContent = 'Scan WiFi : réponse invalide.';
+        wifiConfigStatus.textContent = 'Scan réseau : réponse invalide.';
         return;
       }
 
@@ -6154,11 +7968,11 @@
       const count = Number.isFinite(data.count) ? data.count : 0;
       const totalFound = Number.isFinite(data.total_found) ? data.total_found : count;
       if (running || requested) {
-        wifiConfigStatus.textContent = 'Scan WiFi en cours...';
+        wifiConfigStatus.textContent = 'Scan réseau en cours...';
         return;
       }
       if (count > 0) {
-        wifiConfigStatus.textContent = 'Scan WiFi terminé : ' + count + ' réseaux affichés (' + totalFound + ' détectés).';
+        wifiConfigStatus.textContent = 'Scan réseau terminé : ' + count + ' réseaux affichés (' + totalFound + ' détectés).';
         return;
       }
       wifiConfigStatus.textContent = 'Aucun réseau visible détecté.';
@@ -6203,13 +8017,13 @@
 
     async function loadWifiConfig() {
       try {
-        const data = await fetchOkJson('/api/wifi/config', { cache: 'no-store' }, 'chargement wifi indisponible');
+        const data = await fetchOkJson('/api/wifi/config', { cache: 'no-store' }, 'chargement réseau indisponible');
         wifiEnabled.checked = toBool(data.enabled);
         wifiSsid.value = data.ssid || '';
         wifiPass.value = data.pass || '';
-        wifiConfigStatus.textContent = 'Configuration WiFi chargée.';
+        wifiConfigStatus.textContent = 'Configuration réseau chargée.';
       } catch (err) {
-        wifiConfigStatus.textContent = 'Chargement WiFi échoué: ' + err;
+        wifiConfigStatus.textContent = 'Chargement réseau échoué: ' + err;
       }
     }
 
@@ -6219,7 +8033,7 @@
         ssid: wifiSsid.value.trim(),
         pass: wifiPass.value
       }), 'échec application');
-      wifiConfigStatus.textContent = 'Configuration WiFi appliquée (reconnexion en cours).';
+      wifiConfigStatus.textContent = 'Configuration réseau appliquée (reconnexion en cours).';
     }
 
     function nettoyerNomFlowCfg(moduleName) {
@@ -7222,6 +9036,108 @@
       return resolved;
     }
 
+    function poolLogicDeviceSlotSource(source) {
+      return source === 'supervisor' ? 'supervisor' : 'flow';
+    }
+
+    function poolLogicDeviceSlotRef(slot) {
+      const n = Number.parseInt(slot, 10);
+      if (!Number.isFinite(n) || n < 0 || n > 15) return '';
+      return 'd' + String(n).padStart(2, '0');
+    }
+
+    function poolLogicDeviceIoOutputModule(slot) {
+      const ref = poolLogicDeviceSlotRef(slot);
+      return ref ? ('io/output/' + ref) : '';
+    }
+
+    function poolLogicDeviceIoOutputNameKey(slot) {
+      const ref = poolLogicDeviceSlotRef(slot);
+      return ref ? (ref + '_name') : '';
+    }
+
+    function isPoolLogicDeviceSlotField(moduleName, key, doc) {
+      const cleanModule = nettoyerNomFlowCfg(moduleName).toLowerCase();
+      const cleanKey = String(key || '').trim().toLowerCase();
+      if (cleanModule !== 'poollogic/devices') return false;
+      if (!cleanKey.endsWith('_slot')) return false;
+      return !doc || String(doc.enum_set || '').trim() === 'poollogic_device_slot';
+    }
+
+    function poolLogicDeviceSlotLabel(source, slot, fallback) {
+      const n = Number.parseInt(slot, 10);
+      const ref = poolLogicDeviceSlotRef(n);
+      if (!ref) return String(fallback || slot);
+      const src = poolLogicDeviceSlotSource(source);
+      const cache = poolLogicDeviceIoOutputNames[src] || {};
+      const ioName = typeof cache[n] === 'string' ? cache[n].trim() : '';
+      const baseName = ioName || String(ioOutputPdmLabels[n] || '').trim();
+      const suffix = baseName ? (' [' + baseName + ']') : '';
+      return 'pd' + String(n) + ' - ' + ref + suffix;
+    }
+
+    function dynamicPoolLogicDeviceSlotOptions(source, enumOptions) {
+      const byValue = {};
+      if (Array.isArray(enumOptions)) {
+        enumOptions.forEach((opt) => {
+          if (!opt || typeof opt !== 'object') return;
+          const value = Number.parseInt(opt.value, 10);
+          if (Number.isFinite(value)) byValue[value] = opt;
+        });
+      }
+      const out = [];
+      for (let slot = 0; slot <= 15; slot += 1) {
+        const base = byValue[slot] ? Object.assign({}, byValue[slot]) : { value: slot };
+        base.value = slot;
+        base.label = poolLogicDeviceSlotLabel(source, slot, base.label);
+        out.push(base);
+      }
+      return out;
+    }
+
+    function configEnumOptionsForField(source, moduleName, key, doc) {
+      const options = (doc && Array.isArray(doc._enumOptions)) ? doc._enumOptions : null;
+      if (!options) return null;
+      if (isWaveshareProfile() && isPoolLogicDeviceSlotField(moduleName, key, doc)) {
+        return dynamicPoolLogicDeviceSlotOptions(source, options);
+      }
+      return options;
+    }
+
+    async function loadPoolLogicDeviceSlotLabels(source, forceReload) {
+      const src = poolLogicDeviceSlotSource(source);
+      if (!poolLogicDeviceIoOutputNames[src]) poolLogicDeviceIoOutputNames[src] = {};
+      const cache = poolLogicDeviceIoOutputNames[src];
+      const fetchOne = async (slot) => {
+        if (!forceReload && Object.prototype.hasOwnProperty.call(cache, slot)) return;
+        const moduleName = poolLogicDeviceIoOutputModule(slot);
+        const nameKey = poolLogicDeviceIoOutputNameKey(slot);
+        if (!moduleName || !nameKey) return;
+        try {
+          const url = src === 'supervisor'
+            ? ('/api/supervisorcfg/module?name=' + encodeURIComponent(moduleName))
+            : ('/api/flowcfg/module?name=' + encodeURIComponent(moduleName));
+          const res = src === 'supervisor'
+            ? await fetchWithBusyRetry(url, { cache: 'no-store' })
+            : await fetchFlowRemoteQueued(url, { cache: 'no-store' });
+          const payload = await res.json().catch(() => null);
+          if (!res.ok || !payload || payload.ok !== true || !payload.data || typeof payload.data !== 'object') {
+            cache[slot] = '';
+            return;
+          }
+          const raw = payload.data[nameKey];
+          cache[slot] = (typeof raw === 'string') ? raw.trim() : '';
+        } catch (err) {
+          cache[slot] = '';
+        }
+      };
+      const jobs = [];
+      for (let slot = 0; slot <= 15; slot += 1) {
+        jobs.push(fetchOne(slot));
+      }
+      await Promise.all(jobs);
+    }
+
     function closeColorPickerPopover() {
       if (!activeColorPickerPopover) return;
       const state = activeColorPickerPopover;
@@ -7527,16 +9443,15 @@
       return value;
     }
 
-    function configSupportsUnsetBindingPort(moduleName, key) {
+    function configIsBindingPortField(moduleName, key) {
       if (String(key || '').trim() !== 'binding_port') return false;
       const modulePath = String(moduleName || '').trim().toLowerCase();
-      return /^io\/input\/(?:a\d{2}|i\d{2})$/.test(modulePath);
+      return /^io\/(?:input\/(?:a\d{2}|i\d{2})|output\/d\d{2})$/.test(modulePath);
     }
 
-    function configUnsetBindingPortValue(doc) {
-      const typeName = String((doc && doc.type) || '').trim().toLowerCase();
-      if (typeName === 'uint8') return String(0xFF);
-      return String(0xFFFF);
+    function configNormalizeBindingPortSelectValue(value) {
+      const current = String(value ?? '').trim();
+      return (current.length === 0 || current === '65535') ? '0' : current;
     }
 
     function configDocFor(moduleName, key, extraSources) {
@@ -7701,16 +9616,81 @@
       return JSON.stringify(readConfigFieldValue(el)) !== JSON.stringify(initialValue);
     }
 
+    function flowCfgLocalApplyMessage(message) {
+      return String(message || '').trim() || tr('cfg.apply.busy', 'Application de la configuration en cours...');
+    }
+
+    function flowCfgSetControlsLocked(locked) {
+      const page = document.getElementById('page-control');
+      if (!page) return;
+      const nodes = page.querySelectorAll('.cfg-tree button,.control-fields input,.control-fields select,.control-fields textarea,.control-field-apply,#flowCfgApply,#flowCfgRefresh');
+      nodes.forEach((node) => {
+        if (!node) return;
+        if (locked) {
+          if (!Object.prototype.hasOwnProperty.call(node.dataset, 'cfgApplyPrevDisabled')) {
+            node.dataset.cfgApplyPrevDisabled = node.disabled ? '1' : '0';
+          }
+          node.disabled = true;
+          return;
+        }
+        if (!Object.prototype.hasOwnProperty.call(node.dataset, 'cfgApplyPrevDisabled')) return;
+        node.disabled = node.dataset.cfgApplyPrevDisabled === '1';
+        delete node.dataset.cfgApplyPrevDisabled;
+      });
+    }
+
+    function setFlowCfgLocalApplyBusy(active, message) {
+      flowCfgLocalApplyBusyDepth = Math.max(0, flowCfgLocalApplyBusyDepth + (active ? 1 : -1));
+      const busy = flowCfgLocalApplyBusyDepth > 0;
+      const text = flowCfgLocalApplyMessage(message);
+      const page = document.getElementById('page-control');
+      if (page) {
+        page.classList.toggle('is-config-applying', busy);
+        page.setAttribute('aria-busy', busy ? 'true' : 'false');
+      }
+      if (flowCfgApplyBusy) {
+        flowCfgApplyBusy.hidden = !busy;
+        const label = flowCfgApplyBusy.querySelector('span:last-child');
+        if (label) label.textContent = text;
+      }
+      if (flowCfgStatus && busy) {
+        flowCfgStatus.textContent = text;
+      }
+      if (flowCfgApplyBtn) {
+        if (busy) {
+          if (!flowCfgApplyBtnSavedText) flowCfgApplyBtnSavedText = flowCfgApplyBtn.textContent || '';
+          flowCfgApplyBtn.classList.add('is-pending');
+          flowCfgApplyBtn.textContent = tr('cfg.apply.busyShort', 'Application...');
+        } else {
+          flowCfgApplyBtn.classList.remove('is-pending');
+          if (flowCfgApplyBtnSavedText) {
+            flowCfgApplyBtn.textContent = flowCfgApplyBtnSavedText;
+            flowCfgApplyBtnSavedText = '';
+          }
+        }
+      }
+      flowCfgSetControlsLocked(busy);
+      if (!busy) {
+        updatePrimaryCfgApplyState();
+        document.querySelectorAll('.control-field-apply').forEach((button) => {
+          const row = button && button.closest('.control-row');
+          const input = row && row.querySelector('input.control-input,select.control-input,textarea.control-input');
+          if (input) updateControlFieldApplyState(input, button);
+        });
+      }
+    }
+
     function updateControlFieldApplyState(inputEl, applyBtn) {
       if (!inputEl || !applyBtn) return;
       const valid = validateConfigFieldValue(inputEl, { silent: true });
       const dirty = configFieldIsDirty(inputEl);
-      applyBtn.disabled = !dirty || !valid;
+      const busy = flowCfgLocalApplyBusyDepth > 0;
+      applyBtn.disabled = busy || !dirty || !valid;
       applyBtn.classList.toggle('is-dirty', dirty && valid);
-      applyBtn.classList.remove('is-pending');
+      if (!busy) applyBtn.classList.remove('is-pending');
       applyBtn.title = !valid
         ? 'Corrigez ce champ avant application'
-        : (dirty ? 'Appliquer ce changement' : 'Aucun changement a appliquer');
+        : (busy ? tr('cfg.apply.busy', 'Application de la configuration en cours...') : (dirty ? 'Appliquer ce changement' : 'Aucun changement a appliquer'));
       applyBtn.setAttribute('aria-label', applyBtn.title);
       const row = inputEl.closest('.control-row');
       if (row) row.classList.toggle('is-dirty', dirty);
@@ -7794,7 +9774,7 @@
         }
         row.appendChild(labelWrap);
 
-        const enumOptions = (doc && Array.isArray(doc._enumOptions)) ? doc._enumOptions : null;
+        const enumOptions = configEnumOptionsForField(opts.source || cfgTreeSelectedSource, moduleName, key, doc);
         let inputEl = null;
         const valueWrap = document.createElement('div');
         valueWrap.className = 'control-value-wrap';
@@ -7814,25 +9794,13 @@
           if (doc && typeof doc.display_format === 'string') {
             select.dataset.format = doc.display_format;
           }
-          const currentValue = String(value);
+          const isBindingPortField = configIsBindingPortField(moduleName, key);
+          const currentValue = isBindingPortField ? configNormalizeBindingPortSelectValue(value) : String(value);
           let hasSelectedOption = false;
-          const supportsUnsetBindingPort = configSupportsUnsetBindingPort(moduleName, key);
-          const unsetBindingPortValue = supportsUnsetBindingPort ? configUnsetBindingPortValue(doc) : '';
-          if (supportsUnsetBindingPort) {
-            const unsetOption = document.createElement('option');
-            unsetOption.value = unsetBindingPortValue;
-            unsetOption.textContent = 'Valeur non definie';
-            if (currentValue === unsetBindingPortValue || currentValue.length === 0) {
-              unsetOption.selected = true;
-              hasSelectedOption = true;
-            }
-            select.appendChild(unsetOption);
-          }
           enumOptions.forEach((opt) => {
             if (!opt || typeof opt !== 'object') return;
             const optionEl = document.createElement('option');
             optionEl.value = String(opt.value);
-            if (supportsUnsetBindingPort && optionEl.value === unsetBindingPortValue) return;
             optionEl.textContent = (typeof opt.label === 'string' && opt.label.length > 0)
               ? opt.label
               : String(opt.value);
@@ -7848,11 +9816,13 @@
           if (!hasSelectedOption && currentValue.length > 0) {
             const placeholder = document.createElement('option');
             placeholder.value = currentValue;
-            placeholder.textContent = 'Valeur non definie';
+            placeholder.textContent = isBindingPortField
+              ? ('Port inconnu (' + currentValue + ')')
+              : 'Valeur inconnue';
             placeholder.selected = true;
             select.insertBefore(placeholder, select.firstChild);
           }
-          storeConfigFieldInitialValue(select, value);
+          storeConfigFieldInitialValue(select, isBindingPortField ? parseConfigNumericValue(currentValue, 'int', '') : value);
           inputEl = select;
           inputEl.dataset.module = moduleName;
           valueWrap.appendChild(select);
@@ -8012,6 +9982,7 @@
 
     function renderFlowCfgFields(dataObj) {
       renderConfigFields(flowCfgFields, flowCfgCurrentModule, dataObj, {
+        source: 'flow',
         controlsPrimaryPane: true,
         perFieldApply: flowCfgApplyPerFieldEnabled(flowCfgCurrentModule),
         onApplyField: appliquerFlowCfgField
@@ -8025,6 +9996,7 @@
           Object.keys(flowCfgCurrentPdmExtension.data).length > 0) {
         renderConfigFields(flowCfgFields, flowCfgCurrentPdmExtension.module, flowCfgCurrentPdmExtension.data, {
           append: true,
+          source: 'flow',
           sectionTitle: flowCfgPdmSectionTitle(flowCfgCurrentModule, dataObj),
           controlsPrimaryPane: true,
           perFieldApply: flowCfgApplyPerFieldEnabled(flowCfgCurrentModule),
@@ -8039,7 +10011,7 @@
       const match = cleanModule.match(/^(?:io\/output\/)?d(\d{1,2})$/);
       if (match) {
         const slot = Number.parseInt(match[1], 10);
-        if (Number.isFinite(slot) && slot >= 0 && slot <= 7) return slot;
+        if (Number.isFinite(slot) && slot >= 0 && slot <= 15) return slot;
       }
       const data = (dataObj && typeof dataObj === 'object') ? dataObj : null;
       if (data) {
@@ -8047,7 +10019,7 @@
         if (key) {
           const keyMatch = String(key).match(/^d(\d{2})_name$/i);
           const slot = keyMatch ? Number.parseInt(keyMatch[1], 10) : -1;
-          if (Number.isFinite(slot) && slot >= 0 && slot <= 7) return slot;
+          if (Number.isFinite(slot) && slot >= 0 && slot <= 15) return slot;
         }
       }
       return -1;
@@ -8089,7 +10061,7 @@
     }
 
     async function loadPrimarySupervisorPdmExtensionData(moduleName, dataObj) {
-      if (!isFlowIOS3Profile()) return null;
+      if (!isWaveshareProfile()) return null;
       const pdmModule = flowCfgPdmModuleForIoOutput(moduleName, dataObj);
       if (!pdmModule) return null;
       try {
@@ -8112,6 +10084,7 @@
 
     function renderPrimarySupervisorCfgFields(dataObj) {
       renderConfigFields(flowCfgFields, supCfgCurrentModule, dataObj, {
+        source: 'supervisor',
         controlsPrimaryPane: true,
         perFieldApply: flowCfgApplyPerFieldEnabled(supCfgCurrentModule),
         onApplyField: appliquerPrimaryCfgField
@@ -8125,6 +10098,7 @@
           Object.keys(supCfgCurrentPdmExtension.data).length > 0) {
         renderConfigFields(flowCfgFields, supCfgCurrentPdmExtension.module, supCfgCurrentPdmExtension.data, {
           append: true,
+          source: 'supervisor',
           sectionTitle: flowCfgPdmSectionTitle(supCfgCurrentModule, dataObj),
           controlsPrimaryPane: true,
           perFieldApply: flowCfgApplyPerFieldEnabled(supCfgCurrentModule),
@@ -8199,6 +10173,9 @@
         if (pdmModule) {
           await ensureCfgDocsForModule(pdmModule);
         }
+        if (isWaveshareProfile() && m === 'poollogic/devices') {
+          await loadPoolLogicDeviceSlotLabels('flow', true);
+        }
         flowCfgCurrentModule = m;
         flowCfgCurrentData = data.data;
         flowCfgCurrentPdmExtension = await loadFlowCfgPdmExtensionData(m, flowCfgCurrentData);
@@ -8231,9 +10208,12 @@
           throw new Error('lecture module supervisor impossible');
         }
         await ensureCfgDocsForModule(m);
-        const pdmModule = isFlowIOS3Profile() ? flowCfgPdmModuleForIoOutput(m, data.data) : '';
+        const pdmModule = isWaveshareProfile() ? flowCfgPdmModuleForIoOutput(m, data.data) : '';
         if (pdmModule) {
           await ensureCfgDocsForModule(pdmModule);
+        }
+        if (isWaveshareProfile() && m === 'poollogic/devices') {
+          await loadPoolLogicDeviceSlotLabels('supervisor', true);
         }
         supCfgCurrentModule = m;
         supCfgCurrentData = data.data;
@@ -8511,6 +10491,7 @@
         return;
       }
 
+      setFlowCfgLocalApplyBusy(true, tr('cfg.apply.busyField', 'Application locale du champ « {field} »...').replace('{field}', key));
       try {
         applyBtn.disabled = true;
         applyBtn.classList.add('is-pending');
@@ -8537,6 +10518,9 @@
       } catch (err) {
         flowCfgStatus.textContent = 'Application locale du champ echouee: ' + err;
         updateControlFieldApplyState(inputEl, applyBtn);
+      } finally {
+        applyBtn.classList.remove('is-pending');
+        setFlowCfgLocalApplyBusy(false);
       }
     }
 
@@ -8564,6 +10548,7 @@
 
     async function appliquerPrimaryCfg() {
       if (cfgTreeSelectedSource === 'supervisor') {
+        setFlowCfgLocalApplyBusy(true, tr('cfg.apply.busy', 'Application de la configuration en cours...'));
         try {
           const patch = buildPrimaryCfgPatchJson();
           const body = new URLSearchParams();
@@ -8584,6 +10569,8 @@
           await refreshWebUiLocale(true);
         } catch (err) {
           flowCfgStatus.textContent = 'Application cfg locale échouée: ' + err;
+        } finally {
+          setFlowCfgLocalApplyBusy(false);
         }
         return;
       }
@@ -8599,9 +10586,12 @@
       if (tone === 'busy') flowCfgBackupStatus.classList.add('is-busy');
     }
 
-    function setFlowCfgBackupProgress(percent, visible) {
+    function setFlowCfgBackupProgress(percent, visible, label) {
       const show = !!visible;
       if (flowCfgBackupProgress) flowCfgBackupProgress.hidden = !show;
+      if (flowCfgBackupProgressLabel && typeof label === 'string' && label.trim().length > 0) {
+        flowCfgBackupProgressLabel.textContent = label.trim();
+      }
 
       if (!show) {
         if (flowCfgBackupPct) flowCfgBackupPct.textContent = '0%';
@@ -8630,15 +10620,20 @@
     }
 
     function flowCfgBackupStoreLabel(storeName) {
+      if (isWaveshareProfile()) return webProfileName || 'Waveshare';
       return storeName === 'supervisor' ? webProfileName : 'flow.io';
     }
 
     function flowCfgBackupStoreFetchImpl(storeName) {
-      return storeName === 'supervisor' ? fetch : fetchFlowRemoteQueued;
+      return storeName === 'supervisor' ? fetch : fetchFlowCfgEndpoint;
     }
 
     function flowCfgBackupStoreBasePath(storeName) {
       return storeName === 'supervisor' ? '/api/supervisorcfg' : '/api/flowcfg';
+    }
+
+    function flowCfgBackupStoreNames() {
+      return isWaveshareProfile() ? ['flow'] : ['supervisor', 'flow'];
     }
 
     function flowCfgBackupIsoDateForFile(dateLike) {
@@ -8950,7 +10945,7 @@
       const startedAt = Date.now();
       try {
         setFlowCfgBackupStatus('Préparation de l\'export ConfigStore...', 'busy');
-        setFlowCfgBackupProgress(0, true);
+        setFlowCfgBackupProgress(0, true, 'Export ConfigStore');
         const createdAt = new Date();
         const backupDoc = {
           format: flowCfgBackupFormat,
@@ -8976,7 +10971,7 @@
           }
         };
 
-        const stores = ['supervisor', 'flow'];
+        const stores = flowCfgBackupStoreNames();
         const modulesByStore = {};
         let totalModuleCount = 0;
         for (const storeName of stores) {
@@ -8990,7 +10985,7 @@
 
         let exportedModuleCount = 0;
         if (totalModuleCount === 0) {
-          setFlowCfgBackupProgress(100, true);
+          setFlowCfgBackupProgress(100, true, 'Export ConfigStore');
         }
 
         for (const storeName of stores) {
@@ -9012,7 +11007,7 @@
                 reason: String(err || '').trim() || 'lecture module impossible'
               });
               exportedModuleCount += 1;
-              setFlowCfgBackupProgress((exportedModuleCount / totalModuleCount) * 100, true);
+              setFlowCfgBackupProgress((exportedModuleCount / totalModuleCount) * 100, true, 'Export ConfigStore');
               continue;
             }
             if (modulePayload.truncated) {
@@ -9027,7 +11022,7 @@
               });
             });
             exportedModuleCount += 1;
-            setFlowCfgBackupProgress((exportedModuleCount / totalModuleCount) * 100, true);
+            setFlowCfgBackupProgress((exportedModuleCount / totalModuleCount) * 100, true, 'Export ConfigStore');
           }
           if (storeName === 'flow') {
             backupDoc.meta.flow_reachable = true;
@@ -9051,7 +11046,7 @@
         const fileName = 'flowio-configstore-backup-' + flowCfgBackupIsoDateForFile(createdAt) + '.json';
         flowCfgBackupDownloadText(fileName, serialized);
         const durationMs = Date.now() - startedAt;
-        setFlowCfgBackupProgress(100, true);
+        setFlowCfgBackupProgress(100, true, 'Export ConfigStore');
         const failedSummary = failedModuleErrors.length > 0
           ? ' Modules ignorés: ' + failedModuleErrors.length + ' (' + failedModuleErrors.join(', ') + ').'
           : '';
@@ -9071,7 +11066,7 @@
       setFlowCfgBackupBusy(true);
       const startedAt = Date.now();
       try {
-        setFlowCfgBackupProgress(0, false);
+        setFlowCfgBackupProgress(0, true, 'Import ConfigStore');
         let parsedDoc = null;
         try {
           parsedDoc = JSON.parse(String(rawText || ''));
@@ -9089,13 +11084,41 @@
           flow: { modules_applied: 0, modules_skipped: 0, patches_applied: 0 }
         };
 
-        const stores = ['supervisor', 'flow'];
+        const stores = flowCfgBackupStoreNames();
+        const importPlan = {};
+        let totalPatchCount = 0;
+        stores.forEach((storeName) => {
+          const storeData = backupDoc.stores[storeName];
+          const moduleNames = Object.keys(storeData.modules || {}).sort((left, right) => left.localeCompare(right));
+          const truncatedSet = new Set(storeData.truncated_modules || []);
+          const redactedSet = flowCfgBackupBuildRedactedFieldSet(storeData.redacted_fields);
+          importPlan[storeName] = {};
+          moduleNames.forEach((moduleName) => {
+            if (truncatedSet.has(moduleName)) return;
+            const modulePatch = flowCfgBackupBuildModulePatch(
+              moduleName,
+              storeData.modules[moduleName],
+              redactedSet
+            );
+            if (Object.keys(modulePatch).length === 0) return;
+            const chunkPatches = flowCfgBackupSplitModulePatch(
+              moduleName,
+              modulePatch,
+              flowCfgBackupPatchTargetBytes
+            );
+            importPlan[storeName][moduleName] = chunkPatches;
+            totalPatchCount += chunkPatches.length;
+          });
+        });
+        let appliedPatchCount = 0;
+        if (totalPatchCount === 0) {
+          setFlowCfgBackupProgress(100, true, 'Import ConfigStore');
+        }
         for (const storeName of stores) {
           const storeData = backupDoc.stores[storeName];
           const storeLabel = flowCfgBackupStoreLabel(storeName);
           const moduleNames = Object.keys(storeData.modules || {}).sort((left, right) => left.localeCompare(right));
           const truncatedSet = new Set(storeData.truncated_modules || []);
-          const redactedSet = flowCfgBackupBuildRedactedFieldSet(storeData.redacted_fields);
 
           for (let moduleIndex = 0; moduleIndex < moduleNames.length; moduleIndex += 1) {
             const moduleName = moduleNames[moduleIndex];
@@ -9104,21 +11127,13 @@
               continue;
             }
 
-            const modulePatch = flowCfgBackupBuildModulePatch(
-              moduleName,
-              storeData.modules[moduleName],
-              redactedSet
-            );
-            if (Object.keys(modulePatch).length === 0) {
+            const chunkPatches = (importPlan[storeName] && importPlan[storeName][moduleName])
+              ? importPlan[storeName][moduleName]
+              : [];
+            if (chunkPatches.length === 0) {
               report[storeName].modules_skipped += 1;
               continue;
             }
-
-            const chunkPatches = flowCfgBackupSplitModulePatch(
-              moduleName,
-              modulePatch,
-              flowCfgBackupPatchTargetBytes
-            );
 
             for (let chunkIndex = 0; chunkIndex < chunkPatches.length; chunkIndex += 1) {
               setFlowCfgBackupStatus(
@@ -9129,6 +11144,10 @@
               );
               await flowCfgBackupApplyPatch(storeName, JSON.stringify(chunkPatches[chunkIndex]));
               report[storeName].patches_applied += 1;
+              appliedPatchCount += 1;
+              if (totalPatchCount > 0) {
+                setFlowCfgBackupProgress((appliedPatchCount / totalPatchCount) * 100, true, 'Import ConfigStore');
+              }
             }
 
             report[storeName].modules_applied += 1;
@@ -9145,6 +11164,7 @@
             + report.flow.patches_applied + ' patch(s).',
           'ok'
         );
+        setFlowCfgBackupProgress(100, true, 'Import ConfigStore');
       } catch (err) {
         setFlowCfgBackupStatus('Import échoué: ' + err, 'error');
       } finally {
@@ -9162,7 +11182,7 @@
     }
 
     async function callSystemAction(target, action) {
-      const flowLocalProfile = isFlowIOS3Profile();
+      const flowLocalProfile = isWaveshareProfile();
       let endpoint = '/api/system/reboot';
       if (target === 'flow' && action === 'reboot') {
         endpoint = flowLocalProfile ? '/api/system/reboot' : '/api/flow/system/reboot';
@@ -9196,6 +11216,7 @@
       }
       pendingSystemActionCountdowns.delete(button);
       button.disabled = false;
+      button.classList.remove('is-counting-down');
       if (button.dataset.defaultHtml) {
         button.innerHTML = button.dataset.defaultHtml;
       } else {
@@ -9219,15 +11240,19 @@
 
       let remaining = rebootActionDelaySeconds;
       button.disabled = true;
+      button.classList.add('is-counting-down');
+      const countdownNode = document.createElement('span');
+      countdownNode.className = 'system-action-countdown';
+      button.replaceChildren(countdownNode);
 
       const tick = () => {
-        button.textContent = remaining + ' s';
+        countdownNode.textContent = remaining + ' s';
         if (systemStatusText) systemStatusText.textContent = countdownLabel + ' dans ' + remaining + ' s';
 
         if (remaining <= 1) {
           pendingSystemActionCountdowns.delete(button);
           runAsyncTaskSafely(async () => {
-            button.textContent = '...';
+            countdownNode.textContent = '…';
             try {
               await actionRunner();
             } catch (err) {
@@ -9249,20 +11274,8 @@
     }
 
     function initUpgradeBindings() {
-      upgradeConfigFieldDefs.forEach((def) => {
-        if (!def || !def.input || !def.button) return;
-        updateUpgradeConfigFieldApplyState(def);
-        def.input.addEventListener('input', () => updateUpgradeConfigFieldApplyState(def));
-        def.input.addEventListener('change', () => updateUpgradeConfigFieldApplyState(def));
-        bindClickAction(def.button, async () => {
-          try {
-            await applyUpgradeConfigField(def);
-          } catch (err) {
-            setUpgradeMessage('Échec de l\'enregistrement : ' + err);
-          }
-        });
-      });
       bindClickAction(checkUpdatesBtn, () => checkFirmwareUpdates());
+      bindClickAction(cancelUpgradeUiBtn, () => cancelUpgradeUiSession());
     }
 
     function initStatusBindings() {
@@ -9280,6 +11293,7 @@
           showPoolMeasuresError(err);
         }
       });
+      bindClickAction(poolConfigRefreshBtn, () => loadPoolConfig(true));
     }
 
     function initInfoBindings() {
@@ -9329,15 +11343,15 @@
         mettreAJourEtatVisibiliteMotDePasse(
           wifiPass,
           toggleWifiPassBtn,
-          tr('wifi.password.show', 'Afficher le mot de passe WiFi'),
-          tr('wifi.password.hide', 'Masquer le mot de passe WiFi')
+          tr('wifi.password.show', 'Afficher le mot de passe réseau'),
+          tr('wifi.password.hide', 'Masquer le mot de passe réseau')
         );
         toggleWifiPassBtn.addEventListener('click', () => {
           basculerVisibiliteMotDePasse(
             wifiPass,
             toggleWifiPassBtn,
-            tr('wifi.password.show', 'Afficher le mot de passe WiFi'),
-            tr('wifi.password.hide', 'Masquer le mot de passe WiFi')
+            tr('wifi.password.show', 'Afficher le mot de passe réseau'),
+            tr('wifi.password.hide', 'Masquer le mot de passe réseau')
           );
         });
       }
@@ -9352,7 +11366,7 @@
         try {
           await saveWifiConfig();
         } catch (err) {
-          wifiConfigStatus.textContent = tr('system.action.wifiApplyFailed', 'Application WiFi échouée') + ': ' + err;
+          wifiConfigStatus.textContent = tr('system.action.wifiApplyFailed', 'Application réseau échouée') + ': ' + err;
         }
       });
     }
@@ -9430,10 +11444,14 @@
     }
 
     function initGlobalUiBindings() {
+      if (themeToggle) {
+        themeToggle.addEventListener('change', () => {
+          applyThemePreference(themeToggle.checked ? 'dark' : 'light', true);
+        });
+      }
       document.addEventListener('visibilitychange', () => {
         const activePageId = getActivePageId();
         const onUpgradePage = activePageId === 'page-system';
-        const onTerminalPage = activePageId === 'page-terminal';
         if (document.hidden || !onUpgradePage) {
           stopUpgradeStatusPolling();
         } else {
@@ -9444,11 +11462,20 @@
         } else {
           startPoolMeasuresTimer();
         }
-        if (document.hidden || !onTerminalPage) {
+        if (document.hidden || activePageId !== 'page-io-summary') {
+          stopIoSummaryTimer();
+        } else {
+          startIoSummaryTimer();
+          refreshIoSummary(false).catch(() => {});
+        }
+        if (document.hidden || !logsOverlayOpen) {
           closeLogSocket();
-          setWsStatusText(tr('terminal.inactive', 'inactif'));
-        } else if (terminalActive) {
+          if (!logsOverlayOpen) setWsStatusText(tr('terminal.inactive', 'inactif'));
+        } else if (logsOverlayOpen) {
           connectLogSocket();
+        }
+        if (!document.hidden && activePageId === 'page-activity-log') {
+          refreshActivityLog(false).catch(() => {});
         }
         if (document.hidden || activePageId !== 'page-info') {
           stopInfoPolling();
@@ -9458,6 +11485,8 @@
         if (!document.hidden) {
           refreshWebUiLocale(true).catch(() => {});
           refreshAppHeaderWifi(true).catch(() => {});
+          refreshAppHeaderTime(true).catch(() => {});
+          probeHeaderReachability().catch(() => {});
         }
       });
     }
@@ -9471,17 +11500,20 @@
     initConfigBindings();
     initGlobalUiBindings();
 
+    applyThemePreference(currentThemePreference(), false);
     applyWebUiLocale(webUiLocale);
     syncMenuIconFallbacks();
     renderUpgradeJourney(readUpgradeUiSession() || { phase: 'idle', target: '', detail: tr('updates.none', 'Aucune opération en cours.') });
     refreshWebUiLocale(true).catch(() => {});
     resumeUpgradeReconnectFlow();
     startAppHeaderClock();
+    startHeaderReachabilityProbe();
     refreshAppHeader(resolveInitialPageId());
     const initialPageId = resolveInitialPageId();
     const startInitialUi = async () => {
       await loadWebMeta().catch(() => {});
       refreshAppHeaderWifi(true).catch(() => {});
+      refreshAppHeaderTime(true).catch(() => {});
       showPage(initialPageId, { deferHeavyMs: 260 });
     };
     if (typeof window.requestAnimationFrame === 'function') {
