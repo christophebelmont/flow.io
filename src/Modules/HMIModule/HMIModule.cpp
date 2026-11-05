@@ -2019,7 +2019,9 @@ void HMIModule::handleDriverEvent_(const HmiEvent& e)
             break;
     }
 
-    if (changed) {
+    // Local Nextion scripts may clear the menu even when the submitted value
+    // is unchanged or rejected. Restore the authoritative view in either case.
+    if (changed || configInputEvent) {
         viewDirty_ = true;
     }
     if (configInputEvent) {
